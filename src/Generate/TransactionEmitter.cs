@@ -59,7 +59,7 @@ namespace MiiXRay.Generate
         private readonly TransactionContract _contract;
         private readonly MiiTransaction _transaction;
         private readonly ExpressionTranslator _translator;
-        private readonly UniqueNames _names = new UniqueNames();
+        private readonly UniqueNames _names;
         private readonly Dictionary<string, ActionSymbol> _actions = new Dictionary<string, ActionSymbol>();
         private readonly List<LoopScope> _loops = new List<LoopScope>();
 
@@ -74,16 +74,7 @@ namespace MiiXRay.Generate
             _contract = contract;
             _transaction = contract.Transaction;
             _translator = new ExpressionTranslator(this);
-
-            foreach (string reserved in new string[] { "request", "response", "queryService", "pluginService" })
-            {
-                _names.Reserve(reserved);
-            }
-
-            foreach (PropertySpec local in contract.Locals)
-            {
-                _names.Reserve(local.Name);
-            }
+            _names = contract.LocalNames;
 
             CollectExpressionTexts();
 
@@ -181,12 +172,19 @@ namespace MiiXRay.Generate
             {
                 case ActionKind.TransactionCall:
                 case ActionKind.Xacute:
-                    symbol.VariableType = CsType.Class(symbol.Callee.ClassName + ".Response");
-                    symbol.Initializer = "new " + symbol.Callee.ClassName + ".Response()";
+                    if (symbol.Callee.ReturnType == null)
+                    {
+                        // the called transaction has no outputs: nothing to keep
+                        symbol.Variable = null;
+                        return symbol;
+                    }
+
+                    symbol.VariableType = symbol.Callee.ReturnType;
+                    symbol.Initializer = symbol.Callee.Outputs.Count == 1 ? ContractBuilder.EmptyValue(symbol.VariableType) : "null";
                     break;
                 case ActionKind.Query:
                     symbol.VariableType = CsType.RowsetOf(symbol.Query.Result);
-                    symbol.Initializer = "new " + symbol.VariableType.Name + "()";
+                    symbol.Initializer = "[]";
                     break;
                 case ActionKind.Catch:
                     symbol.VariableType = CsType.Class("Exception");
@@ -194,15 +192,15 @@ namespace MiiXRay.Generate
                     break;
                 case ActionKind.Document:
                     symbol.VariableType = CsType.RowsetOf(symbol.Document);
-                    symbol.Initializer = "new " + symbol.VariableType.Name + "()";
+                    symbol.Initializer = "[]";
                     break;
                 case ActionKind.Xml:
                     symbol.VariableType = CsType.Xml;
-                    symbol.Initializer = "new XmlDocument()";
+                    symbol.Initializer = "new()";
                     break;
                 default:
                     symbol.VariableType = CsType.Class("PluginResult");
-                    symbol.Initializer = "new PluginResult()";
+                    symbol.Initializer = "new()";
                     break;
             }
 
@@ -282,7 +280,7 @@ namespace MiiXRay.Generate
 
         private RowsetContract DocumentContract(MiiActionDefinition definition)
         {
-            RowsetContract contract = _contract.CreateNestedContract(definition.Name, "column specification of " + definition.Name);
+            RowsetContract contract = _context.CreateContract(definition.Name, "column specification of " + definition.Name + " in " + _transaction.Path);
 
             foreach (System.Xml.XmlElement column in MiiXml.Children(definition.Property("ColumnSpecifications"), "ContextItem"))
             {
@@ -294,10 +292,20 @@ namespace MiiXRay.Generate
                 }
             }
 
-            return _contract.ShareIdentical(contract);
+            return _context.ShareIdentical(contract);
         }
 
         // ------------------------------------------------------------------ ISymbolResolver
+
+        public string TransactionPath
+        {
+            get { return _transaction.Path; }
+        }
+
+        public string NewName(string wanted)
+        {
+            return _names.Claim(wanted);
+        }
 
         public void Note(string message)
         {
@@ -315,11 +323,11 @@ namespace MiiXRay.Generate
 
                 if (input != null)
                 {
-                    return TypedCode.Primary("request." + input.Name, input.Type);
+                    return TypedCode.Primary(input.Name, input.Type);
                 }
 
                 PropertySpec output = _contract.FindOutput(member);
-                return output == null ? null : TypedCode.Primary("response." + output.Name, output.Type);
+                return output == null ? null : TypedCode.Primary(output.Name, output.Type);
             }
 
             if (scope == "Local")
@@ -330,7 +338,7 @@ namespace MiiXRay.Generate
 
             if (Array.IndexOf(SharedScopes, scope) >= 0)
             {
-                return TypedCode.Primary("pluginService.GetProperty(" + CsLiteral.String(reference.Path) + ")", CsType.Object);
+                return TypedCode.Primary("plugins.GetProperty(" + CsLiteral.String(reference.Path) + ")", CsType.Object);
             }
 
             LoopScope loop = FindLoop(scope);
@@ -407,16 +415,14 @@ namespace MiiXRay.Generate
             switch (symbol.Kind)
             {
                 case ActionKind.TransactionCall:
-                    PropertySpec output = symbol.Callee.FindOutput(member);
-                    return output == null ? null : TypedCode.Primary(symbol.Variable + "." + output.Name, output.Type);
+                    return symbol.Callee.OutputOf(symbol.Variable, member);
                 case ActionKind.Xacute:
                     if (member != "Results")
                     {
                         return null;
                     }
 
-                    PropertySpec returned = symbol.Callee.FindOutput(symbol.Query.Query.XacuteOutputParameter);
-                    return returned == null ? variable : TypedCode.Primary(symbol.Variable + "." + returned.Name, returned.Type);
+                    return symbol.Callee.OutputOf(symbol.Variable, symbol.Query.Query.XacuteOutputParameter) ?? variable;
                 case ActionKind.Query:
                     if (member == "Results")
                     {

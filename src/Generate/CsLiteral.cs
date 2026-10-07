@@ -7,7 +7,8 @@ namespace MiiXRay.Generate
     /// <summary>C# literals.</summary>
     public static class CsLiteral
     {
-        /// <summary>A string literal: regular with escapes, or verbatim (@"...") for long multi-line text such as SQL or XML.</summary>
+        /// <summary>A string literal: a raw string literal for multi-line text (SQL, XML), a verbatim literal (@"...") for
+        /// text with backslashes (regular expressions, paths), else a regular literal.</summary>
         public static string String(string value)
         {
             if (value == null)
@@ -15,13 +16,58 @@ namespace MiiXRay.Generate
                 return "null";
             }
 
-            bool multiLine = value.IndexOf('\n') >= 0;
-
-            if (multiLine && value.Length > 60 && !HasOtherControlCharacters(value))
+            if (HasOtherControlCharacters(value))
             {
-                return "@\"" + value.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", Environment.NewLine).Replace("\"", "\"\"") + "\"";
+                return Regular(value);
             }
 
+            if (value.IndexOf('\n') >= 0 || value.IndexOf('\r') >= 0)
+            {
+                return Raw(value);
+            }
+
+            if (value.IndexOf('"') >= 0 && value.IndexOf("\"\"\"", StringComparison.Ordinal) < 0 && !value.StartsWith("\"", StringComparison.Ordinal)
+                && !value.EndsWith("\"", StringComparison.Ordinal) && value.IndexOf('\t') < 0)
+            {
+                // XML and the like on one line: """<a x="1"/>""" instead of escaped quotes
+                return "\"\"\"" + value + "\"\"\"";
+            }
+
+            if (value.IndexOf('\\') >= 0 && value.IndexOf('\t') < 0)
+            {
+                return "@\"" + value.Replace("\"", "\"\"") + "\"";
+            }
+
+            return Regular(value);
+        }
+
+        /// <summary>"""(newline)text(newline)""" - the closing quotes stand at the start of their line, so indenting every
+        /// line of the literal by the same amount leaves the value unchanged.</summary>
+        private static string Raw(string value)
+        {
+            string text = value.Replace("\r\n", "\n").Replace('\r', '\n');
+            int longest = 0;
+            int run = 0;
+
+            foreach (char c in text)
+            {
+                run = c == '"' ? run + 1 : 0;
+                longest = Math.Max(longest, run);
+            }
+
+            string quotes = new string('"', Math.Max(3, longest + 1));
+            return quotes + "\n" + text + "\n" + quotes;
+        }
+
+        /// <summary>The text of an interpolated string part: escaped like a regular literal, braces doubled.</summary>
+        public static string InterpolatedText(string value)
+        {
+            string literal = Regular(value);
+            return literal.Substring(1, literal.Length - 2).Replace("{", "{{").Replace("}", "}}");
+        }
+
+        private static string Regular(string value)
+        {
             StringBuilder result = new StringBuilder("\"");
 
             foreach (char c in value)

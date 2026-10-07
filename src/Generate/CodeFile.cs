@@ -20,32 +20,37 @@ namespace MiiXRay.Generate
         public List<string> Notes = new List<string>();
     }
 
-    /// <summary>Assembles the generated file: header, transaction classes, query classes, service interfaces and the runtime.</summary>
+    /// <summary>Assembles the generated file (C# 12): header, the logic class with one method per transaction, the
+    /// records (results and rows), the service interfaces and the runtime.</summary>
     public static class CodeFile
     {
-        public const string ToolVersion = "1.1.0";
+        public const string ToolVersion = "2.0.0";
 
         public static XRayResult Generate(ObjectGraph graph, string sourceDescription)
         {
             GenerationContext context = new GenerationContext(graph);
             ContractBuilder.Build(context);
 
-            // bodies first: they complete the rowset contracts (columns read by XPath)
-            Dictionary<TransactionContract, List<string>> methods = new Dictionary<TransactionContract, List<string>>();
+            // methods first: they complete the row records (columns read by XPath)
+            List<string> methods = new List<string>();
 
             foreach (MiiTransaction transaction in graph.Transactions)
             {
                 TransactionContract contract = context.Transactions[transaction];
-                methods[contract] = new TransactionEmitter(context, contract).EmitExecuteMethod();
+                methods.Add(string.Empty);
+                methods.AddRange(new TransactionEmitter(context, contract).EmitMethod(transaction == graph.Root));
             }
 
             TransactionContract root = context.Transactions[graph.Root];
             List<string> lines = new List<string>();
             lines.AddRange(Header(context, root, sourceDescription));
+            lines.Add("#nullable disable");
+            lines.Add(string.Empty);
             lines.Add("using System;");
             lines.Add("using System.Collections.Generic;");
             lines.Add("using System.Globalization;");
             lines.Add("using System.IO;");
+            lines.Add("using System.Linq;");
             lines.Add("using System.Reflection;");
             lines.Add("using System.Text;");
             lines.Add("using System.Text.RegularExpressions;");
@@ -53,45 +58,24 @@ namespace MiiXRay.Generate
             lines.Add("using System.Xml;");
             lines.Add("using System.Xml.Xsl;");
             lines.Add(string.Empty);
-            lines.Add("namespace XRay." + root.ClassName + "Logic");
+            lines.Add("namespace XRay." + root.MethodName + ";");
+            lines.Add(string.Empty);
+            lines.Add("/// <summary>");
+            lines.Add("/// The logic of " + XmlText(root.Transaction.Path) + " and of every transaction it calls, one method each.");
+            lines.Add("/// </summary>");
+            lines.Add("public sealed class " + context.ClassName + "(IQueryService queries, IPluginService plugins)");
             lines.Add("{");
-            List<string> body = new List<string>();
-            body.Add("#region Transactions");
-
-            foreach (MiiTransaction transaction in graph.Transactions)
-            {
-                TransactionContract contract = context.Transactions[transaction];
-                body.Add(string.Empty);
-                body.AddRange(TransactionClass(contract, methods[contract]));
-            }
-
-            body.Add(string.Empty);
-            body.Add("#endregion");
-            List<QueryContract> queries = QueryClasses(context);
-
-            if (queries.Count > 0)
-            {
-                body.Add(string.Empty);
-                body.Add("#region Queries");
-
-                foreach (QueryContract query in queries)
-                {
-                    body.Add(string.Empty);
-                    body.AddRange(QueryClass(query));
-                }
-
-                body.Add(string.Empty);
-                body.Add("#endregion");
-            }
-
-            body.Add(string.Empty);
-            body.AddRange(ResourceLines("MiiXRay.RuntimeSource.txt"));
-            lines.AddRange(TransactionEmitter.Indent(body));
+            methods.RemoveAt(0);
+            lines.AddRange(TransactionEmitter.Indent(methods));
             lines.Add("}");
+            lines.AddRange(Records(context));
+            lines.Add(string.Empty);
+            lines.AddRange(ResourceLines("MiiXRay.RuntimeSource.txt"));
 
+            string text = string.Join("\n", CodeLayout.AddBlankLines(lines).ToArray()).Replace("\r\n", "\n");
             XRayResult result = new XRayResult();
-            result.Code = string.Join(Environment.NewLine, CodeLayout.AddBlankLines(lines).ToArray()) + Environment.NewLine;
-            result.RootClassName = root.ClassName;
+            result.Code = text.Replace("\n", Environment.NewLine) + Environment.NewLine;
+            result.RootClassName = root.MethodName;
             result.TransactionCount = graph.Transactions.Count;
             result.QueryCount = graph.Queries.Count;
             result.Missing.AddRange(graph.Missing);
@@ -107,12 +91,12 @@ namespace MiiXRay.Generate
             lines.Add("// MII X-Ray of " + root.Transaction.Path);
             lines.Add("// Generated " + DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) + " by MII X-Ray " + ToolVersion + " from " + sourceDescription);
             lines.Add("//");
-            lines.Add("// The logic of the transaction and of every transaction and query it uses, as plain C# (C# 5, .NET Framework 4.8).");
-            lines.Add("// It shows what the code does, not how MII runs it: MII runtime settings are left out, a called transaction is a");
-            lines.Add("// static method, a query goes through IQueryService, an MII action without a C# equivalent through IPluginService.");
-            lines.Add("// The Mii class at the end stands in for the MII expression functions and the XML handling.");
+            lines.Add("// The logic of the transaction and of every transaction and query it uses, as C# 12 (.NET 8). It shows what the");
+            lines.Add("// code does, not how MII runs it: MII runtime settings and default values are left out, a called transaction is a");
+            lines.Add("// method, a query goes through IQueryService, an MII action without a C# equivalent through IPluginService.");
+            lines.Add("// The Mii class at the end implements the MII expression functions and the XML handling.");
             lines.Add("//");
-            lines.Add("// Entry point: " + root.ClassName + ".Execute(request, queryService, pluginService)");
+            lines.Add("// Entry point: new " + context.ClassName + "(queries, plugins)." + root.MethodName + "(...)");
             lines.Add("//");
             lines.AddRange(ReadingRules());
             lines.Add("//");
@@ -120,12 +104,12 @@ namespace MiiXRay.Generate
 
             foreach (MiiTransaction transaction in context.Graph.Transactions)
             {
-                lines.Add("//   " + context.Transactions[transaction].ClassName + " = " + transaction.Path);
+                lines.Add("//   " + context.Transactions[transaction].MethodName + " = " + transaction.Path);
             }
 
             lines.Add("//");
             lines.Add("// Call tree (execution order; [if X], [else X], [case n of X], [loop X] = once per item, [on error X] = in the handler of the catch X):");
-            lines.Add("//   " + root.ClassName);
+            lines.Add("//   " + root.MethodName);
             CallTree(root, "//     ", new List<TransactionContract>(), lines);
 
             if (context.Graph.Queries.Count > 0)
@@ -139,9 +123,9 @@ namespace MiiXRay.Generate
                 }
             }
 
-            lines.Add("//");
             if (context.Graph.Missing.Count > 0)
             {
+                lines.Add("//");
                 lines.Add("// Not found (called through IPluginService instead):");
 
                 foreach (string missing in context.Graph.Missing)
@@ -152,6 +136,7 @@ namespace MiiXRay.Generate
 
             if (context.Notes.Count > 0)
             {
+                lines.Add("//");
                 lines.Add("// Notes (" + context.Notes.Count + "):");
 
                 foreach (string note in context.Notes)
@@ -169,13 +154,15 @@ namespace MiiXRay.Generate
         {
             List<string> lines = new List<string>();
             lines.Add("// How to read this file:");
-            lines.Add("//   - Every MII transaction is a static class: Execute(request, ...) is its logic, Request and Response its");
-            lines.Add("//     interface (Request holds the MII default values). A transaction call is a plain static method call.");
-            lines.Add("//   - Queries run through IQueryService. MII replaces [Param.N] in the query text by the value as text, there");
-            lines.Add("//     are no bind variables; quoting and escaping are done by the callers (e.g. Mii.StringReplace(x, \"'\", \"''\")).");
+            lines.Add("//   - Every MII transaction is a method: its parameters are the MII inputs, its return value the MII outputs (a");
+            lines.Add("//     record when there are several). A caller passes the inputs it links; MII default values are not carried over.");
+            lines.Add("//   - A query is a local Query variable: its text is the MII template text, AddParameter(name, value) sets a parameter;");
+            lines.Add("//     the comment above it maps [Param.N] to the names. MII replaces [Param.N] by the value as text, there are no");
+            lines.Add("//     bind variables; quoting and escaping are done by the callers (e.g. Mii.StringReplace(x, \"'\", \"''\")).");
+            lines.Add("//   - MII rowset documents are lists of row records; FirstOrEmpty() and RowAt(n) give an empty row instead of null.");
             lines.Add("//   - A catch handles every action before it in the same block (MII Catch). TransactionTerminatedException is");
             lines.Add("//     MII's Terminate Transaction: it ends the transaction, its own catch blocks pass it on to the caller.");
-            lines.Add("//   - Text is true as a boolean for \"true\" or \"1\"; the Mii class at the end implements every MII function used.");
+            lines.Add("//   - Mii.IsEmpty(x) is MII's empty check (blank, \"null\" or \"---\"), Mii.IsTrue(x) its boolean check (\"true\" or \"1\").");
             lines.Add("//   - Improvements must keep the interfaces and the behaviour (sorting, empty checks, returned values) unless a");
             lines.Add("//     change is asked for; list every behaviour change separately.");
             lines.Add("//   - The notes below are problems of the MII objects themselves (stale links, undeclared properties); the code");
@@ -190,16 +177,16 @@ namespace MiiXRay.Generate
 
             foreach (OutlineEntry entry in contract.Outline)
             {
-                string loops = entry.Flow.Length > 0 ? "  [" + entry.Flow + "]" : string.Empty;
+                string flow = entry.Flow.Length > 0 ? "  [" + entry.Flow + "]" : string.Empty;
                 string action = " (" + entry.ActionName + ")";
 
                 if (entry.Kind == "call" && entry.Callee != null && expanded.Contains(entry.Callee))
                 {
-                    lines.Add(indent + "call   " + entry.Target + action + loops + "  - shown above");
+                    lines.Add(indent + "call   " + entry.Target + action + flow + "  - shown above");
                     continue;
                 }
 
-                lines.Add(indent + entry.Kind.PadRight(6) + " " + entry.Target + action + loops);
+                lines.Add(indent + entry.Kind.PadRight(6) + " " + entry.Target + action + flow);
 
                 if (entry.Kind == "call" && entry.Callee != null)
                 {
@@ -214,7 +201,7 @@ namespace MiiXRay.Generate
             List<string> lines = new List<string>();
             string kind = query.Kind == MiiQueryKind.Xacute ? "Xacute query, runs its transaction"
                 : query.Kind == MiiQueryKind.Xml ? "XML query, via IPluginService" : query.RootName + " " + query.Mode;
-            lines.Add("//   " + contract.ClassName + " = " + query.Path + " (" + kind + ")");
+            lines.Add("//   " + query.ShortName + " = " + query.Path + " (" + kind + ")");
 
             if (contract.Parameters.Count > 0)
             {
@@ -222,7 +209,7 @@ namespace MiiXRay.Generate
 
                 foreach (QueryParameterSpec parameter in contract.Parameters)
                 {
-                    parameters.Add("[Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "] " + parameter.PropertyName);
+                    parameters.Add("[Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "] " + parameter.Name);
                 }
 
                 lines.Add("//     parameters: " + string.Join(", ", parameters.ToArray()));
@@ -252,213 +239,60 @@ namespace MiiXRay.Generate
             return lines;
         }
 
-        // ------------------------------------------------------------------ transactions
+        // ------------------------------------------------------------------ records
 
-        private static List<string> TransactionClass(TransactionContract contract, List<string> method)
+        private static List<string> Records(GenerationContext context)
         {
             List<string> lines = new List<string>();
-            lines.Add("/// <summary>");
-            lines.Add("/// " + XmlText(contract.Transaction.Path));
 
-            if (contract.Transaction.Description.Length > 0)
+            foreach (MiiTransaction transaction in context.Graph.Transactions)
             {
-                foreach (string line in SplitLines(contract.Transaction.Description))
+                TransactionContract contract = context.Transactions[transaction];
+
+                if (contract.ResultRecordName == null)
                 {
-                    lines.Add("/// " + XmlText(line));
+                    continue;
                 }
+
+                List<string> members = new List<string>();
+
+                foreach (PropertySpec output in contract.Outputs)
+                {
+                    members.Add(output.Type.Name + " " + output.ResultName);
+                }
+
+                lines.Add(string.Empty);
+                lines.Add("/// <summary>The outputs of " + XmlText(transaction.Path) + ".</summary>");
+                lines.Add("public sealed record " + contract.ResultRecordName + "(" + string.Join(", ", members.ToArray()) + ");");
             }
 
-            lines.Add("/// </summary>");
-            lines.Add("public static class " + contract.ClassName);
-            lines.Add("{");
-            List<string> body = new List<string>();
-            body.Add("public const string TransactionPath = " + CsLiteral.String(contract.Transaction.Path) + ";");
-            body.Add(string.Empty);
-            body.AddRange(PropertyClass("Request", "The inputs of the transaction (defaults as configured in MII).", contract.RequestProperties));
-            body.Add(string.Empty);
-            body.AddRange(PropertyClass("Response", "The outputs of the transaction.", contract.ResponseProperties));
-
-            foreach (RowsetContract rowset in contract.NestedContracts)
+            foreach (RowsetContract contract in context.Contracts)
             {
-                body.Add(string.Empty);
-                body.AddRange(RowsetClasses(rowset));
+                lines.Add(string.Empty);
+                lines.AddRange(RowRecord(contract));
             }
 
-            body.Add(string.Empty);
-            body.AddRange(method);
-            lines.AddRange(TransactionEmitter.Indent(body));
-            lines.Add("}");
             return lines;
         }
 
-        private static List<string> PropertyClass(string name, string summary, List<PropertySpec> properties)
+        private static List<string> RowRecord(RowsetContract contract)
         {
             List<string> lines = new List<string>();
-            lines.Add("/// <summary>" + summary + "</summary>");
-            lines.Add("public sealed class " + name);
+            lines.Add("/// <summary>A row of an MII rowset document (" + XmlText(contract.Origin) + ").</summary>");
+            lines.Add("public sealed record " + contract.RowClass + " : MiiRow");
             lines.Add("{");
             List<string> body = new List<string>();
-            body.Add("public " + name + "()");
-            body.Add("{");
-
-            foreach (PropertySpec property in properties)
-            {
-                body.Add("    " + property.Name + " = " + property.Initializer + ";");
-            }
-
-            body.Add("}");
-
-            foreach (PropertySpec property in properties)
-            {
-                body.Add(string.Empty);
-
-                if (property.Description.Length > 0)
-                {
-                    body.Add("/// <summary>" + XmlText(OneLine(property.Description)) + "</summary>");
-                }
-
-                body.Add("public " + property.Type.Name + " " + property.Name + " { get; set; }");
-            }
-
-            lines.AddRange(TransactionEmitter.Indent(body));
-            lines.Add("}");
-            return lines;
-        }
-
-        private static List<string> RowsetClasses(RowsetContract contract)
-        {
-            List<string> lines = new List<string>();
-            lines.Add("/// <summary>A row of " + contract.RowsetClass + " (" + XmlText(contract.Origin) + ").</summary>");
-            lines.Add("public sealed class " + contract.RowClass + " : RowBase");
-            lines.Add("{");
-            List<string> body = new List<string>();
-            body.Add("public " + contract.RowClass + "()");
-            body.Add("{");
 
             foreach (RowsetColumn column in contract.Columns)
             {
-                body.Add("    " + column.PropertyName + " = " + ContractBuilder.Initializer(column.Type, string.Empty) + ";");
-            }
-
-            body.Add("}");
-
-            foreach (RowsetColumn column in contract.Columns)
-            {
-                body.Add(string.Empty);
-
                 if (column.PropertyName != column.Name)
                 {
                     body.Add("/// <summary>Column " + XmlText(column.Name) + ".</summary>");
                 }
 
-                body.Add("public " + column.Type.Name + " " + column.PropertyName + " { get; set; }");
+                body.Add("public " + column.Type.Name + " " + column.PropertyName + " { get; set; }" + (column.Type.Kind == TypeKind.String ? " = \"\";" : string.Empty));
             }
 
-            lines.AddRange(TransactionEmitter.Indent(body));
-            lines.Add("}");
-            lines.Add(string.Empty);
-            lines.Add("/// <summary>An MII rowset document (Rowsets/Rowset/Row) with rows of " + contract.RowClass + ".</summary>");
-            lines.Add("public sealed class " + contract.RowsetClass + " : RowsetBase<" + contract.RowClass + ">");
-            lines.Add("{");
-            lines.Add("}");
-            return lines;
-        }
-
-        // ------------------------------------------------------------------ queries
-
-        private static List<QueryContract> QueryClasses(GenerationContext context)
-        {
-            List<QueryContract> result = new List<QueryContract>();
-
-            foreach (MiiQuery query in context.Graph.Queries)
-            {
-                QueryContract contract = context.Queries[query];
-
-                if (contract.Result != null)
-                {
-                    result.Add(contract);
-                }
-            }
-
-            return result;
-        }
-
-        private static List<string> QueryClass(QueryContract contract)
-        {
-            MiiQuery query = contract.Query;
-            List<string> lines = new List<string>();
-            lines.Add("/// <summary>" + XmlText(query.Path) + " (" + query.RootName + ", mode " + XmlText(query.Mode) + ").</summary>");
-            lines.Add("public static class " + contract.ClassName);
-            lines.Add("{");
-            List<string> body = new List<string>();
-            body.Add("/// <summary>The statement; MII replaces [Param.N] by the parameter values as text before it runs.</summary>");
-            body.Add("public const string Text = " + CsLiteral.String(query.Text) + ";");
-            body.Add(string.Empty);
-            body.AddRange(QueryRequestClass(contract));
-            body.Add(string.Empty);
-            body.AddRange(RowsetClasses(contract.Result));
-            lines.AddRange(TransactionEmitter.Indent(body));
-            lines.Add("}");
-            return lines;
-        }
-
-        private static List<string> QueryRequestClass(QueryContract contract)
-        {
-            List<string> lines = new List<string>();
-            lines.Add("/// <summary>The parameters of the query (defaults as configured in the template).</summary>");
-            lines.Add("public sealed class Request : IQueryRequest");
-            lines.Add("{");
-            List<string> body = new List<string>();
-            List<string> parameters = new List<string>();
-
-            foreach (QueryParameterSpec parameter in contract.Parameters)
-            {
-                parameters.Add("string " + parameter.ArgumentName + " = " + CsLiteral.String(parameter.DefaultValue));
-            }
-
-            if (parameters.Count <= 2)
-            {
-                body.Add("public Request(" + string.Join(", ", parameters.ToArray()) + ")");
-            }
-            else
-            {
-                body.Add("public Request(");
-
-                for (int index = 0; index < parameters.Count; index++)
-                {
-                    body.Add("    " + parameters[index] + (index < parameters.Count - 1 ? "," : ")"));
-                }
-            }
-
-            body.Add("{");
-
-            foreach (QueryParameterSpec parameter in contract.Parameters)
-            {
-                body.Add("    " + parameter.PropertyName + " = " + parameter.ArgumentName + ";");
-            }
-
-            body.Add("}");
-
-            foreach (QueryParameterSpec parameter in contract.Parameters)
-            {
-                body.Add(string.Empty);
-                string description = parameter.Description.Length > 0 && parameter.Description != parameter.PropertyName ? " " + XmlText(parameter.Description) : string.Empty;
-                body.Add("/// <summary>[Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "]" + description + "</summary>");
-                body.Add("public string " + parameter.PropertyName + " { get; set; }");
-            }
-
-            body.Add(string.Empty);
-            body.Add("public IDictionary<string, string> GetParameters()");
-            body.Add("{");
-            body.Add("    Dictionary<string, string> parameters = new Dictionary<string, string>();");
-
-            foreach (QueryParameterSpec parameter in contract.Parameters)
-            {
-                body.Add("    parameters.Add(\"Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "\", " + parameter.PropertyName + ");");
-            }
-
-            body.Add("    return parameters;");
-            body.Add("}");
             lines.AddRange(TransactionEmitter.Indent(body));
             lines.Add("}");
             return lines;
@@ -487,11 +321,6 @@ namespace MiiXRay.Generate
         private static string[] SplitLines(string text)
         {
             return text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
-        }
-
-        private static string OneLine(string text)
-        {
-            return string.Join(" ", SplitLines(text)).Trim();
         }
 
         private static string XmlText(string text)

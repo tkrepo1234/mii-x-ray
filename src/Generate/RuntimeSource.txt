@@ -1,28 +1,34 @@
 #region Services (implement these to run the code)
 
-/// <summary>Runs query templates. MII replaces every [Param.N] in the text by the parameter's value as text
-/// (no bind variables), so values that go into quotes are escaped by the callers (stringreplace "'" -> "''").</summary>
+/// <summary>Runs queries. MII replaces every [Param.N] in the text by the parameter's value as text (no bind
+/// variables), so values that go into quotes are escaped by the callers (stringreplace "'" -> "''").</summary>
 public interface IQueryService
 {
-    /// <summary>Runs a statement that returns rows and maps the columns to the properties of T's rows by name.</summary>
-    T ExecuteQuery<T>(string text, IQueryRequest request) where T : RowsetCore, new();
+    /// <summary>Runs a statement that returns rows and maps the columns to the properties of T by name.</summary>
+    List<T> Execute<T>(Query query) where T : MiiRow, new();
 
     /// <summary>Runs a statement without result rows (query mode Command).</summary>
-    void ExecuteCommand(string text, IQueryRequest request);
+    void ExecuteCommand(Query query);
 }
 
-/// <summary>The parameters of a query: "Param.1" -> value, ...</summary>
-public interface IQueryRequest
+/// <summary>A query template: the statement text and the parameter values by name (the comment at the call maps
+/// [Param.N] to the names).</summary>
+public sealed class Query(string text)
 {
-    IDictionary<string, string> GetParameters();
+    public string Text { get; } = text;
+
+    public List<KeyValuePair<string, object>> Parameters { get; } = [];
+
+    public void AddParameter(string name, object value) => Parameters.Add(new(name, value));
 }
 
 /// <summary>Everything MII does that has no plain C# equivalent: SAP ME PAPI calls, web services, HTTP, mail, files,
-/// sort/filter actions, logging.</summary>
+/// sort/filter actions, logging, shared properties.</summary>
 public interface IPluginService
 {
-    /// <summary>Runs an MII action; actionType is the MII action class (e.g. SAPMEPAPIInterface), the request holds its settings and inputs.</summary>
-    PluginResult Invoke(string actionType, PluginRequest request);
+    /// <summary>Runs an MII action: actionType is the MII action class (e.g. SAPMEPAPIInterface), actionName the action
+    /// in the transaction, settings its configuration and inputs by MII property name.</summary>
+    PluginResult Invoke(string actionType, string actionName, Dictionary<string, object> settings);
 
     /// <summary>Tracer and Event Logger.</summary>
     void Log(string level, string message);
@@ -37,214 +43,54 @@ public interface IPluginService
     void SetProperty(string name, object value);
 }
 
-/// <summary>The settings and inputs of a plugin call, by MII property name.</summary>
-public sealed class PluginRequest
-{
-    private readonly string _actionName;
-    private readonly Dictionary<string, object> _values = new Dictionary<string, object>();
-
-    public PluginRequest(string actionName)
-    {
-        _actionName = actionName;
-    }
-
-    public string ActionName
-    {
-        get { return _actionName; }
-    }
-
-    public IDictionary<string, object> Values
-    {
-        get { return _values; }
-    }
-
-    public void Set(string name, object value)
-    {
-        _values[name] = value;
-    }
-
-    public object Get(string name)
-    {
-        object value;
-        return _values.TryGetValue(name, out value) ? value : null;
-    }
-}
-
-/// <summary>The outputs of a plugin call, by MII property name ("" for an output that is not set).</summary>
+/// <summary>The outputs of a plugin call by MII property name ("" for an output that is not set).</summary>
 public sealed class PluginResult
 {
-    private readonly Dictionary<string, object> _values = new Dictionary<string, object>();
+    public Dictionary<string, object> Values { get; } = [];
 
-    public IDictionary<string, object> Values
-    {
-        get { return _values; }
-    }
-
-    public void Set(string name, object value)
-    {
-        _values[name] = value;
-    }
-
-    public object Get(string name)
-    {
-        object value;
-        return _values.TryGetValue(name, out value) ? value : string.Empty;
-    }
+    public object Get(string name) => Values.TryGetValue(name, out var value) ? value : string.Empty;
 }
 
 #endregion
 
-#region X-Ray runtime (stand-ins for MII expression functions and XML handling)
+#region X-Ray runtime (MII expression functions and XML handling)
 
 /// <summary>An exception raised by a Throw action (or by an action that failed).</summary>
-public class MiiException : Exception
+public class MiiException(string message, string actionName, string actionType = "Throw") : Exception(message)
 {
-    private readonly string _actionName;
-    private readonly string _actionType;
-
-    public MiiException(string message, string actionName)
-        : this(message, actionName, "Throw")
-    {
-    }
-
-    public MiiException(string message, string actionName, string actionType)
-        : base(message)
-    {
-        _actionName = actionName;
-        _actionType = actionType;
-    }
-
     /// <summary>The MII action that raised the exception (Catch output Source).</summary>
-    public string ActionName
-    {
-        get { return _actionName; }
-    }
+    public string ActionName { get; } = actionName;
 
     /// <summary>The MII action class (Catch output ActionType).</summary>
-    public string ActionType
-    {
-        get { return _actionType; }
-    }
+    public string ActionType { get; } = actionType;
 }
 
 /// <summary>Terminate Transaction with error: ends the transaction; a Catch of the same transaction does not stop it,
 /// the calling transaction sees it as a failed call.</summary>
-public sealed class TransactionTerminatedException : MiiException
+public sealed class TransactionTerminatedException(string transactionPath, string message)
+    : MiiException(message, transactionPath, "TerminateTransaction")
 {
-    private readonly string _transactionPath;
-
-    public TransactionTerminatedException(string transactionPath, string message)
-        : base(message, transactionPath, "TerminateTransaction")
-    {
-        _transactionPath = transactionPath;
-    }
-
-    public string TransactionPath
-    {
-        get { return _transactionPath; }
-    }
+    public string TransactionPath { get; } = transactionPath;
 }
 
-/// <summary>Base of the generated row classes (one property per column).</summary>
-public abstract class RowBase
+/// <summary>Base of the row records: one property per column of an MII rowset document.</summary>
+public abstract record MiiRow
 {
-    public override string ToString()
-    {
-        return Mii.ToStr(this);
-    }
+    public sealed override string ToString() => Mii.ToStr(this);
 }
 
-/// <summary>Base of the generated rowset classes: an MII rowset document as a list of typed rows.</summary>
-public abstract class RowsetCore
+/// <summary>Row access as MII's XPath does it: a missing row reads as an empty row ("" for every column).</summary>
+public static class MiiRows
 {
-    public abstract XmlDocument ToXml();
+    /// <summary>Rowsets/Rowset/Row/Column: the first row, or an empty row.</summary>
+    public static T FirstOrEmpty<T>(this List<T> rows) where T : MiiRow, new() => rows.Count > 0 ? rows[0] : new T();
 
-    public abstract void LoadXml(XmlDocument document);
+    /// <summary>Rowsets/Rowset/Row[Column = 'value']/...: the first matching row, or an empty row.</summary>
+    public static T FirstOrEmpty<T>(this List<T> rows, Func<T, bool> match) where T : MiiRow, new() => rows.FirstOrDefault(match) ?? new T();
 
-    public override string ToString()
-    {
-        return Mii.ToStr(this);
-    }
-}
-
-public abstract class RowsetBase<TRow> : RowsetCore where TRow : RowBase, new()
-{
-    private readonly List<TRow> _rows = new List<TRow>();
-
-    public List<TRow> Rows
-    {
-        get { return _rows; }
-    }
-
-    /// <summary>The first row, or an empty row when there is none (MII yields "" for a column of a missing row).</summary>
-    public TRow FirstRow
-    {
-        get { return _rows.Count > 0 ? _rows[0] : new TRow(); }
-    }
-
-    /// <summary>The row at a 1-based position (XPath Row[n]), or an empty row.</summary>
-    public TRow RowAt(int position)
-    {
-        return position >= 1 && position <= _rows.Count ? _rows[position - 1] : new TRow();
-    }
-
-    /// <summary>The first row whose column has the value (XPath Row[Column = 'value']), or an empty row.</summary>
-    public TRow FirstRowWhere(string column, object value)
-    {
-        string wanted = Mii.ToStr(value);
-
-        foreach (TRow row in _rows)
-        {
-            if (Mii.ToStr(Mii.RowValue(row, column)) == wanted)
-            {
-                return row;
-            }
-        }
-
-        return new TRow();
-    }
-
-    public override XmlDocument ToXml()
-    {
-        XmlDocument document = new XmlDocument();
-        XmlElement rowsets = document.CreateElement("Rowsets");
-        document.AppendChild(rowsets);
-        XmlElement rowset = document.CreateElement("Rowset");
-        rowsets.AppendChild(rowset);
-        XmlElement columns = document.CreateElement("Columns");
-        rowset.AppendChild(columns);
-
-        foreach (PropertyInfo property in Mii.ColumnsOf(typeof(TRow)))
-        {
-            XmlElement column = document.CreateElement("Column");
-            column.SetAttribute("Name", property.Name);
-            columns.AppendChild(column);
-        }
-
-        foreach (TRow row in _rows)
-        {
-            rowset.AppendChild(Mii.RowElement(document, row));
-        }
-
-        return document;
-    }
-
-    public override void LoadXml(XmlDocument document)
-    {
-        _rows.Clear();
-
-        if (document == null || document.DocumentElement == null)
-        {
-            return;
-        }
-
-        foreach (XmlNode node in document.SelectNodes("/Rowsets/Rowset/Row"))
-        {
-            TRow row = new TRow();
-            Mii.FillRow(row, node);
-            _rows.Add(row);
-        }
-    }
+    /// <summary>Rowsets/Rowset/Row[n]/...: the row at a 1-based position, or an empty row.</summary>
+    public static T RowAt<T>(this List<T> rows, int position) where T : MiiRow, new() =>
+        position >= 1 && position <= rows.Count ? rows[position - 1] : new T();
 }
 
 /// <summary>Stand-ins for the MII expression language and XML handling. MII rules kept: booleans are true for
@@ -320,15 +166,14 @@ public static class Mii
             return ((XmlNode)value).OuterXml;
         }
 
-        if (value is RowsetCore)
+        if (value is IEnumerable<MiiRow> rows)
         {
-            return ((RowsetCore)value).ToXml().DocumentElement.OuterXml;
+            return RowsetDocument(rows, value.GetType()).DocumentElement.OuterXml;
         }
 
-        if (value is RowBase)
+        if (value is MiiRow)
         {
-            XmlDocument document = new XmlDocument();
-            return RowElement(document, value).OuterXml;
+            return RowElement(new XmlDocument(), value).OuterXml;
         }
 
         if (value is Exception)
@@ -470,12 +315,12 @@ public static class Mii
             return document;
         }
 
-        if (value is RowsetCore)
+        if (value is IEnumerable<MiiRow> rows)
         {
-            return ((RowsetCore)value).ToXml();
+            return RowsetDocument(rows, value.GetType());
         }
 
-        if (value is RowBase)
+        if (value is MiiRow)
         {
             XmlDocument rowDocument = new XmlDocument();
             rowDocument.AppendChild(RowElement(rowDocument, value));
@@ -579,19 +424,58 @@ public static class Mii
         return result;
     }
 
-    public static T ToRowset<T>(object value) where T : RowsetCore, new()
+    /// <summary>An MII rowset document (or anything that converts to one) as row records, columns matched by name.</summary>
+    public static List<T> ToRows<T>(object value) where T : MiiRow, new()
     {
-        if (value is T)
+        if (value is List<T> list)
         {
-            return (T)value;
+            return list;
         }
 
-        T result = new T();
-        result.LoadXml(ToXml(value));
-        return result;
+        List<T> rows = [];
+        XmlDocument document = ToXml(value);
+
+        if (document.DocumentElement == null)
+        {
+            return rows;
+        }
+
+        foreach (XmlNode node in document.SelectNodes("/Rowsets/Rowset/Row"))
+        {
+            T row = new T();
+            FillRow(row, node);
+            rows.Add(row);
+        }
+
+        return rows;
     }
 
-    public static T ToRow<T>(object value) where T : RowBase, new()
+    /// <summary>Row records as an MII rowset document (Rowsets/Rowset with Columns and Row elements).</summary>
+    private static XmlDocument RowsetDocument(IEnumerable<MiiRow> rows, Type listType)
+    {
+        XmlDocument document = new XmlDocument();
+        XmlElement rowset = document.CreateElement("Rowset");
+        document.AppendChild(document.CreateElement("Rowsets")).AppendChild(rowset);
+        XmlElement columns = document.CreateElement("Columns");
+        rowset.AppendChild(columns);
+        Type rowType = listType.IsGenericType ? listType.GetGenericArguments()[0] : typeof(MiiRow);
+
+        foreach (PropertyInfo property in ColumnsOf(rowType))
+        {
+            XmlElement column = document.CreateElement("Column");
+            column.SetAttribute("Name", property.Name);
+            columns.AppendChild(column);
+        }
+
+        foreach (MiiRow row in rows)
+        {
+            rowset.AppendChild(RowElement(document, row));
+        }
+
+        return document;
+    }
+
+    public static T ToRow<T>(object value) where T : MiiRow, new()
     {
         if (value is T)
         {

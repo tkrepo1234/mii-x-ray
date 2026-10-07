@@ -5,16 +5,18 @@ namespace MiiXRay.Tests
 {
     public static class ExpressionTests
     {
-        /// <summary>Resolves Transaction.Site/Count/Flag and Local.Map for the translator tests.</summary>
+        /// <summary>Resolves Transaction.Site/Count/Flag and Local.Map/Doc for the translator tests.</summary>
         private sealed class Symbols : ISymbolResolver
         {
+            private readonly UniqueNames _names = new UniqueNames();
+
             public TypedCode Resolve(ReferenceNode reference)
             {
                 switch (reference.Path)
                 {
-                    case "Transaction.Site": return TypedCode.Primary("request.Site", CsType.String);
-                    case "Transaction.Count": return TypedCode.Primary("request.Count", CsType.Int);
-                    case "Transaction.Flag": return TypedCode.Primary("request.Flag", CsType.Bool);
+                    case "Transaction.Site": return TypedCode.Primary("site", CsType.String);
+                    case "Transaction.Count": return TypedCode.Primary("count", CsType.Int);
+                    case "Transaction.Flag": return TypedCode.Primary("flag", CsType.Bool);
                     case "Local.Map": return TypedCode.Primary("map", CsType.Map);
                     case "Local.Doc": return TypedCode.Primary("doc", CsType.Xml);
                     default: return null;
@@ -23,6 +25,16 @@ namespace MiiXRay.Tests
 
             public void Note(string message)
             {
+            }
+
+            public string TransactionPath
+            {
+                get { return "P/trxTest"; }
+            }
+
+            public string NewName(string wanted)
+            {
+                return _names.Claim(wanted);
             }
         }
 
@@ -62,42 +74,43 @@ namespace MiiXRay.Tests
             Assert.True(Parser.Parse("/* nothing */") is EmptyNode, "a comment alone is an empty expression");
         }
 
-        public static void StringConcatenationIsNative()
+        public static void ConcatenationBecomesInterpolation()
         {
-            Assert.Equal("\"Site \" + request.Site + \" has \" + request.Count", Translate("\"Site \" & Transaction.Site & \" has \" & Transaction.Count"));
+            Assert.Equal("$\"Site {site} has {count} {{rows}}\"", Translate("\"Site \" & Transaction.Site & \" has \" & Transaction.Count & \" {rows}\""));
+            Assert.Equal("site + Mii.ToStr(flag)", Translate("Transaction.Site & Transaction.Flag"));
         }
 
         public static void EmptyStringIsDroppedFromConcatenation()
         {
-            Assert.Equal("Mii.ToStr(request.Count)", Translate("Transaction.Count & \"\""));
+            Assert.Equal("Mii.ToStr(count)", Translate("Transaction.Count & \"\""));
         }
 
         public static void MatchIsCaseSensitiveRegex()
         {
-            Assert.Equal("Regex.IsMatch(request.Site, \"^M$\")", Translate("match(Transaction.Site, \"^M$\")"));
+            Assert.Equal("Regex.IsMatch(site, \"^M$\")", Translate("match(Transaction.Site, \"^M$\")"));
         }
 
         public static void MiiIdiomsHaveNames()
         {
-            Assert.Equal("Mii.IsEmpty(request.Site)", Translate("match(Transaction.Site, \"(?i)^\\s*(null|\\-{3})?\\s*$\")"));
-            Assert.Equal("Mii.IsTrue(request.Site)", Translate("match(Transaction.Site, \"(?i)^\\s*(true|1)\\s*$\")"));
-            Assert.Equal("request.Count > 5", Translate("number(\"0\" & Transaction.Count) > 5"));
+            Assert.Equal("Mii.IsEmpty(site)", Translate("match(Transaction.Site, \"(?i)^\\s*(null|\\-{3})?\\s*$\")"));
+            Assert.Equal("Mii.IsTrue(site)", Translate("match(Transaction.Site, \"(?i)^\\s*(true|1)\\s*$\")"));
+            Assert.Equal("count > 5", Translate("number(\"0\" & Transaction.Count) > 5"));
         }
 
         public static void StringIfBecomesConditional()
         {
-            Assert.Equal("request.Flag ? \"yes\" : \"no\"", Translate("stringif(Transaction.Flag, \"yes\", \"no\")"));
+            Assert.Equal("flag ? \"yes\" : \"no\"", Translate("stringif(Transaction.Flag, \"yes\", \"no\")"));
         }
 
         public static void MixedEqualityUsesHelper()
         {
-            Assert.Equal("Mii.AreEqual(request.Site, 1)", Translate("Transaction.Site == 1"));
-            Assert.Equal("request.Site == \"M\"", Translate("Transaction.Site == \"M\""));
+            Assert.Equal("Mii.AreEqual(site, 1)", Translate("Transaction.Site == 1"));
+            Assert.Equal("site == \"M\"", Translate("Transaction.Site == \"M\""));
         }
 
         public static void DivisionIsNotInteger()
         {
-            Assert.Equal("(double)request.Count / 2", Translate("Transaction.Count / 2"));
+            Assert.Equal("(double)count / 2", Translate("Transaction.Count / 2"));
         }
 
         public static void MapAndXmlSelectors()
@@ -108,7 +121,7 @@ namespace MiiXRay.Tests
 
         public static void KeywordsAndUnknownFunctions()
         {
-            Assert.Equal("TransactionPath", Translate("transactionpath"));
+            Assert.Equal("\"P/trxTest\"", Translate("transactionpath"));
             Assert.Contains("Mii.Function(\"nosuchfunction\"", Translate("nosuchfunction(1)"));
         }
 
@@ -117,10 +130,11 @@ namespace MiiXRay.Tests
             Assert.Equal("Mii.Unresolved(\"Transaction.Missing\")", Translate("Transaction.Missing"));
         }
 
-        public static void InterpolationInStrings()
+        public static void InterpolationAndLiteralForms()
         {
-            Assert.Equal("\"Site: \" + request.Site", Translate("\"Site: #Transaction.Site#\""));
-            Assert.Equal("\"[\\\\*#]$\"", Translate("\"[\\\\*#]$\""));
+            Assert.Equal("$\"Site: {site}\"", Translate("\"Site: #Transaction.Site#\""));
+            Assert.Equal("@\"[\\*#]$\"", Translate("\"[\\\\*#]$\""));
+            Assert.Equal("\"\"\"<a x=\"1\"/>\"\"\"", Translate("\"<a x=\\\"1\\\"/>\""));
         }
     }
 }

@@ -1,16 +1,14 @@
 using System;
-using System.CodeDom.Compiler;
+using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Text;
-using Microsoft.CSharp;
 using MiiXRay.Generate;
 using MiiXRay.Resolve;
 using MiiXRay.Sources;
 
 namespace MiiXRay.Tests
 {
-    /// <summary>End to end: an export folder with a small transaction and a query, X-Rayed, compiled and run.</summary>
+    /// <summary>End to end: an export folder with a small transaction and a query, X-Rayed, compiled as C# 12 and run on .NET 8.</summary>
     public static class GeneratorTests
     {
         private const string Transaction =
@@ -49,19 +47,35 @@ namespace MiiXRay.Tests
             "ParamDescription.1=\"Site\" Param.1=\"\"><Tasks/></SQLQuery>";
 
         private const string Runner =
-            "namespace XRay.TrxCheckSiteLogic {" +
-            "  public sealed class FakeQueries : IQueryService {" +
-            "    public T ExecuteQuery<T>(string text, IQueryRequest request) where T : RowsetCore, new() {" +
-            "      T result = new T();" +
-            "      result.LoadXml(Mii.ParseXml(\"<Rowsets><Rowset><Row><Sfc>S1-\" + request.GetParameters()[\"Param.1\"] + \"</Sfc></Row><Row><Sfc>S2</Sfc></Row></Rowset></Rowsets>\"));" +
-            "      return result; }" +
-            "    public void ExecuteCommand(string text, IQueryRequest request) { } }" +
-            "  public static class Run {" +
-            "    public static string Check(string site) {" +
-            "      TrxCheckSite.Request request = new TrxCheckSite.Request(); request.Site = site;" +
-            "      try { TrxCheckSite.Response response = TrxCheckSite.Execute(request, new FakeQueries(), null);" +
-            "        return response.Message + \" | \" + response.Sfcs.Rows.Count; }" +
-            "      catch (TransactionTerminatedException e) { return \"terminated: \" + e.Message; } } } }";
+            "using System;\n" +
+            "using System.Collections.Generic;\n" +
+            "namespace XRay.TrxCheckSite;\n" +
+            "public sealed class FakeQueries : IQueryService\n" +
+            "{\n" +
+            "    public List<T> Execute<T>(Query query) where T : MiiRow, new() =>\n" +
+            "        Mii.ToRows<T>(Mii.ParseXml($\"<Rowsets><Rowset><Row><Sfc>S1-{query.Parameters[0].Value}</Sfc></Row><Row><Sfc>S2</Sfc></Row></Rowset></Rowsets>\"));\n" +
+            "    public void ExecuteCommand(Query query) { }\n" +
+            "}\n" +
+            "public static class Program\n" +
+            "{\n" +
+            "    public static void Main()\n" +
+            "    {\n" +
+            "        Console.WriteLine(Check(\"M\"));\n" +
+            "        Console.WriteLine(Check(\" \"));\n" +
+            "    }\n" +
+            "    private static string Check(string site)\n" +
+            "    {\n" +
+            "        try\n" +
+            "        {\n" +
+            "            var result = new TrxCheckSiteLogic(new FakeQueries(), null).TrxCheckSite(site: site);\n" +
+            "            return result.Message + \" | \" + result.Sfcs.Count;\n" +
+            "        }\n" +
+            "        catch (TransactionTerminatedException exception)\n" +
+            "        {\n" +
+            "            return \"terminated: \" + exception.Message;\n" +
+            "        }\n" +
+            "    }\n" +
+            "}\n";
 
         private static string Generate()
         {
@@ -84,40 +98,142 @@ namespace MiiXRay.Tests
         public static void TranslatesTheFlow()
         {
             string code = Generate();
-            Assert.Contains("if (Regex.IsMatch(request.Site, \"^\\\\s*$\"))", code);
+            Assert.Contains("public TrxCheckSiteResult TrxCheckSite(string site = default)", code);
+            Assert.Contains("if (Regex.IsMatch(site, @\"^\\s*$\"))", code);
             Assert.Contains("throw new MiiException(\"The site is empty\", \"ThrowEmptySite\");", code);
-            Assert.Contains("SqlSelectSfcs.Result selectSfcs = queryService.ExecuteQuery<SqlSelectSfcs.Result>(SqlSelectSfcs.Text, new SqlSelectSfcs.Request(site: request.Site));", code);
-            Assert.NotContains("Action results", code);
-            Assert.Contains("selectSfcs.Rows.Count", code);
-            Assert.Contains("selectSfcs.FirstRow.Sfc", code);
+            Assert.Contains("// [Param.1] = Site", code);
+            Assert.Contains("var sqlSelectSfcs = new Query(\"\"\"select SFC as \"Sfc\" from SFC where SITE = '[Param.1]'\"\"\");", code);
+            Assert.Contains("sqlSelectSfcs.AddParameter(\"Site\", site);", code);
+            Assert.Contains("var selectSfcs = queries.Execute<SqlSelectSfcsRow>(sqlSelectSfcs);", code);
+            Assert.Contains("message = $\"Site {site}: {selectSfcs.Count} SFC, first {selectSfcs.FirstOrEmpty().Sfc}\";", code);
             Assert.Contains("catch (Exception catchAll)", code);
-            Assert.Contains("\"Failed: \" + Mii.ExceptionMessage(catchAll)", code);
-            Assert.Contains("public string Sfc { get; set; }", code);
+            Assert.Contains("public sealed record TrxCheckSiteResult(string Message, List<SfcsRow> Sfcs);", code);
+            Assert.Contains("public string Sfc { get; set; } = \"\";", code);
+            Assert.Contains("return new TrxCheckSiteResult(message, sfcs);", code);
         }
 
-        public static void CompilesAndRuns()
+        public static void CompilesAndRunsOnDotNet8()
         {
-            CSharpCodeProvider provider = new CSharpCodeProvider();
-            CompilerParameters parameters = new CompilerParameters(new string[] { "System.dll", "System.Xml.dll" });
-            parameters.GenerateInMemory = true;
-            parameters.CompilerOptions = "/langversion:5";
-            CompilerResults results = provider.CompileAssemblyFromSource(parameters, Generate(), Runner);
+            ModernCompiler compiler = ModernCompiler.Find();
 
-            if (results.Errors.HasErrors)
+            if (compiler == null)
             {
-                StringBuilder errors = new StringBuilder();
-
-                foreach (CompilerError error in results.Errors)
-                {
-                    errors.AppendLine(error.ToString());
-                }
-
-                throw new Exception(errors.ToString());
+                Console.WriteLine("  (CompilesAndRunsOnDotNet8 skipped: no .NET SDK with the .NET 8 reference pack found)");
+                return;
             }
 
-            MethodInfo check = results.CompiledAssembly.GetType("XRay.TrxCheckSiteLogic.Run").GetMethod("Check");
-            Assert.Equal("Site M: 2 SFC, first S1-M | 2", check.Invoke(null, new object[] { "M" }));
-            Assert.Equal("terminated: Failed: The site is empty", check.Invoke(null, new object[] { " " }));
+            string folder = Path.Combine(Path.GetTempPath(), "mii-x-ray-run-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(folder);
+
+            try
+            {
+                File.WriteAllText(Path.Combine(folder, "Logic.cs"), Generate(), Encoding.UTF8);
+                File.WriteAllText(Path.Combine(folder, "Runner.cs"), Runner, Encoding.UTF8);
+                string output = compiler.CompileAndRun(folder, new string[] { "Logic.cs", "Runner.cs" });
+                Assert.Equal("Site M: 2 SFC, first S1-M | 2\nterminated: Failed: The site is empty\n", output.Replace("\r\n", "\n"));
+            }
+            finally
+            {
+                Directory.Delete(folder, true);
+            }
+        }
+    }
+
+    /// <summary>Roslyn of an installed .NET SDK and the .NET 8 reference assemblies (C:\Program Files\dotnet).</summary>
+    public sealed class ModernCompiler
+    {
+        private string _dotnet;
+        private string _csc;
+        private string _references;
+        private string _runtimeVersion;
+
+        public static ModernCompiler Find()
+        {
+            string root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "dotnet");
+            string dotnet = Path.Combine(root, "dotnet.exe");
+            string csc = Last(Path.Combine(root, "sdk"), "Roslyn\\bincore\\csc.dll", string.Empty);
+            string references = Last(Path.Combine(root, "packs\\Microsoft.NETCore.App.Ref"), "ref\\net8.0", "8.");
+            string runtime = Last(Path.Combine(root, "shared\\Microsoft.NETCore.App"), string.Empty, "8.");
+
+            if (!File.Exists(dotnet) || csc == null || references == null || runtime == null)
+            {
+                return null;
+            }
+
+            ModernCompiler compiler = new ModernCompiler();
+            compiler._dotnet = dotnet;
+            compiler._csc = csc;
+            compiler._references = references;
+            compiler._runtimeVersion = Path.GetFileName(runtime.TrimEnd('\\'));
+            return compiler;
+        }
+
+        private static string Last(string folder, string below, string prefix)
+        {
+            if (!Directory.Exists(folder))
+            {
+                return null;
+            }
+
+            string[] versions = Directory.GetDirectories(folder, prefix + "*");
+            Array.Sort(versions, StringComparer.Ordinal);
+
+            for (int index = versions.Length - 1; index >= 0; index--)
+            {
+                string candidate = below.Length > 0 ? Path.Combine(versions[index], below) : versions[index];
+
+                if (File.Exists(candidate) || Directory.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Compiles the files to an executable for .NET 8 and runs it; returns its output.</summary>
+        public string CompileAndRun(string folder, string[] files)
+        {
+            StringBuilder arguments = new StringBuilder();
+            arguments.Append('"').Append(_csc).Append("\" -nologo -langversion:12 -nostdlib -target:exe -out:run.dll");
+
+            foreach (string reference in Directory.GetFiles(_references, "*.dll"))
+            {
+                arguments.Append(" \"-r:").Append(reference).Append('"');
+            }
+
+            foreach (string file in files)
+            {
+                arguments.Append(' ').Append(file);
+            }
+
+            string compile = Run(folder, arguments.ToString());
+
+            if (!File.Exists(Path.Combine(folder, "run.dll")))
+            {
+                throw new Exception("C# 12 compile failed:" + Environment.NewLine + compile);
+            }
+
+            File.WriteAllText(Path.Combine(folder, "run.runtimeconfig.json"),
+                "{ \"runtimeOptions\": { \"tfm\": \"net8.0\", \"framework\": { \"name\": \"Microsoft.NETCore.App\", \"version\": \"" + _runtimeVersion + "\" } } }");
+            return Run(folder, "run.dll");
+        }
+
+        private string Run(string folder, string arguments)
+        {
+            ProcessStartInfo start = new ProcessStartInfo(_dotnet, arguments);
+            start.WorkingDirectory = folder;
+            start.UseShellExecute = false;
+            start.RedirectStandardOutput = true;
+            start.RedirectStandardError = true;
+            start.CreateNoWindow = true;
+
+            using (Process process = Process.Start(start))
+            {
+                string output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+                process.WaitForExit();
+                return output;
+            }
         }
     }
 }

@@ -25,7 +25,7 @@ namespace MiiXRay.Tests
             List<string> flow = Lines("if (a)", "{", "    x = Load();", "    Use(x);", "}");
             List<HoistedVariable> left = DeclarationPlacer.Place(flow, new List<HoistedVariable> { Variable("x", false) });
             Assert.Equal(0, left.Count);
-            Assert.Equal("    T x = Load();", flow[2]);
+            Assert.Equal("    var x = Load();", flow[2]);
         }
 
         public static void KeepsAtTopWhenReadAfterTheBlock()

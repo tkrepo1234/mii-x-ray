@@ -15,6 +15,12 @@ namespace MiiXRay.Generate
 
         /// <summary>Records a note for the file header.</summary>
         void Note(string message);
+
+        /// <summary>The MII path of the transaction being generated (the keyword transactionpath).</summary>
+        string TransactionPath { get; }
+
+        /// <summary>A name not used in the method yet (for lambda parameters).</summary>
+        string NewName(string wanted);
     }
 
     /// <summary>Translates MII expressions into C#. Known types use native operators; anything else goes through the
@@ -201,7 +207,7 @@ namespace MiiXRay.Generate
                 case "e": return TypedCode.Primary("Math.E", CsType.Double);
                 case "pi": return TypedCode.Primary("Math.PI", CsType.Double);
                 case "username": return TypedCode.Primary("Mii.UserName", CsType.String);
-                case "transactionpath": return TypedCode.Primary("TransactionPath", CsType.String);
+                case "transactionpath": return Literal(CsLiteral.String(_symbols.TransactionPath), CsType.String, _symbols.TransactionPath);
                 case "currenttimemillis": return TypedCode.Primary("Mii.CurrentTimeMillis()", CsType.Long);
                 case "userlocale": return TypedCode.Primary("Mii.UserLocale", CsType.String);
                 case "currenttimezoneoffset": return TypedCode.Primary("Mii.CurrentTimeOffset()", CsType.String);
@@ -318,7 +324,7 @@ namespace MiiXRay.Generate
 
             if (match.Success)
             {
-                return ColumnAccess(target + ".FirstRow", contract, match.Groups[1].Value, baseCode, pathLiteral);
+                return ColumnAccess(target + ".FirstOrEmpty()", contract, match.Groups[1].Value, baseCode, pathLiteral);
             }
 
             match = IndexedRowColumn.Match(path);
@@ -334,13 +340,16 @@ namespace MiiXRay.Generate
             {
                 RowsetColumn filter = contract.Ensure(match.Groups[1].Value);
                 filter.Read = true;
-                string row = target + ".FirstRowWhere(" + CsLiteral.String(filter.Name) + ", " + CsLiteral.String(match.Groups[2].Value) + ")";
+                string parameter = _symbols.NewName("row");
+                string column = parameter + "." + filter.PropertyName;
+                string condition = (filter.Type.Kind == TypeKind.String ? column : "Mii.ToStr(" + column + ")") + " == " + CsLiteral.String(match.Groups[2].Value);
+                string row = target + ".FirstOrEmpty(" + parameter + " => " + condition + ")";
                 return ColumnAccess(row, contract, match.Groups[3].Value, baseCode, pathLiteral);
             }
 
             if (RowCount.IsMatch(path))
             {
-                return TypedCode.Primary(target + ".Rows.Count", CsType.Int);
+                return TypedCode.Primary(target + ".Count", CsType.Int);
             }
 
             return null;
@@ -480,14 +489,46 @@ namespace MiiXRay.Generate
                 return parts[0];
             }
 
-            List<string> codes = new List<string>();
+            return Interpolation(parts);
+        }
+
+        /// <summary>Text parts and values as an interpolated string: $"The site \"{site}\" is invalid"; values only as +.</summary>
+        private static TypedCode Interpolation(List<TypedCode> parts)
+        {
+            bool hasText = false;
 
             foreach (TypedCode part in parts)
             {
-                codes.Add(part.At(Precedence.Additive + 1));
+                hasText = hasText || (part.IsLiteral && part.Type.Kind == TypeKind.String);
             }
 
-            return new TypedCode(string.Join(" + ", codes.ToArray()), CsType.String, Precedence.Additive);
+            if (!hasText)
+            {
+                List<string> codes = new List<string>();
+
+                foreach (TypedCode part in parts)
+                {
+                    codes.Add(part.At(Precedence.Additive + 1));
+                }
+
+                return new TypedCode(string.Join(" + ", codes.ToArray()), CsType.String, Precedence.Additive);
+            }
+
+            System.Text.StringBuilder text = new System.Text.StringBuilder("$\"");
+
+            foreach (TypedCode part in parts)
+            {
+                if (part.IsLiteral && part.Type.Kind == TypeKind.String)
+                {
+                    text.Append(CsLiteral.InterpolatedText(part.LiteralText));
+                }
+                else
+                {
+                    text.Append('{').Append(part.At(Precedence.Conditional + 1)).Append('}');
+                }
+            }
+
+            return TypedCode.Primary(text.Append('"').ToString(), CsType.String);
         }
 
         private static void FlattenConcatenation(Node node, List<Node> operands)
@@ -689,9 +730,9 @@ namespace MiiXRay.Generate
 
                     return Call("Mii.ToXml", value, CsType.Xml);
                 case TypeKind.Rowset:
-                    return TypedCode.Primary("Mii.ToRowset<" + target.Name + ">(" + (value.XmlCode ?? value.Code) + ")", target);
+                    return TypedCode.Primary("Mii.ToRows<" + target.Contract.RowTypeName + ">(" + (value.XmlCode ?? value.Code) + ")", target);
                 case TypeKind.Row:
-                    return TypedCode.Primary("Mii.ToRow<" + target.Name + ">(" + (value.XmlCode ?? value.Code) + ")", target);
+                    return TypedCode.Primary("Mii.ToRow<" + target.Contract.RowTypeName + ">(" + (value.XmlCode ?? value.Code) + ")", target);
                 default:
                     return new TypedCode("(" + target.Name + ")" + value.At(Precedence.Unary), target, Precedence.Unary);
             }

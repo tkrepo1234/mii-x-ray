@@ -19,28 +19,19 @@ namespace MiiXRay.Generate
         public bool Read;
     }
 
-    /// <summary>The typed form of an MII rowset document (Rowsets/Rowset/Row): a row class and a rowset class.
+    /// <summary>The typed form of an MII rowset document (Rowsets/Rowset/Row): a row record; the rowset is a List of it.
     /// Columns come from reference documents, cached query results, column specifications, the SQL text and from
     /// the columns the transactions read (Row/Column in XPath expressions).</summary>
     public sealed class RowsetContract
     {
         private readonly List<RowsetColumn> _columns = new List<RowsetColumn>();
-        private readonly string _ownerClass;
-        private string _rowClass;
-        private string _rowsetClass;
+        private readonly string _rowClass;
         private readonly string _origin;
 
-        public RowsetContract(string ownerClass, string rowClass, string rowsetClass, string origin)
+        public RowsetContract(string rowClass, string origin)
         {
-            _ownerClass = ownerClass;
             _rowClass = rowClass;
-            _rowsetClass = rowsetClass;
             _origin = origin;
-        }
-
-        public string OwnerClass
-        {
-            get { return _ownerClass; }
         }
 
         public string RowClass
@@ -48,19 +39,14 @@ namespace MiiXRay.Generate
             get { return _rowClass; }
         }
 
-        public string RowsetClass
-        {
-            get { return _rowsetClass; }
-        }
-
         public string RowTypeName
         {
-            get { return _ownerClass + "." + _rowClass; }
+            get { return _rowClass; }
         }
 
         public string RowsetTypeName
         {
-            get { return _ownerClass + "." + _rowsetClass; }
+            get { return "List<" + _rowClass + ">"; }
         }
 
         /// <summary>Where the columns come from (for the class comment).</summary>

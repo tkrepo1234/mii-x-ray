@@ -45,7 +45,7 @@ namespace MiiXRay.Tests
 
         public static void TentativeColumnTakesTheUsedSpelling()
         {
-            RowsetContract contract = new RowsetContract("Q", "Row", "Result", "test");
+            RowsetContract contract = new RowsetContract("Row", "test");
             contract.Add("SFC", CsType.String, true);
             contract.Ensure("Sfc");
             Assert.Equal(1, contract.Columns.Count);

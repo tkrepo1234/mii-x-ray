@@ -91,7 +91,7 @@ namespace MiiXRay.Generate
 
             string line = flow[assigned];
             int indent = line.Length - line.TrimStart().Length;
-            flow[assigned] = line.Substring(0, indent) + variable.Type + " " + line.Substring(indent);
+            flow[assigned] = line.Substring(0, indent) + "var " + line.Substring(indent);
             return true;
         }
 

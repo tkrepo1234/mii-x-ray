@@ -7,45 +7,121 @@ using MiiXRay.Sources;
 
 namespace MiiXRay.Generate
 {
-    /// <summary>A property of a generated class (request, response) or a local variable.</summary>
+    /// <summary>An input (method parameter), an output or a local variable of a transaction method.</summary>
     public sealed class PropertySpec
     {
         public string MiiName;
+
+        /// <summary>The C# name inside the method (camelCase).</summary>
         public string Name;
+
+        /// <summary>For an output of a transaction with several outputs: the property of its result record (PascalCase).</summary>
+        public string ResultName;
         public CsType Type;
+
         /// <summary>The initial value as C# code.</summary>
         public string Initializer;
         public string Description;
     }
 
-    /// <summary>The generated class of one transaction: names and types of its request, response and locals.</summary>
+    /// <summary>One transaction as a method: its name, parameters, outputs (return value) and locals.</summary>
     public sealed class TransactionContract
     {
         public MiiTransaction Transaction;
-        public string ClassName;
-        public List<PropertySpec> RequestProperties = new List<PropertySpec>();
-        public List<PropertySpec> ResponseProperties = new List<PropertySpec>();
+        public string MethodName;
+
+        /// <summary>The record returned when the transaction has several outputs, else null.</summary>
+        public string ResultRecordName;
+        public List<PropertySpec> Inputs = new List<PropertySpec>();
+        public List<PropertySpec> Outputs = new List<PropertySpec>();
         public List<PropertySpec> Locals = new List<PropertySpec>();
-        public List<RowsetContract> NestedContracts = new List<RowsetContract>();
-        /// <summary>Names inside the transaction class (nested classes, constants, the Execute method).</summary>
-        public UniqueNames NestedNames = new UniqueNames();
+
+        /// <summary>Names inside the method (parameters, outputs, locals, action results).</summary>
+        public UniqueNames LocalNames = new UniqueNames();
 
         /// <summary>The calls, queries and plugin actions of the transaction in execution order (for the call tree).</summary>
         public List<OutlineEntry> Outline = new List<OutlineEntry>();
 
         public PropertySpec FindInput(string miiName)
         {
-            return Find(RequestProperties, miiName);
+            return Find(Inputs, miiName);
         }
 
         public PropertySpec FindOutput(string miiName)
         {
-            return Find(ResponseProperties, miiName);
+            return Find(Outputs, miiName);
         }
 
         public PropertySpec FindLocal(string miiName)
         {
             return Find(Locals, miiName);
+        }
+
+        /// <summary>The C# return type: void, the type of the only output or the result record.</summary>
+        public string ReturnTypeName
+        {
+            get
+            {
+                if (Outputs.Count == 0)
+                {
+                    return "void";
+                }
+
+                return Outputs.Count == 1 ? Outputs[0].Type.Name : ResultRecordName;
+            }
+        }
+
+        /// <summary>The type of a variable that holds the returned value (null for void).</summary>
+        public CsType ReturnType
+        {
+            get
+            {
+                if (Outputs.Count == 0)
+                {
+                    return null;
+                }
+
+                return Outputs.Count == 1 ? Outputs[0].Type : CsType.Class(ResultRecordName);
+            }
+        }
+
+        /// <summary>"return x;", "return new XResult(a, b);" or "return;".</summary>
+        public string ReturnStatement
+        {
+            get
+            {
+                if (Outputs.Count == 0)
+                {
+                    return "return;";
+                }
+
+                if (Outputs.Count == 1)
+                {
+                    return "return " + Outputs[0].Name + ";";
+                }
+
+                List<string> values = new List<string>();
+
+                foreach (PropertySpec output in Outputs)
+                {
+                    values.Add(output.Name);
+                }
+
+                return "return new " + ResultRecordName + "(" + string.Join(", ", values.ToArray()) + ");";
+            }
+        }
+
+        /// <summary>An output of this transaction, read from the variable that holds the value a call returned.</summary>
+        public TypedCode OutputOf(string variable, string miiName)
+        {
+            PropertySpec output = FindOutput(miiName);
+
+            if (output == null)
+            {
+                return null;
+            }
+
+            return Outputs.Count == 1 ? TypedCode.Primary(variable, output.Type) : TypedCode.Primary(variable + "." + output.ResultName, output.Type);
         }
 
         private static PropertySpec Find(List<PropertySpec> list, string miiName)
@@ -60,37 +136,6 @@ namespace MiiXRay.Generate
 
             return null;
         }
-
-        /// <summary>A new row/rowset class pair inside this transaction class.</summary>
-        public RowsetContract CreateNestedContract(string baseName, string origin)
-        {
-            string pascal = Naming.Pascal(baseName).TrimStart('@');
-            string rowClass = NestedNames.Claim(pascal + "Row");
-            string rowsetClass = NestedNames.Claim(pascal + "Rowset");
-            RowsetContract contract = new RowsetContract(ClassName, rowClass, rowsetClass, origin);
-            NestedContracts.Add(contract);
-            return contract;
-        }
-
-        /// <summary>Returns an existing nested contract with the same columns (and drops the new one), or the new one.</summary>
-        public RowsetContract ShareIdentical(RowsetContract contract)
-        {
-            if (contract.Columns.Count == 0)
-            {
-                return contract;
-            }
-
-            foreach (RowsetContract existing in NestedContracts)
-            {
-                if (existing != contract && existing.Signature == contract.Signature)
-                {
-                    NestedContracts.Remove(contract);
-                    return existing;
-                }
-            }
-
-            return contract;
-        }
     }
 
     /// <summary>One line of the call tree: a transaction call, a query or a plugin action.</summary>
@@ -100,6 +145,7 @@ namespace MiiXRay.Generate
         public string Kind;
         public string Target;
         public string ActionName;
+
         /// <summary>The enclosing branches, loops and error handlers, outermost first: "if X > loop Y" ("" at top level).</summary>
         public string Flow;
         public TransactionContract Callee;
@@ -108,23 +154,25 @@ namespace MiiXRay.Generate
     public sealed class QueryParameterSpec
     {
         public int Slot;
-        public string PropertyName;
-        public string ArgumentName;
-        public string DefaultValue;
-        public string Description;
+
+        /// <summary>The name used in AddParameter: the parameter description of the template, else ParamN.</summary>
+        public string Name;
     }
 
-    /// <summary>The generated class of one query template.</summary>
+    /// <summary>One query template: the name of its local variable, its parameters and its result rows.</summary>
     public sealed class QueryContract
     {
         public MiiQuery Query;
-        public string ClassName;
+
+        /// <summary>The name of the local Query variable (camelCase of the template name).</summary>
+        public string VariableName;
         public List<QueryParameterSpec> Parameters = new List<QueryParameterSpec>();
         public RowsetContract Result;
+
         /// <summary>For an Xacute query: the transaction it forwards to (null when not loaded).</summary>
         public TransactionContract XacuteTarget;
 
-        /// <summary>"TrxName.ActionName in loop X" for every action that runs the query.</summary>
+        /// <summary>"Method.ActionName [if X]" for every action that runs the query.</summary>
         public List<string> Callers = new List<string>();
 
         public QueryParameterSpec FindParameter(int slot)
@@ -146,15 +194,22 @@ namespace MiiXRay.Generate
     {
         public static readonly string[] RuntimeTypeNames =
         {
-            "Mii", "RowBase", "RowsetBase", "IQueryService", "IQueryRequest", "IPluginService", "PluginRequest", "PluginResult",
-            "MiiException", "TransactionTerminatedException"
+            "Mii", "MiiRow", "MiiRows", "Query", "IQueryService", "IPluginService", "PluginResult", "MiiException",
+            "TransactionTerminatedException"
         };
 
         public ObjectGraph Graph;
         public Dictionary<MiiTransaction, TransactionContract> Transactions = new Dictionary<MiiTransaction, TransactionContract>();
         public Dictionary<MiiQuery, QueryContract> Queries = new Dictionary<MiiQuery, QueryContract>();
+
+        /// <summary>Top-level type names (the logic class, records, row records, runtime types).</summary>
         public UniqueNames TypeNames = new UniqueNames();
+
+        /// <summary>Method names inside the logic class.</summary>
+        public UniqueNames MethodNames = new UniqueNames();
+        public List<RowsetContract> Contracts = new List<RowsetContract>();
         public List<string> Notes = new List<string>();
+        public string ClassName;
 
         public GenerationContext(ObjectGraph graph)
         {
@@ -189,25 +244,51 @@ namespace MiiXRay.Generate
             QueryContract contract;
             return query != null && Queries.TryGetValue(query, out contract) ? contract : null;
         }
+
+        /// <summary>A new row record.</summary>
+        public RowsetContract CreateContract(string baseName, string origin)
+        {
+            RowsetContract contract = new RowsetContract(TypeNames.Claim(Naming.Pascal(baseName).TrimStart('@') + "Row"), origin);
+            Contracts.Add(contract);
+            return contract;
+        }
+
+        /// <summary>Returns an existing row record with the same columns (and drops the new one), or the new one.</summary>
+        public RowsetContract ShareIdentical(RowsetContract contract)
+        {
+            if (contract.Columns.Count == 0)
+            {
+                return contract;
+            }
+
+            foreach (RowsetContract existing in Contracts)
+            {
+                if (existing != contract && existing.Signature == contract.Signature)
+                {
+                    Contracts.Remove(contract);
+                    return existing;
+                }
+            }
+
+            return contract;
+        }
     }
 
-    /// <summary>Builds the contracts (class names, request/response/local properties, query parameters and result
-    /// rowsets) of every object before any code is generated, so that callers can refer to their callees' types.</summary>
+    /// <summary>Builds the contracts (method names, parameters, outputs, locals, query parameters and result rows) of
+    /// every object before any code is generated, so that callers can refer to their callees' types.</summary>
     public static class ContractBuilder
     {
+        private static readonly string[] MethodScopeNames = { "queries", "plugins" };
+
         public static void Build(GenerationContext context)
         {
+            context.ClassName = context.TypeNames.Claim(Naming.Pascal(context.Graph.Root.ShortName).TrimStart('@') + "Logic");
+
             foreach (MiiTransaction transaction in context.Graph.Transactions)
             {
                 TransactionContract contract = new TransactionContract();
                 contract.Transaction = transaction;
-                contract.ClassName = ClaimTypeName(context, transaction.Path);
-
-                foreach (string reserved in new string[] { contract.ClassName, "Request", "Response", "Execute", "TransactionPath" })
-                {
-                    contract.NestedNames.Reserve(reserved);
-                }
-
+                contract.MethodName = ClaimName(context.MethodNames, transaction.Path);
                 context.Transactions.Add(transaction, contract);
             }
 
@@ -215,13 +296,13 @@ namespace MiiXRay.Generate
             {
                 QueryContract contract = new QueryContract();
                 contract.Query = query;
-                contract.ClassName = ClaimTypeName(context, query.Path);
+                contract.VariableName = Naming.Camel(query.ShortName);
                 context.Queries.Add(query, contract);
             }
 
             foreach (TransactionContract contract in context.Transactions.Values)
             {
-                BuildInterface(contract);
+                BuildInterface(context, contract);
             }
 
             foreach (QueryContract contract in context.Queries.Values)
@@ -232,11 +313,11 @@ namespace MiiXRay.Generate
             AddCachedQueryColumns(context);
         }
 
-        private static string ClaimTypeName(GenerationContext context, string path)
+        private static string ClaimName(UniqueNames names, string path)
         {
             string name = Naming.Pascal(ObjectPath.Leaf(path)).TrimStart('@');
 
-            if (context.TypeNames.IsUsed(name))
+            if (names.IsUsed(name))
             {
                 string folder = ObjectPath.Leaf(ObjectPath.Folder(path));
 
@@ -246,52 +327,86 @@ namespace MiiXRay.Generate
                 }
             }
 
-            return context.TypeNames.Claim(name);
+            return names.Claim(name);
         }
 
-        private static void BuildInterface(TransactionContract contract)
+        private static void BuildInterface(GenerationContext context, TransactionContract contract)
         {
             MiiTransaction transaction = contract.Transaction;
-            UniqueNames requestNames = new UniqueNames();
-            requestNames.Reserve("Request");
-            UniqueNames responseNames = new UniqueNames();
-            responseNames.Reserve("Response");
+
+            foreach (string reserved in MethodScopeNames)
+            {
+                contract.LocalNames.Reserve(reserved);
+            }
 
             foreach (MiiParameter parameter in transaction.Inputs)
             {
-                contract.RequestProperties.Add(Property(contract, parameter, requestNames, false));
+                PropertySpec input = Property(context, contract, parameter);
+                input.Initializer = "default";
+                contract.Inputs.Add(input);
             }
+
+            UniqueNames resultNames = new UniqueNames();
 
             foreach (MiiParameter parameter in transaction.Outputs)
             {
-                contract.ResponseProperties.Add(Property(contract, parameter, responseNames, false));
+                PropertySpec output = Property(context, contract, parameter);
+                output.ResultName = resultNames.Claim(Naming.Pascal(parameter.Name).TrimStart('@'));
+                output.Initializer = EmptyValue(output.Type);
+                contract.Outputs.Add(output);
             }
 
-            UniqueNames localNames = new UniqueNames();
-
-            foreach (string reserved in new string[] { "request", "response", "queryService", "pluginService" })
+            if (contract.Outputs.Count > 1)
             {
-                localNames.Reserve(reserved);
+                contract.ResultRecordName = context.TypeNames.Claim(contract.MethodName + "Result");
             }
+
+            Dictionary<string, bool> written = WrittenLocals(transaction);
 
             foreach (MiiParameter parameter in transaction.Locals)
             {
-                contract.Locals.Add(Property(contract, parameter, localNames, true));
+                PropertySpec local = Property(context, contract, parameter);
+
+                // a local the flow never writes is configuration (an XSLT, a map of options): it keeps its MII value
+                bool configuration = !written.ContainsKey(parameter.Name) && local.Type.Kind != TypeKind.Rowset && parameter.DefaultText.Trim().Length > 0;
+                local.Initializer = configuration
+                    ? Initializer(local.Type, local.Type.Kind == TypeKind.Xml ? XmlSample.Shrink(parameter.DefaultText) : parameter.DefaultText)
+                    : EmptyValue(local.Type);
+                contract.Locals.Add(local);
             }
         }
 
-        private static PropertySpec Property(TransactionContract contract, MiiParameter parameter, UniqueNames names, bool local)
+        private static Dictionary<string, bool> WrittenLocals(MiiTransaction transaction)
+        {
+            Dictionary<string, bool> written = new Dictionary<string, bool>();
+
+            foreach (MiiActionUse use in transaction.AllActionUses())
+            {
+                foreach (MiiLink link in use.Outgoing)
+                {
+                    if (link.To.StartsWith("Local.", StringComparison.Ordinal))
+                    {
+                        string name = link.To.Substring("Local.".Length);
+                        int brace = name.IndexOf('{');
+                        written[brace >= 0 ? name.Substring(0, brace) : name] = true;
+                    }
+                }
+            }
+
+            return written;
+        }
+
+        private static PropertySpec Property(GenerationContext context, TransactionContract contract, MiiParameter parameter)
         {
             PropertySpec property = new PropertySpec();
             property.MiiName = parameter.Name;
-            property.Name = names.Claim(local ? Naming.Camel(parameter.Name) : Naming.Pascal(parameter.Name));
+            property.Name = contract.LocalNames.Claim(Naming.Camel(parameter.Name));
             property.Description = parameter.Description;
-            property.Type = TypeOf(contract, parameter);
-            property.Initializer = Initializer(property.Type, property.Type.Kind == TypeKind.Xml ? XmlSample.Shrink(parameter.DefaultText) : parameter.DefaultText);
+            property.Type = TypeOf(context, contract, parameter);
             return property;
         }
 
-        private static CsType TypeOf(TransactionContract contract, MiiParameter parameter)
+        private static CsType TypeOf(GenerationContext context, TransactionContract contract, MiiParameter parameter)
         {
             switch (parameter.Type)
             {
@@ -314,14 +429,14 @@ namespace MiiXRay.Generate
                     return CsType.Map;
                 case "xml":
                 case "resultSet":
-                    return XmlTypeOf(contract, parameter);
+                    return XmlTypeOf(context, contract, parameter);
                 default:
                     return CsType.String;
             }
         }
 
         /// <summary>An xml property is typed by its reference document when that is an Illuminator rowset.</summary>
-        private static CsType XmlTypeOf(TransactionContract contract, MiiParameter parameter)
+        private static CsType XmlTypeOf(GenerationContext context, TransactionContract contract, MiiParameter parameter)
         {
             string text = parameter.DefaultText;
 
@@ -345,11 +460,43 @@ namespace MiiXRay.Generate
                 return CsType.Xml;
             }
 
-            RowsetContract rowset = contract.CreateNestedContract(parameter.Name, "reference document of " + parameter.Name);
+            RowsetContract rowset = context.CreateContract(parameter.Name, "reference document of " + parameter.Name + " in " + contract.Transaction.Path);
             ContractFactory.AddColumnsFromRowsets(rowset, document);
-            return CsType.RowsetOf(contract.ShareIdentical(rowset));
+            return CsType.RowsetOf(context.ShareIdentical(rowset));
         }
 
+        /// <summary>The empty value of a type (MII default values are not carried over).</summary>
+        public static string EmptyValue(CsType type)
+        {
+            switch (type.Kind)
+            {
+                case TypeKind.String:
+                    return "\"\"";
+                case TypeKind.Bool:
+                    return "false";
+                case TypeKind.Int:
+                    return "0";
+                case TypeKind.Long:
+                    return "0L";
+                case TypeKind.Double:
+                    return "0.0";
+                case TypeKind.Decimal:
+                    return "0m";
+                case TypeKind.DateTime:
+                    return "DateTime.MinValue";
+                case TypeKind.List:
+                case TypeKind.Rowset:
+                    return "[]";
+                case TypeKind.Map:
+                case TypeKind.Xml:
+                case TypeKind.Row:
+                    return "new()";
+                default:
+                    return "null";
+            }
+        }
+
+        /// <summary>A configured MII value as C# code of the given type.</summary>
         public static string Initializer(CsType type, string defaultText)
         {
             switch (type.Kind)
@@ -388,13 +535,6 @@ namespace MiiXRay.Generate
             MiiQuery query = contract.Query;
             UniqueNames names = new UniqueNames();
 
-            foreach (string reserved in new string[] { contract.ClassName, "Request", "Row", "Result", "Text" })
-            {
-                names.Reserve(reserved);
-            }
-
-            UniqueNames arguments = new UniqueNames();
-
             foreach (MiiQueryParameter parameter in query.Parameters)
             {
                 QueryParameterSpec spec = new QueryParameterSpec();
@@ -406,30 +546,17 @@ namespace MiiXRay.Generate
                     baseName = query.XacuteMappedTargets[parameter.Slot];
                 }
 
-                spec.PropertyName = names.Claim(Naming.Pascal(baseName).TrimStart('@'));
-                spec.ArgumentName = arguments.Claim(Naming.Camel(baseName));
-                spec.DefaultValue = parameter.DefaultValue ?? string.Empty;
-                spec.Description = parameter.Description;
+                spec.Name = names.Claim(baseName);
                 contract.Parameters.Add(spec);
             }
 
             if (query.Kind == MiiQueryKind.Sql || query.Kind == MiiQueryKind.Mdo)
             {
-                contract.Result = new RowsetContract(contract.ClassName, "Row", "Result", "columns of " + query.Path);
+                contract.Result = context.CreateContract(query.ShortName, "columns of " + query.Path);
 
-                if (query.Kind == MiiQueryKind.Sql)
+                foreach (string column in query.Kind == MiiQueryKind.Sql ? SqlColumns.Extract(query.Text) : MdoAttributes(query.Text))
                 {
-                    foreach (string column in SqlColumns.Extract(query.Text))
-                    {
-                        contract.Result.Add(column, CsType.String, true);
-                    }
-                }
-                else
-                {
-                    foreach (string column in MdoAttributes(query.Text))
-                    {
-                        contract.Result.Add(column, CsType.String, true);
-                    }
+                    contract.Result.Add(column, CsType.String, true);
                 }
             }
 

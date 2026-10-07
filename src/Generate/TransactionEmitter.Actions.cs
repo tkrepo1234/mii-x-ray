@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
 using MiiXRay.Model;
@@ -65,10 +66,10 @@ namespace MiiXRay.Generate
                     lines.AddRange(EmitTerminate(use));
                     return lines;
                 case "Tracer":
-                    lines.Add("pluginService.Log(" + LogText(use, "Level", "DEBUG") + ", " + MessageOf(use, "Message") + ");");
+                    lines.Add("plugins.Log(" + LogText(use, "Level", "DEBUG") + ", " + MessageOf(use, "Message") + ");");
                     break;
                 case "EventLogger":
-                    lines.Add("pluginService.Log(" + LogText(use, "EventType", "INFO") + ", " + MessageOf(use, "Message") + ");");
+                    lines.Add("plugins.Log(" + LogText(use, "EventType", "INFO") + ", " + MessageOf(use, "Message") + ");");
                     break;
                 case "Pause":
                     TypedCode delay = InputValue(use, "Delay", CsType.Int) ?? TypedCode.Primary("0", CsType.Int);
@@ -159,7 +160,7 @@ namespace MiiXRay.Generate
                 message = TypedCode.Primary(CsLiteral.String("Transaction Execution Terminated Upon Request"), CsType.String);
             }
 
-            string statement = "throw " + TerminationMarker + "TransactionPath, " + message.Code + ");";
+            string statement = "throw " + TerminationMarker + CsLiteral.String(_transaction.Path) + ", " + message.Code + ");";
 
             if (withError.Code == "true")
             {
@@ -176,7 +177,7 @@ namespace MiiXRay.Generate
             }
 
             lines.AddRange(EmitOutgoing(use));
-            lines.Add("return response;");
+            lines.Add(_contract.ReturnStatement);
             return lines;
         }
 
@@ -194,7 +195,7 @@ namespace MiiXRay.Generate
             else
             {
                 TypedCode path = InputValue(use, "Transform", CsType.String) ?? TypedCode.Primary("\"\"", CsType.String);
-                stylesheetCode = "pluginService.LoadResource(" + path.Code + ")";
+                stylesheetCode = "plugins.LoadResource(" + path.Code + ")";
             }
 
             lines.Add(Assign(symbol, "Mii.XslTransform(" + input.Code + ", " + stylesheetCode + ")"));
@@ -234,17 +235,59 @@ namespace MiiXRay.Generate
             }
 
             RowsetContract contract = document.Type.Contract;
-            string row = _names.Claim(Naming.Camel(use.Name) + "Row");
-            lines.Add(contract.RowTypeName + " " + row + " = new " + contract.RowTypeName + "();");
+            List<string> assignments = new List<string>();
 
             foreach (KeyValuePair<string, TypedCode> value in values)
             {
                 RowsetColumn column = contract.Ensure(value.Key);
-                lines.Add(row + "." + column.PropertyName + " = " + ExpressionTranslator.ConvertTo(value.Value, column.Type).Code + ";");
+                assignments.Add(column.PropertyName + " = " + ExpressionTranslator.ConvertTo(value.Value, column.Type).Code);
             }
 
-            lines.Add(document.At(Precedence.Primary) + ".Rows.Add(" + row + ");");
+            lines.Add(document.At(Precedence.Primary) + ".Add(new " + contract.RowTypeName + Initializer(assignments) + ");");
             return lines;
+        }
+
+        /// <summary>" { A = 1, B = 2 }" or a block with one member per line; "()" when empty.</summary>
+        private static string Initializer(List<string> members)
+        {
+            if (members.Count == 0)
+            {
+                return "()";
+            }
+
+            if (members.Count <= 2 && string.Join(", ", members.ToArray()).Length <= 80)
+            {
+                return " { " + string.Join(", ", members.ToArray()) + " }";
+            }
+
+            StringBuilder block = new StringBuilder("\n{");
+
+            foreach (string member in members)
+            {
+                block.Append("\n    ").Append(member).Append(',');
+            }
+
+            return block.Append("\n}").ToString();
+        }
+
+        /// <summary>"(a: x, b: y)" or one named argument per line.</summary>
+        private static string ArgumentList(List<string> arguments)
+        {
+            string single = string.Join(", ", arguments.ToArray());
+
+            if (arguments.Count <= 2 && single.Length <= 80)
+            {
+                return "(" + single + ")";
+            }
+
+            StringBuilder list = new StringBuilder("(");
+
+            for (int index = 0; index < arguments.Count; index++)
+            {
+                list.Append("\n    ").Append(arguments[index]).Append(index < arguments.Count - 1 ? "," : ")");
+            }
+
+            return list.ToString();
         }
 
         // ------------------------------------------------------------------ calls
@@ -278,13 +321,13 @@ namespace MiiXRay.Generate
             if (symbol.Query != null)
             {
                 entry.Kind = symbol.Callee != null ? "call" : "query";
-                entry.Target = symbol.Callee != null ? symbol.Callee.ClassName + " via Xacute query " + symbol.Query.ClassName : symbol.Query.ClassName;
-                symbol.Query.Callers.Add(_contract.ClassName + "." + use.Name + (entry.Flow.Length > 0 ? " [" + entry.Flow + "]" : string.Empty));
+                entry.Target = symbol.Callee != null ? symbol.Callee.MethodName + " via Xacute query " + symbol.Query.Query.ShortName : symbol.Query.Query.ShortName;
+                symbol.Query.Callers.Add(_contract.MethodName + "." + use.Name + (entry.Flow.Length > 0 ? " [" + entry.Flow + "]" : string.Empty));
             }
             else if (symbol.Callee != null)
             {
                 entry.Kind = "call";
-                entry.Target = symbol.Callee.ClassName;
+                entry.Target = symbol.Callee.MethodName;
             }
             else
             {
@@ -306,32 +349,30 @@ namespace MiiXRay.Generate
                 lines.Add("// MII runs this call asynchronously");
             }
 
-            string request = _names.Claim(Naming.Camel(use.Name) + "Request");
-            lines.Add(callee.ClassName + ".Request " + request + " = new " + callee.ClassName + ".Request();");
+            List<KeyValuePair<PropertySpec, MiiLink>> inputs = new List<KeyValuePair<PropertySpec, MiiLink>>();
 
             foreach (MiiLink link in use.Incoming)
             {
                 LinkTarget target = LinkTarget.Parse(link.To);
-                string property = target.Property;
 
-                if (Array.IndexOf(CallSettings, property) >= 0)
+                if (Array.IndexOf(CallSettings, target.Property) >= 0)
                 {
                     continue;
                 }
 
-                PropertySpec input = callee.FindInput(property);
+                PropertySpec input = callee.FindInput(target.Property);
 
                 if (input == null)
                 {
-                    lines.Add("// X-Ray: " + callee.ClassName + " has no input " + property + " (stale link): " + OneLine(link.From));
+                    lines.Add("// X-Ray: " + callee.MethodName + " has no input " + target.Property + " (stale link): " + OneLine(link.From));
                     Note("link to " + link.To + ": the called transaction has no such input");
                     continue;
                 }
 
-                lines.AddRange(Write(TypedCode.Primary(request + "." + input.Name, input.Type), target.Selector, link));
+                inputs.Add(new KeyValuePair<PropertySpec, MiiLink>(input, link));
             }
 
-            lines.Add(Assign(symbol, callee.ClassName + ".Execute(" + request + ", queryService, pluginService)"));
+            lines.AddRange(EmitMethodCall(use, symbol, inputs));
             return lines;
         }
 
@@ -343,8 +384,7 @@ namespace MiiXRay.Generate
             TransactionContract callee = symbol.Callee;
             MiiQuery query = symbol.Query.Query;
             lines.Add("// Xacute query " + query.Path + " runs " + callee.Transaction.Path);
-            string request = _names.Claim(Naming.Camel(use.Name) + "Request");
-            lines.Add(callee.ClassName + ".Request " + request + " = new " + callee.ClassName + ".Request();");
+            List<KeyValuePair<PropertySpec, MiiLink>> inputs = new List<KeyValuePair<PropertySpec, MiiLink>>();
 
             foreach (MiiLink link in use.Incoming)
             {
@@ -366,23 +406,87 @@ namespace MiiXRay.Generate
 
                 if (input == null)
                 {
-                    lines.Add("// X-Ray: " + target.Property + " is not mapped to an input of " + callee.ClassName + ": " + OneLine(link.From));
+                    lines.Add("// X-Ray: " + target.Property + " is not mapped to an input of " + callee.MethodName + ": " + OneLine(link.From));
                     continue;
                 }
 
-                lines.AddRange(Write(TypedCode.Primary(request + "." + input.Name, input.Type), target.Selector, link));
+                inputs.Add(new KeyValuePair<PropertySpec, MiiLink>(input, link));
             }
 
-            lines.Add(Assign(symbol, callee.ClassName + ".Execute(" + request + ", queryService, pluginService)"));
+            lines.AddRange(EmitMethodCall(use, symbol, inputs));
             return lines;
         }
 
+        /// <summary>The call of a transaction's method with named arguments; an input filled through XPath links is built
+        /// as a document first.</summary>
+        private List<string> EmitMethodCall(MiiActionUse use, ActionSymbol symbol, List<KeyValuePair<PropertySpec, MiiLink>> inputs)
+        {
+            List<string> lines = new List<string>();
+            List<string> order = new List<string>();
+            Dictionary<string, string> values = new Dictionary<string, string>();
+            Dictionary<string, string> documents = new Dictionary<string, string>();
+
+            foreach (KeyValuePair<PropertySpec, MiiLink> pair in inputs)
+            {
+                PropertySpec input = pair.Key;
+                MiiLink link = pair.Value;
+                LinkTarget target = LinkTarget.Parse(link.To);
+
+                if (!order.Contains(input.Name))
+                {
+                    order.Add(input.Name);
+                }
+
+                if (target.Selector == null && link.Kind != "RemoveXml")
+                {
+                    TypedCode value = ExpressionTranslator.ConvertTo(LinkValue(link, input.Type), input.Type);
+                    string document;
+
+                    if (documents.TryGetValue(input.Name, out document))
+                    {
+                        lines.Add(document + " = " + ExpressionTranslator.ConvertTo(value, CsType.Xml).Code + ";");
+                    }
+                    else
+                    {
+                        values[input.Name] = value.Code;
+                    }
+
+                    continue;
+                }
+
+                string name;
+
+                if (!documents.TryGetValue(input.Name, out name))
+                {
+                    name = _names.Claim(Naming.Camel(use.Name) + Naming.Pascal(input.MiiName).TrimStart('@'));
+                    string start;
+                    string initial = values.TryGetValue(input.Name, out start) ? "Mii.ToXml(" + start + ")" : "new XmlDocument()";
+                    lines.Add("var " + name + " = " + initial + ";");
+                    documents[input.Name] = name;
+                }
+
+                lines.AddRange(Write(TypedCode.Primary(name, CsType.Xml), target.Selector == null ? "/*" : target.Selector, link));
+                values[input.Name] = ExpressionTranslator.ConvertTo(TypedCode.Primary(name, CsType.Xml), input.Type).Code;
+            }
+
+            List<string> arguments = new List<string>();
+
+            foreach (string name in order)
+            {
+                arguments.Add(name + ": " + values[name]);
+            }
+
+            lines.Add(Assign(symbol, symbol.Callee.MethodName + ArgumentList(arguments)));
+            return lines;
+        }
+
+        /// <summary>A query as a local Query variable: the statement, then AddParameter per linked or configured slot.</summary>
         private List<string> EmitQuery(MiiActionUse use, ActionSymbol symbol)
         {
             List<string> lines = new List<string>();
             QueryContract query = symbol.Query;
             Dictionary<int, string> arguments = new Dictionary<int, string>();
-            string text = query.ClassName + ".Text";
+            string text = CsLiteral.String(query.Query.Text);
 
             foreach (MiiLink link in use.Incoming)
             {
@@ -422,11 +526,24 @@ namespace MiiXRay.Generate
                 }
             }
 
-            List<string> named = new List<string>();
-            List<int> slots = new List<int>(arguments.Keys);
-            slots.Sort();
+            if (query.Parameters.Count > 0)
+            {
+                List<string> slots = new List<string>();
 
-            foreach (int number in slots)
+                foreach (QueryParameterSpec parameter in query.Parameters)
+                {
+                    slots.Add("[Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "] = " + parameter.Name);
+                }
+
+                lines.Add("// " + string.Join(", ", slots.ToArray()));
+            }
+
+            string variable = _names.Claim(query.VariableName);
+            lines.Add("var " + variable + " = new Query(" + text + ");");
+            List<int> numbers = new List<int>(arguments.Keys);
+            numbers.Sort();
+
+            foreach (int number in numbers)
             {
                 QueryParameterSpec parameter = query.FindParameter(number);
 
@@ -436,25 +553,16 @@ namespace MiiXRay.Generate
                     continue;
                 }
 
-                named.Add(parameter.ArgumentName + ": " + arguments[number]);
+                lines.Add(variable + ".AddParameter(" + CsLiteral.String(parameter.Name) + ", " + arguments[number] + ");");
             }
 
-            string method = symbol.Kind == ActionKind.QueryCommand
-                ? "queryService.ExecuteCommand("
-                : "queryService.ExecuteQuery<" + query.ClassName + ".Result>(";
-            string start = (symbol.Variable != null ? symbol.Variable + " = " : string.Empty) + method + text + ", new " + query.ClassName + ".Request(";
-
-            if (named.Count <= 2)
+            if (symbol.Kind == ActionKind.QueryCommand)
             {
-                lines.Add(start + string.Join(", ", named.ToArray()) + "));");
-                return lines;
+                lines.Add("queries.ExecuteCommand(" + variable + ");");
             }
-
-            lines.Add(start);
-
-            for (int index = 0; index < named.Count; index++)
+            else
             {
-                lines.Add("    " + named[index] + (index < named.Count - 1 ? "," : "));"));
+                lines.Add(Assign(symbol, "queries.Execute<" + query.Result.RowTypeName + ">(" + variable + ")"));
             }
 
             return lines;
@@ -465,9 +573,7 @@ namespace MiiXRay.Generate
         {
             List<string> lines = new List<string>();
             MiiActionDefinition definition = use.Definition;
-            string request = _names.Claim(Naming.Camel(use.Name) + "Request");
-            lines.Add("PluginRequest " + request + " = new PluginRequest(" + CsLiteral.String(use.Name) + ");");
-
+            List<string> settings = new List<string>();
             Dictionary<string, bool> linked = new Dictionary<string, bool>();
             Dictionary<string, List<MiiLink>> selectorLinks = new Dictionary<string, List<MiiLink>>();
 
@@ -512,7 +618,7 @@ namespace MiiXRay.Generate
                     value = "***";
                 }
 
-                lines.Add(request + ".Set(" + CsLiteral.String(name) + ", " + CsLiteral.String(value) + ");");
+                settings.Add("[" + CsLiteral.String(name) + "] = " + CsLiteral.String(value));
             }
 
             foreach (MiiLink link in use.Incoming)
@@ -521,24 +627,24 @@ namespace MiiXRay.Generate
 
                 if (target.Selector == null && !selectorLinks.ContainsKey(target.Property) && link.Kind != "RemoveXml")
                 {
-                    lines.Add(request + ".Set(" + CsLiteral.String(target.Property) + ", " + LinkValue(link, CsType.Object).Code + ");");
+                    settings.Add("[" + CsLiteral.String(target.Property) + "] = " + LinkValue(link, CsType.Object).Code);
                 }
             }
 
             foreach (KeyValuePair<string, List<MiiLink>> pair in selectorLinks)
             {
                 // a document filled through XPath links, starting from the configured template
-                string document = _names.Claim(Naming.Camel(use.Name) + Naming.Pascal(pair.Key).TrimStart('@') + "Document");
+                string document = _names.Claim(Naming.Camel(use.Name) + Naming.Pascal(pair.Key).TrimStart('@'));
                 string template = MiiXml.OwnText(definition.Property(pair.Key)).Trim();
                 MiiLink whole = PlainIncoming(use, pair.Key);
 
                 if (whole != null)
                 {
-                    lines.Add("XmlDocument " + document + " = " + ExpressionTranslator.ConvertTo(LinkValue(whole, CsType.Xml), CsType.Xml).Code + ";");
+                    lines.Add("var " + document + " = " + ExpressionTranslator.ConvertTo(LinkValue(whole, CsType.Xml), CsType.Xml).Code + ";");
                 }
                 else
                 {
-                    lines.Add("XmlDocument " + document + " = " + ContractBuilder.Initializer(CsType.Xml, template) + ";");
+                    lines.Add("var " + document + " = " + (MiiXml.TryParse(template) != null ? ContractBuilder.Initializer(CsType.Xml, template) : "new XmlDocument()") + ";");
                 }
 
                 foreach (MiiLink link in pair.Value)
@@ -551,10 +657,11 @@ namespace MiiXRay.Generate
                     }
                 }
 
-                lines.Add(request + ".Set(" + CsLiteral.String(pair.Key) + ", " + document + ");");
+                settings.Add("[" + CsLiteral.String(pair.Key) + "] = " + document);
             }
 
-            lines.Add(Assign(symbol, "pluginService.Invoke(" + CsLiteral.String(definition.ActionType) + ", " + request + ")"));
+            string call = "plugins.Invoke(" + CsLiteral.String(definition.ActionType) + ", " + CsLiteral.String(use.Name) + ", new()" + Initializer(settings) + ")";
+            lines.Add(Assign(symbol, call.Replace("new()()", "new()")));
             return lines;
         }
     }

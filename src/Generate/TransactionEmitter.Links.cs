@@ -186,8 +186,7 @@ namespace MiiXRay.Generate
 
                 if (property != null)
                 {
-                    string owner = _contract.FindOutput(member) != null ? "response." : "request.";
-                    return Write(TypedCode.Primary(owner + property.Name, property.Type), target.Selector, link);
+                    return Write(TypedCode.Primary(property.Name, property.Type), target.Selector, link);
                 }
             }
             else if (scope == "Local")
@@ -202,7 +201,7 @@ namespace MiiXRay.Generate
             else if (Array.IndexOf(SharedScopes, scope) >= 0 && target.Selector == null)
             {
                 List<string> shared = new List<string>();
-                shared.Add("pluginService.SetProperty(" + CsLiteral.String(target.Path) + ", " + LinkValue(link, CsType.Object).Code + ");");
+                shared.Add("plugins.SetProperty(" + CsLiteral.String(target.Path) + ", " + LinkValue(link, CsType.Object).Code + ");");
                 return shared;
             }
             else if (member == "Break")
@@ -314,7 +313,7 @@ namespace MiiXRay.Generate
 
             if (target.Type.Kind == TypeKind.Rowset && (path == "/*" || path == "/Rowsets/Rowset/Row" || path == "/Rowsets/Rowset/Row/*"))
             {
-                return target.Code + ".Rows.Clear();";
+                return target.Code + ".Clear();";
             }
 
             return XmlEdit(target, "Mii.RemoveXml", SelectorPath(path));

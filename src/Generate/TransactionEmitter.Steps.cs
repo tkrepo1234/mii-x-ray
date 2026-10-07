@@ -17,30 +17,49 @@ namespace MiiXRay.Generate
     {
         private const string TerminationMarker = "new TransactionTerminatedException(";
 
-        /// <summary>The lines of the Execute method.</summary>
-        public List<string> EmitExecuteMethod()
+        /// <summary>The lines of the transaction's method: inputs are parameters, outputs the return value.</summary>
+        public List<string> EmitMethod(bool isPublic)
         {
             List<string> flow = EmitSiblings(_transaction.Steps, new List<string>());
 
             List<string> lines = new List<string>();
-            lines.Add("/// <summary>Runs " + Xml(_transaction.Path) + ".</summary>");
-            lines.Add("public static Response Execute(Request request, IQueryService queryService, IPluginService pluginService)");
-            lines.Add("{");
-            List<string> body = new List<string>();
-            body.Add("Response response = new Response();");
+            lines.Add("/// <summary>");
+            lines.Add("/// " + Xml(_transaction.Path));
 
-            if (_contract.Locals.Count > 0)
+            foreach (string line in _transaction.Description.Replace("\r\n", "\n").Split('\n'))
             {
-                body.Add(string.Empty);
-                body.Add("// Local variables");
-
-                foreach (PropertySpec local in _contract.Locals)
+                if (line.Trim().Length > 0)
                 {
-                    body.Add(local.Type.Name + " " + local.Name + " = " + local.Initializer + ";");
+                    lines.Add("/// " + Xml(line.Trim()));
                 }
             }
 
-            List<HoistedVariable> variables = new List<HoistedVariable>();
+            lines.Add("/// </summary>");
+            lines.AddRange(Signature(isPublic));
+            lines.Add("{");
+
+            // outputs live for the whole method (they are returned); locals and action results move to where they are set when they can
+            List<string> body = new List<string>();
+
+            foreach (PropertySpec output in _contract.Outputs)
+            {
+                body.Add(output.Type.Name + " " + output.Name + " = " + output.Initializer + ";");
+            }
+
+            List<HoistedVariable> candidates = new List<HoistedVariable>();
+            List<string> configuration = new List<string>();
+
+            foreach (PropertySpec local in _contract.Locals)
+            {
+                if (local.Initializer == ContractBuilder.EmptyValue(local.Type))
+                {
+                    candidates.Add(Hoisted(local.Type.Name, local.Name, local.Initializer, false));
+                }
+                else
+                {
+                    configuration.Add(local.Type.Name + " " + local.Name + " = " + local.Initializer + ";");
+                }
+            }
 
             foreach (MiiActionDefinition definition in _transaction.Actions.Values)
             {
@@ -48,38 +67,75 @@ namespace MiiXRay.Generate
 
                 if (symbol.Variable != null)
                 {
-                    HoistedVariable variable = new HoistedVariable();
-                    variable.Type = symbol.VariableType.Name;
-                    variable.Name = symbol.Variable;
-                    variable.Initializer = symbol.Initializer;
-                    variable.IsCatch = symbol.Kind == ActionKind.Catch;
-                    variables.Add(variable);
+                    candidates.Add(Hoisted(symbol.VariableType.Name, symbol.Variable, symbol.Initializer, symbol.Kind == ActionKind.Catch));
                 }
             }
 
-            List<HoistedVariable> hoisted = DeclarationPlacer.Place(flow, variables);
-
-            if (hoisted.Count > 0)
+            foreach (HoistedVariable variable in DeclarationPlacer.Place(flow, candidates))
             {
-                body.Add(string.Empty);
-                body.Add("// Action results read outside the block that sets them (MII keeps them for the whole run)");
-
-                foreach (HoistedVariable variable in hoisted)
-                {
-                    body.Add(variable.Type + " " + variable.Name + " = " + variable.Initializer + ";");
-                }
+                body.Add(variable.Type + " " + variable.Name + " = " + variable.Initializer + ";");
             }
+
+            body.AddRange(configuration);
 
             if (flow.Count > 0)
             {
-                body.Add(string.Empty);
+                if (body.Count > 0)
+                {
+                    body.Add(string.Empty);
+                }
+
                 body.AddRange(flow);
             }
 
-            body.Add(string.Empty);
-            body.Add("return response;");
+            if (_contract.Outputs.Count > 0)
+            {
+                body.Add(string.Empty);
+                body.Add(_contract.ReturnStatement);
+            }
+
             lines.AddRange(Indent(body));
             lines.Add("}");
+            return lines;
+        }
+
+        private static HoistedVariable Hoisted(string type, string name, string initializer, bool isCatch)
+        {
+            HoistedVariable variable = new HoistedVariable();
+            variable.Type = type;
+            variable.Name = name;
+            variable.Initializer = initializer;
+            variable.IsCatch = isCatch;
+            return variable;
+        }
+
+        /// <summary>"public BomGetDetailsResult TrxBomGetDetails(string site = default, ...)"; long lists one per line.
+        /// Every parameter is optional: a caller passes the inputs MII links, the others stay empty.</summary>
+        private List<string> Signature(bool isPublic)
+        {
+            List<string> parameters = new List<string>();
+
+            foreach (PropertySpec input in _contract.Inputs)
+            {
+                parameters.Add(input.Type.Name + " " + input.Name + " = default");
+            }
+
+            string head = (isPublic ? "public " : "private ") + _contract.ReturnTypeName + " " + _contract.MethodName + "(";
+            List<string> lines = new List<string>();
+
+            if (parameters.Count <= 3)
+            {
+                lines.Add(head + string.Join(", ", parameters.ToArray()) + ")");
+                return lines;
+            }
+
+            lines.Add(head);
+
+            for (int index = 0; index < parameters.Count; index++)
+            {
+                lines.Add("    " + parameters[index] + (index < parameters.Count - 1 ? "," : ")"));
+            }
+
             return lines;
         }
 
@@ -162,7 +218,7 @@ namespace MiiXRay.Generate
             if (ContainsTermination(guarded))
             {
                 // Terminate Transaction is no exception in MII: a Catch does not stop it
-                handler.Add("if (Mii.IsTerminationOf(" + error + ", TransactionPath))");
+                handler.Add("if (Mii.IsTerminationOf(" + error + ", " + CsLiteral.String(_transaction.Path) + "))");
                 handler.Add("{");
                 handler.Add("    throw;");
                 handler.Add("}");
@@ -318,7 +374,7 @@ namespace MiiXRay.Generate
             TypedCode subject = InputValue(use, "InputValue", CsType.String) ?? TypedCode.Primary("\"\"", CsType.String);
             string variable = _names.Claim(Naming.Camel(use.Name) + "Value");
             lines.Add("// " + use.Name);
-            lines.Add("string " + variable + " = " + subject.Code + ";");
+            lines.Add("var " + variable + " = " + subject.Code + ";");
             lines.AddRange(EmitOutgoing(use));
 
             for (int index = 0; index <= matchCount && index < step.Children.Count; index++)
@@ -373,7 +429,7 @@ namespace MiiXRay.Generate
             if (IsLinkTarget(use.Name, "Break"))
             {
                 loop.BreakVariable = _names.Claim(camel + "Break");
-                lines.Add("bool " + loop.BreakVariable + " = false;");
+                lines.Add("var " + loop.BreakVariable + " = false;");
             }
 
             string header;
@@ -404,7 +460,7 @@ namespace MiiXRay.Generate
                 {
                     string index = _names.Claim(camel + "Index");
                     loop.Index = TypedCode.Primary(index, CsType.Int);
-                    lines.Add("int " + index + " = 0;");
+                    lines.Add("var " + index + " = 0;");
                 }
             }
 
@@ -468,13 +524,13 @@ namespace MiiXRay.Generate
                 if (IsReferenced(use.Name, "ItemCount"))
                 {
                     string items = _names.Claim(camel + "Items");
-                    lines.Add("List<string> " + items + " = " + list.Code + ";");
+                    lines.Add("var " + items + " = " + list.Code + ";");
                     list = TypedCode.Primary(items, CsType.List);
                     loop.Count = TypedCode.Primary(items + ".Count", CsType.Int);
                 }
 
                 loop.Item = TypedCode.Primary(itemName, CsType.String);
-                return "foreach (string " + itemName + " in " + list.Code + ")";
+                return "foreach (var " + itemName + " in " + list.Code + ")";
             }
 
             ReferenceNode reference = ParseQuietly(sourceText) as ReferenceNode;
@@ -495,27 +551,26 @@ namespace MiiXRay.Generate
 
                 if (baseCode.Type.Kind == TypeKind.Rowset && (path == "/Rowsets/Rowset/Row" || path == "Rowsets/Rowset/Row"))
                 {
-                    string rows = baseCode.At(Precedence.Primary) + ".Rows";
                     loop.Item = TypedCode.Primary(itemName, CsType.RowOf(baseCode.Type.Contract));
-                    loop.Count = TypedCode.Primary(rows + ".Count", CsType.Int);
-                    return "foreach (" + loop.Item.Type.Name + " " + itemName + " in " + rows + ")";
+                    loop.Count = TypedCode.Primary(baseCode.At(Precedence.Primary) + ".Count", CsType.Int);
+                    return "foreach (var " + itemName + " in " + baseCode.Code + ")";
                 }
 
                 string nodes = _names.Claim(camel + "Nodes");
-                lines.Add("List<XmlDocument> " + nodes + " = Mii.SelectNodes(" + baseCode.Code + ", " + CsLiteral.String(path) + ");");
+                lines.Add("var " + nodes + " = Mii.SelectNodes(" + baseCode.Code + ", " + CsLiteral.String(path) + ");");
                 loop.Item = TypedCode.Primary(itemName, CsType.Xml);
                 loop.Count = TypedCode.Primary(nodes + ".Count", CsType.Int);
-                return "foreach (XmlDocument " + itemName + " in " + nodes + ")";
+                return "foreach (var " + itemName + " in " + nodes + ")";
             }
 
             TypedCode source = TranslateExpression(sourceText);
             string fallback = _names.Claim(camel + "Nodes");
             Note(sourceText.Trim().Length == 0 ? "repeater without source, it runs over nothing"
                 : "repeater source without XPath, iterating the children of the root element: " + OneLine(sourceText));
-            lines.Add("List<XmlDocument> " + fallback + " = Mii.SelectNodes(" + source.Code + ", \"/*/*\");");
+            lines.Add("var " + fallback + " = Mii.SelectNodes(" + source.Code + ", \"/*/*\");");
             loop.Item = TypedCode.Primary(itemName, CsType.Xml);
             loop.Count = TypedCode.Primary(fallback + ".Count", CsType.Int);
-            return "foreach (XmlDocument " + itemName + " in " + fallback + ")";
+            return "foreach (var " + itemName + " in " + fallback + ")";
         }
 
         private static Node ParseQuietly(string text)
@@ -577,9 +632,10 @@ namespace MiiXRay.Generate
         {
             List<string> result = new List<string>(lines.Count);
 
+            // every physical line, so that raw string literals (closing quotes at the start of a line) keep their value
             foreach (string line in lines)
             {
-                result.Add(line.Length == 0 ? line : "    " + line);
+                result.Add(line.Length == 0 ? line : "    " + line.Replace("\r\n", "\n").Replace("\n", "\n    "));
             }
 
             return result;
