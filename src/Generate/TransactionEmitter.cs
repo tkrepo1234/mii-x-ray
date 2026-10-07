@@ -71,15 +71,19 @@ namespace MiiXRay.Generate
             _contract = contract;
             _transaction = contract.Transaction;
             _translator = new ExpressionTranslator(this);
+
             foreach (string reserved in new string[] { "request", "response", "queryService", "pluginService" })
             {
                 _names.Reserve(reserved);
             }
+
             foreach (PropertySpec local in contract.Locals)
             {
                 _names.Reserve(local.Name);
             }
+
             CollectExpressionTexts();
+
             foreach (MiiActionDefinition definition in _transaction.Actions.Values)
             {
                 _actions[definition.Name] = CreateSymbol(definition);
@@ -96,12 +100,14 @@ namespace MiiXRay.Generate
                     _expressionTexts.Add(link.From);
                     _expressionTexts.Add(link.To);
                 }
+
                 foreach (MiiLink link in use.Outgoing)
                 {
                     _expressionTexts.Add(link.From);
                     _expressionTexts.Add(link.To);
                 }
             }
+
             foreach (MiiActionDefinition definition in _transaction.Actions.Values)
             {
                 foreach (string property in new string[] { "Source", "IlluminatorDocument", "From", "To", "Step" })
@@ -117,6 +123,7 @@ namespace MiiXRay.Generate
         private bool IsReferenced(string actionName, string member)
         {
             Regex pattern = new Regex(@"(?<![A-Za-z0-9_.])" + Regex.Escape(actionName) + @"\." + (member == null ? string.Empty : Regex.Escape(member) + @"(?![A-Za-z0-9_])"));
+
             foreach (string text in _expressionTexts)
             {
                 if (text != null && pattern.IsMatch(text))
@@ -124,6 +131,7 @@ namespace MiiXRay.Generate
                     return true;
                 }
             }
+
             return false;
         }
 
@@ -138,6 +146,7 @@ namespace MiiXRay.Generate
                         return true;
                     }
                 }
+
                 foreach (MiiLink link in use.Incoming)
                 {
                     if (link.To == actionName + "." + member && use.Name != actionName)
@@ -146,6 +155,7 @@ namespace MiiXRay.Generate
                     }
                 }
             }
+
             return false;
         }
 
@@ -156,11 +166,14 @@ namespace MiiXRay.Generate
             symbol.Definition = definition;
             symbol.Kind = KindOf(definition, symbol);
             bool hasResult = symbol.Kind != ActionKind.None && symbol.Kind != ActionKind.Loop && symbol.Kind != ActionKind.QueryCommand;
+
             if (!hasResult || !IsReferenced(definition.Name, null))
             {
                 return symbol;
             }
+
             symbol.Variable = _names.Claim(Naming.Camel(definition.Name));
+
             switch (symbol.Kind)
             {
                 case ActionKind.TransactionCall:
@@ -189,16 +202,19 @@ namespace MiiXRay.Generate
                     symbol.Initializer = "new PluginResult()";
                     break;
             }
+
             return symbol;
         }
 
         private ActionKind KindOf(MiiActionDefinition definition, ActionSymbol symbol)
         {
             string type = definition.ActionType;
+
             if (Array.IndexOf(LoopTypes, type) >= 0)
             {
                 return ActionKind.Loop;
             }
+
             switch (type)
             {
                 case "Assignment":
@@ -227,43 +243,54 @@ namespace MiiXRay.Generate
                     symbol.Callee = literal == null ? null : _context.FindTransaction(literal);
                     return symbol.Callee != null ? ActionKind.TransactionCall : ActionKind.Plugin;
             }
+
             if (definition.HasProperty("QueryTemplate"))
             {
                 string template = definition.Static("QueryTemplate");
+
                 if (template.Length == 0)
                 {
                     template = DependencyResolver.LiteralLinkedValue(_transaction, definition.Name, "QueryTemplate") ?? string.Empty;
                 }
+
                 symbol.Query = _context.FindQuery(template);
+
                 if (symbol.Query == null)
                 {
                     return ActionKind.Plugin;
                 }
+
                 if (symbol.Query.Query.Kind == MiiQueryKind.Xacute)
                 {
                     symbol.Callee = symbol.Query.XacuteTarget;
                     return symbol.Callee != null ? ActionKind.Xacute : ActionKind.Plugin;
                 }
+
                 if (symbol.Query.Result == null)
                 {
                     return ActionKind.Plugin;
                 }
+
                 return string.Equals(symbol.Query.Query.Mode, "Command", StringComparison.OrdinalIgnoreCase) ? ActionKind.QueryCommand : ActionKind.Query;
             }
+
             return ActionKind.Plugin;
         }
 
         private RowsetContract DocumentContract(MiiActionDefinition definition)
         {
             RowsetContract contract = _contract.CreateNestedContract(definition.Name, "column specification of " + definition.Name);
+
             foreach (System.Xml.XmlElement column in MiiXml.Children(definition.Property("ColumnSpecifications"), "ContextItem"))
             {
                 string name = MiiXml.ChildText(column, "Name").Trim();
+
                 if (name.Length > 0)
                 {
                     contract.Add(name, ContractFactory.TypeOfColumnSpecification(MiiXml.OwnText(MiiXml.Child(column, "Value"))), false);
                 }
             }
+
             return _contract.ShareIdentical(contract);
         }
 
@@ -278,46 +305,59 @@ namespace MiiXRay.Generate
         {
             string scope = reference.Scope;
             string member = reference.Member;
+
             if (scope == "Transaction")
             {
                 PropertySpec input = _contract.FindInput(member);
+
                 if (input != null)
                 {
                     return TypedCode.Primary("request." + input.Name, input.Type);
                 }
+
                 PropertySpec output = _contract.FindOutput(member);
                 return output == null ? null : TypedCode.Primary("response." + output.Name, output.Type);
             }
+
             if (scope == "Local")
             {
                 PropertySpec local = _contract.FindLocal(member);
                 return local == null ? null : TypedCode.Primary(local.Name, local.Type);
             }
+
             if (Array.IndexOf(SharedScopes, scope) >= 0)
             {
                 return TypedCode.Primary("pluginService.GetProperty(" + CsLiteral.String(reference.Path) + ")", CsType.Object);
             }
+
             LoopScope loop = FindLoop(scope);
+
             if (loop != null)
             {
                 return ResolveLoopMember(loop, member);
             }
+
             ActionSymbol symbol;
+
             if (!_actions.TryGetValue(scope, out symbol))
             {
                 return null;
             }
+
             if (symbol.Kind == ActionKind.Loop)
             {
                 Note(reference.Path + " is used outside its loop");
                 return _translator.Unresolved(reference.Path);
             }
+
             TypedCode result = ResolveActionMember(symbol, member) ?? ConfiguredValue(symbol, member);
+
             if (result == null)
             {
                 Note("the action output " + reference.Path + " has no C# equivalent");
                 return _translator.Unresolved(reference.Path);
             }
+
             return result;
         }
 
@@ -330,6 +370,7 @@ namespace MiiXRay.Generate
                     return _loops[index];
                 }
             }
+
             return null;
         }
 
@@ -357,7 +398,9 @@ namespace MiiXRay.Generate
             {
                 return null;
             }
+
             TypedCode variable = TypedCode.Primary(symbol.Variable, symbol.VariableType);
+
             switch (symbol.Kind)
             {
                 case ActionKind.TransactionCall:
@@ -368,6 +411,7 @@ namespace MiiXRay.Generate
                     {
                         return null;
                     }
+
                     PropertySpec returned = symbol.Callee.FindOutput(symbol.Query.Query.XacuteOutputParameter);
                     return returned == null ? variable : TypedCode.Primary(symbol.Variable + "." + returned.Name, returned.Type);
                 case ActionKind.Query:
@@ -375,6 +419,7 @@ namespace MiiXRay.Generate
                     {
                         return variable;
                     }
+
                     return member == "ResultsAsString" ? TypedCode.Primary("Mii.ToStr(" + symbol.Variable + ")", CsType.String) : null;
                 case ActionKind.Catch:
                     return CatchMember(symbol.Variable, member);
@@ -385,6 +430,7 @@ namespace MiiXRay.Generate
                     {
                         return variable;
                     }
+
                     return member == "TextOutput" ? TypedCode.Primary("Mii.ToStr(" + symbol.Variable + ")", CsType.String) : null;
                 case ActionKind.Plugin:
                     return TypedCode.Primary(symbol.Variable + ".Get(" + CsLiteral.String(member) + ")", CsType.Object);
@@ -397,10 +443,12 @@ namespace MiiXRay.Generate
         private static TypedCode ConfiguredValue(ActionSymbol symbol, string member)
         {
             System.Xml.XmlElement property = symbol.Definition.Property(member);
+
             if (property == null || MiiXml.ChildElements(property).Count > 0)
             {
                 return null;
             }
+
             TypedCode value = TypedCode.Primary(CsLiteral.String(MiiXml.OwnText(property).Trim()), CsType.String);
             value.IsLiteral = true;
             value.LiteralText = MiiXml.OwnText(property).Trim();

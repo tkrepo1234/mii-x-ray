@@ -34,17 +34,22 @@ namespace MiiXRay.Expressions
             {
                 return new EmptyNode();
             }
+
             Parser parser = new Parser(new Lexer(expression).Tokenize());
+
             if (parser.Current.Kind == TokenKind.End)
             {
                 // only a comment
                 return new EmptyNode();
             }
+
             Node node = parser.ParseEquality();
+
             if (parser.Current.Kind != TokenKind.End)
             {
                 throw new ExpressionException("unexpected " + parser.Current + " at position " + parser.Current.Position);
             }
+
             return node;
         }
 
@@ -57,6 +62,7 @@ namespace MiiXRay.Expressions
                     return true;
                 }
             }
+
             return false;
         }
 
@@ -74,12 +80,14 @@ namespace MiiXRay.Expressions
         private bool IsOperator(params string[] operators)
         {
             Token token = Current;
+
             foreach (string op in operators)
             {
                 if (token.Kind == TokenKind.Operator && token.Text == op)
                 {
                     return true;
                 }
+
                 // the word operators "and" / "or" (not followed by "(", which would be the function)
                 if (token.Kind == TokenKind.Identifier && string.Equals(token.Text, op, StringComparison.OrdinalIgnoreCase)
                     && Peek(1).Kind != TokenKind.LeftParen)
@@ -87,6 +95,7 @@ namespace MiiXRay.Expressions
                     return true;
                 }
             }
+
             return false;
         }
 
@@ -94,95 +103,114 @@ namespace MiiXRay.Expressions
         {
             string text = Current.Text.ToLowerInvariant();
             _index++;
+
             if (text == "and")
             {
                 return "&&";
             }
+
             if (text == "or")
             {
                 return "||";
             }
+
             return text;
         }
 
         private Node ParseEquality()
         {
             Node left = ParseOr();
+
             while (IsOperator("==", "!="))
             {
                 left = Binary(TakeOperator(), left, ParseOr());
             }
+
             return left;
         }
 
         private Node ParseOr()
         {
             Node left = ParseAnd();
+
             while (IsOperator("||", "or"))
             {
                 left = Binary(TakeOperator(), left, ParseAnd());
             }
+
             return left;
         }
 
         private Node ParseAnd()
         {
             Node left = ParseRelational();
+
             while (IsOperator("&&", "and"))
             {
                 left = Binary(TakeOperator(), left, ParseRelational());
             }
+
             return left;
         }
 
         private Node ParseRelational()
         {
             Node left = ParseConcat();
+
             while (IsOperator("<", ">", "<=", ">="))
             {
                 left = Binary(TakeOperator(), left, ParseConcat());
             }
+
             return left;
         }
 
         private Node ParseConcat()
         {
             Node left = ParseAdditive();
+
             while (IsOperator("&"))
             {
                 left = Binary(TakeOperator(), left, ParseAdditive());
             }
+
             return left;
         }
 
         private Node ParseAdditive()
         {
             Node left = ParseMultiplicative();
+
             while (IsOperator("+", "-"))
             {
                 left = Binary(TakeOperator(), left, ParseMultiplicative());
             }
+
             return left;
         }
 
         private Node ParseMultiplicative()
         {
             Node left = ParseExponent();
+
             while (IsOperator("*", "/", "%"))
             {
                 left = Binary(TakeOperator(), left, ParseExponent());
             }
+
             return left;
         }
 
         private Node ParseExponent()
         {
             Node left = ParseUnary();
+
             if (IsOperator("^"))
             {
                 TakeOperator();
                 return Binary("^", left, ParseExponent());
             }
+
             return left;
         }
 
@@ -195,12 +223,14 @@ namespace MiiXRay.Expressions
                 unary.Operand = ParseUnary();
                 return unary;
             }
+
             return ParsePrimary();
         }
 
         private Node ParsePrimary()
         {
             Token token = Current;
+
             switch (token.Kind)
             {
                 case TokenKind.String:
@@ -237,32 +267,39 @@ namespace MiiXRay.Expressions
         {
             Token token = Current;
             _index++;
+
             if (Current.Kind == TokenKind.LeftParen && token.Text.IndexOf('.') < 0)
             {
                 _index++;
                 FunctionNode function = new FunctionNode();
                 function.Name = token.Text.ToLowerInvariant();
+
                 if (Current.Kind != TokenKind.RightParen)
                 {
                     function.Arguments.Add(ParseEquality());
+
                     while (Current.Kind == TokenKind.Comma)
                     {
                         _index++;
                         function.Arguments.Add(ParseEquality());
                     }
                 }
+
                 Expect(TokenKind.RightParen);
                 return function;
             }
+
             if (token.Text.IndexOf('.') < 0)
             {
                 string lower = token.Text.ToLowerInvariant();
+
                 if (lower == "true" || lower == "false")
                 {
                     BooleanNode boolean = new BooleanNode();
                     boolean.Value = lower == "true";
                     return boolean;
                 }
+
                 if (IsKeyword(lower))
                 {
                     KeywordNode keyword = new KeywordNode();
@@ -270,13 +307,16 @@ namespace MiiXRay.Expressions
                     return keyword;
                 }
             }
+
             ReferenceNode reference = new ReferenceNode();
             reference.Path = token.Text;
+
             if (Current.Kind == TokenKind.Selector)
             {
                 reference.Selector = Current.Text;
                 _index++;
             }
+
             return reference;
         }
 
@@ -285,31 +325,38 @@ namespace MiiXRay.Expressions
         private static Node StringWithInterpolation(string value)
         {
             MatchCollection matches = InterpolatedReference.Matches(value);
+
             if (matches.Count == 0)
             {
                 return Text(value);
             }
+
             Node result = null;
             int last = 0;
+
             foreach (Match match in matches)
             {
                 if (match.Index > last)
                 {
                     result = Append(result, Text(value.Substring(last, match.Index - last)));
                 }
+
                 ReferenceNode reference = new ReferenceNode();
                 reference.Path = match.Groups[1].Value;
                 result = Append(result, reference);
                 last = match.Index + match.Length;
             }
+
             if (last < value.Length)
             {
                 result = Append(result, Text(value.Substring(last)));
             }
+
             if (!(result is BinaryNode))
             {
                 result = Binary("&", Text(string.Empty), result);
             }
+
             return result;
         }
 
@@ -340,6 +387,7 @@ namespace MiiXRay.Expressions
             {
                 throw new ExpressionException("expected " + kind + " but found " + Current + " at position " + Current.Position);
             }
+
             _index++;
         }
     }

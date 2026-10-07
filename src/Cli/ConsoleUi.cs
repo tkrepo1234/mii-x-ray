@@ -58,10 +58,12 @@ namespace MiiXRay.Cli
         {
             Console.Write(question + (string.IsNullOrEmpty(defaultValue) ? ": " : " [" + defaultValue + "]: "));
             string answer = Console.ReadLine();
+
             if (answer == null)
             {
                 throw new OperationCanceledException("The input ended.");
             }
+
             answer = answer.Trim();
             return answer.Length == 0 ? (defaultValue ?? string.Empty) : answer;
         }
@@ -71,10 +73,12 @@ namespace MiiXRay.Cli
             while (true)
             {
                 string answer = Ask(question, defaultValue);
+
                 if (answer.Length > 0)
                 {
                     return answer;
                 }
+
                 Warning("  Please enter a value.");
             }
         }
@@ -85,10 +89,12 @@ namespace MiiXRay.Cli
             {
                 string answer = Ask(question, defaultValue.ToString(CultureInfo.InvariantCulture));
                 int value;
+
                 if (int.TryParse(answer, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) && value >= minimum && value <= maximum)
                 {
                     return value;
                 }
+
                 Warning("  Please enter a number from " + minimum + " to " + maximum + ".");
             }
         }
@@ -98,14 +104,17 @@ namespace MiiXRay.Cli
             while (true)
             {
                 string answer = Ask(question + " (y/n)", defaultValue ? "y" : "n").ToLowerInvariant();
+
                 if (answer == "y" || answer == "yes" || answer == "j" || answer == "ja")
                 {
                     return true;
                 }
+
                 if (answer == "n" || answer == "no" || answer == "nein")
                 {
                     return false;
                 }
+
                 Warning("  Please answer y or n.");
             }
         }
@@ -114,19 +123,24 @@ namespace MiiXRay.Cli
         public static string AskPassword(string question)
         {
             Console.Write(question + ": ");
+
             if (Console.IsInputRedirected)
             {
                 string line = Console.ReadLine();
                 return line ?? string.Empty;
             }
+
             StringBuilder password = new StringBuilder();
+
             while (true)
             {
                 ConsoleKeyInfo key = Console.ReadKey(true);
+
                 if (key.Key == ConsoleKey.Enter)
                 {
                     break;
                 }
+
                 if (key.Key == ConsoleKey.Backspace)
                 {
                     if (password.Length > 0)
@@ -141,6 +155,7 @@ namespace MiiXRay.Cli
                     Console.Write('*');
                 }
             }
+
             Console.WriteLine();
             return password.ToString();
         }
@@ -152,6 +167,7 @@ namespace MiiXRay.Cli
             {
                 Console.WriteLine("  " + (index + 1).ToString(CultureInfo.InvariantCulture).PadLeft(2) + ") " + options[index]);
             }
+
             return AskNumber(question, defaultIndex + 1, 1, options.Count) - 1;
         }
     }

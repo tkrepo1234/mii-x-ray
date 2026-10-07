@@ -32,6 +32,7 @@ namespace MiiXRay
         {
             Console.OutputEncoding = Encoding.UTF8;
             ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+
             try
             {
                 if (args.Length == 0)
@@ -40,6 +41,7 @@ namespace MiiXRay
                     new Session().Run();
                     return 0;
                 }
+
                 return RunOnce(args);
             }
             catch (OperationCanceledException)
@@ -58,14 +60,17 @@ namespace MiiXRay
         private static int RunOnce(string[] args)
         {
             Dictionary<string, string> options = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
             for (int index = 0; index < args.Length; index++)
             {
                 string arg = args[index];
+
                 if (arg == "--help" || arg == "-h" || arg == "/?")
                 {
                     Console.Write(Usage.Replace("\n", Environment.NewLine));
                     return 0;
                 }
+
                 if (arg == "--all" || arg == "--verbose")
                 {
                     options[arg] = "true";
@@ -98,6 +103,7 @@ namespace MiiXRay
         {
             string output = Option(options, "--out");
             IObjectSource source;
+
             if (options.ContainsKey("--folder"))
             {
                 source = new FolderSource(options["--folder"]);
@@ -105,13 +111,16 @@ namespace MiiXRay
             else if (options.ContainsKey("--profile"))
             {
                 Profile profile = FindProfile(options["--profile"]);
+
                 if (profile == null)
                 {
                     ConsoleUi.Error("There is no profile named " + options["--profile"] + ".");
                     ConsoleUi.Hint("Start MiiXRay.exe without arguments to create one.");
                     return 2;
                 }
+
                 source = SourceOf(profile);
+
                 if (output == null)
                 {
                     output = profile.OutputFolder;
@@ -123,28 +132,35 @@ namespace MiiXRay
                 Console.Write(Usage.Replace("\n", Environment.NewLine));
                 return 2;
             }
+
             if (output == null)
             {
                 output = Environment.CurrentDirectory;
             }
 
             source.CheckConnection();
+
             if (options.ContainsKey("--all"))
             {
                 return RunAll(options, source, output);
             }
+
             string transaction = Option(options, "--trx");
+
             if (transaction == null)
             {
                 ConsoleUi.Error("--trx is missing.");
                 return 2;
             }
+
             XRayResult result;
             string file = new XRayRunner(source, options.ContainsKey("--verbose")).Run(transaction, output, out result);
+
             if (file == null)
             {
                 return 1;
             }
+
             XRayRunner.Report(result, file);
             return 0;
         }
@@ -153,22 +169,27 @@ namespace MiiXRay
         private static int RunAll(Dictionary<string, string> options, IObjectSource source, string output)
         {
             string folder = Option(options, "--folder");
+
             if (folder == null)
             {
                 ConsoleUi.Error("--all needs --folder.");
                 return 2;
             }
+
             int failed = 0;
             int written = 0;
             string[] files = Directory.GetFiles(folder, "*.trx", SearchOption.AllDirectories);
             Array.Sort(files, StringComparer.Ordinal);
+
             foreach (string file in files)
             {
                 string relative = file.Substring(Path.GetFullPath(folder).TrimEnd('\\').Length + 1);
+
                 try
                 {
                     XRayResult result;
                     string target = new XRayRunner(source, false).Run(relative, Path.Combine(output, ObjectPath.Folder(relative).Replace('/', '\\')), out result);
+
                     if (target == null)
                     {
                         failed++;
@@ -185,6 +206,7 @@ namespace MiiXRay
                     ConsoleUi.Dim(exception.StackTrace);
                 }
             }
+
             ConsoleUi.Info(written + " written, " + failed + " failed.");
             return failed == 0 ? 0 : 1;
         }
@@ -204,6 +226,7 @@ namespace MiiXRay
                     return profile;
                 }
             }
+
             return null;
         }
 
@@ -213,12 +236,15 @@ namespace MiiXRay
             {
                 return new FolderSource(profile.ExportFolder);
             }
+
             string password = ProfileStore.Unprotect(profile.ProtectedPassword) ?? Environment.GetEnvironmentVariable("MIIXRAY_PASSWORD");
+
             if (password == null)
             {
                 throw new SourceException("The profile " + profile.Name + " has no saved password.",
                     "Save the password in the guided console or set the environment variable MIIXRAY_PASSWORD.");
             }
+
             return new CatalogSource(profile.Host, profile.Port, profile.UseHttps, profile.UserName, password, profile.AcceptAnyCertificate);
         }
 

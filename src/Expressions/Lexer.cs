@@ -57,14 +57,17 @@ namespace MiiXRay.Expressions
         public List<Token> Tokenize()
         {
             List<Token> tokens = new List<Token>();
+
             while (true)
             {
                 SkipSpaceAndComments();
+
                 if (_position >= _text.Length)
                 {
                     tokens.Add(Make(TokenKind.End, string.Empty, _position));
                     return tokens;
                 }
+
                 tokens.Add(Next());
             }
         }
@@ -73,52 +76,64 @@ namespace MiiXRay.Expressions
         {
             int start = _position;
             char c = _text[_position];
+
             if (c == '"')
             {
                 return Make(TokenKind.String, ReadString(), start);
             }
+
             if (char.IsDigit(c) || (c == '.' && _position + 1 < _text.Length && char.IsDigit(_text[_position + 1])))
             {
                 return Make(TokenKind.Number, ReadNumber(), start);
             }
+
             if (char.IsLetter(c) || c == '_')
             {
                 return Make(TokenKind.Identifier, ReadIdentifier(), start);
             }
+
             if (c == '{')
             {
                 return Make(TokenKind.Selector, ReadBalanced('{', '}'), start);
             }
+
             if (c == '[')
             {
                 return Make(TokenKind.ListLiteral, "[" + ReadBalanced('[', ']') + "]", start);
             }
+
             if (c == '#')
             {
                 int end = _text.IndexOf('#', _position + 1);
+
                 if (end < 0)
                 {
                     throw new ExpressionException("unterminated #...# at position " + start);
                 }
+
                 string inner = _text.Substring(_position + 1, end - _position - 1);
                 _position = end + 1;
                 return Make(TokenKind.Dynamic, inner, start);
             }
+
             if (c == '(')
             {
                 _position++;
                 return Make(TokenKind.LeftParen, "(", start);
             }
+
             if (c == ')')
             {
                 _position++;
                 return Make(TokenKind.RightParen, ")", start);
             }
+
             if (c == ',')
             {
                 _position++;
                 return Make(TokenKind.Comma, ",", start);
             }
+
             foreach (string op in Operators)
             {
                 if (string.CompareOrdinal(_text, _position, op, 0, op.Length) == 0)
@@ -127,6 +142,7 @@ namespace MiiXRay.Expressions
                     return Make(TokenKind.Operator, op == "=" ? "==" : op, start);
                 }
             }
+
             throw new ExpressionException("unexpected character '" + c + "' at position " + start);
         }
 
@@ -154,9 +170,11 @@ namespace MiiXRay.Expressions
         {
             StringBuilder value = new StringBuilder();
             _position++;
+
             while (_position < _text.Length)
             {
                 char c = _text[_position];
+
                 if (c == '\\' && _position + 1 < _text.Length && (_text[_position + 1] == '"' || _text[_position + 1] == '\\'))
                 {
                     value.Append(_text[_position + 1]);
@@ -173,34 +191,41 @@ namespace MiiXRay.Expressions
                     _position++;
                 }
             }
+
             throw new ExpressionException("unterminated string literal");
         }
 
         private string ReadNumber()
         {
             int start = _position;
+
             while (_position < _text.Length && (char.IsDigit(_text[_position]) || _text[_position] == '.'))
             {
                 _position++;
             }
+
             if (_position < _text.Length && (_text[_position] == 'e' || _text[_position] == 'E')
                 && _position + 1 < _text.Length && (char.IsDigit(_text[_position + 1]) || _text[_position + 1] == '-' || _text[_position + 1] == '+'))
             {
                 _position += 2;
+
                 while (_position < _text.Length && char.IsDigit(_text[_position]))
                 {
                     _position++;
                 }
             }
+
             return _text.Substring(start, _position - start);
         }
 
         private string ReadIdentifier()
         {
             int start = _position;
+
             while (_position < _text.Length)
             {
                 char c = _text[_position];
+
                 if (char.IsLetterOrDigit(c) || c == '_')
                 {
                     _position++;
@@ -214,6 +239,7 @@ namespace MiiXRay.Expressions
                     break;
                 }
             }
+
             return _text.Substring(start, _position - start);
         }
 
@@ -224,9 +250,11 @@ namespace MiiXRay.Expressions
             int start = _position + 1;
             int depth = 0;
             char quote = '\0';
+
             while (_position < _text.Length)
             {
                 char c = _text[_position];
+
                 if (quote != '\0')
                 {
                     if (c == quote)
@@ -245,6 +273,7 @@ namespace MiiXRay.Expressions
                 else if (c == close)
                 {
                     depth--;
+
                     if (depth == 0)
                     {
                         string inner = _text.Substring(start, _position - start);
@@ -252,8 +281,10 @@ namespace MiiXRay.Expressions
                         return inner;
                     }
                 }
+
                 _position++;
             }
+
             throw new ExpressionException("unterminated " + open + "..." + close);
         }
 

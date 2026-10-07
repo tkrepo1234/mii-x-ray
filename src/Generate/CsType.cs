@@ -87,10 +87,12 @@ namespace MiiXRay.Generate
             {
                 return false;
             }
+
             if (_contract != null || other._contract != null)
             {
                 return _contract == other._contract;
             }
+
             return _name == other._name;
         }
 

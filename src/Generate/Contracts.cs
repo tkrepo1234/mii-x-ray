@@ -54,6 +54,7 @@ namespace MiiXRay.Generate
                     return property;
                 }
             }
+
             return null;
         }
 
@@ -75,6 +76,7 @@ namespace MiiXRay.Generate
             {
                 return contract;
             }
+
             foreach (RowsetContract existing in NestedContracts)
             {
                 if (existing != contract && existing.Signature == contract.Signature)
@@ -83,6 +85,7 @@ namespace MiiXRay.Generate
                     return existing;
                 }
             }
+
             return contract;
         }
     }
@@ -115,6 +118,7 @@ namespace MiiXRay.Generate
                     return parameter;
                 }
             }
+
             return null;
         }
     }
@@ -137,6 +141,7 @@ namespace MiiXRay.Generate
         public GenerationContext(ObjectGraph graph)
         {
             Graph = graph;
+
             foreach (string name in RuntimeTypeNames)
             {
                 TypeNames.Reserve(name);
@@ -146,6 +151,7 @@ namespace MiiXRay.Generate
         public void Note(string where, string message)
         {
             string note = where + ": " + message;
+
             if (!Notes.Contains(note))
             {
                 Notes.Add(note);
@@ -178,12 +184,15 @@ namespace MiiXRay.Generate
                 TransactionContract contract = new TransactionContract();
                 contract.Transaction = transaction;
                 contract.ClassName = ClaimTypeName(context, transaction.Path);
+
                 foreach (string reserved in new string[] { contract.ClassName, "Request", "Response", "Execute", "TransactionPath" })
                 {
                     contract.NestedNames.Reserve(reserved);
                 }
+
                 context.Transactions.Add(transaction, contract);
             }
+
             foreach (MiiQuery query in context.Graph.Queries)
             {
                 QueryContract contract = new QueryContract();
@@ -191,28 +200,34 @@ namespace MiiXRay.Generate
                 contract.ClassName = ClaimTypeName(context, query.Path);
                 context.Queries.Add(query, contract);
             }
+
             foreach (TransactionContract contract in context.Transactions.Values)
             {
                 BuildInterface(contract);
             }
+
             foreach (QueryContract contract in context.Queries.Values)
             {
                 BuildQuery(context, contract);
             }
+
             AddCachedQueryColumns(context);
         }
 
         private static string ClaimTypeName(GenerationContext context, string path)
         {
             string name = Naming.Pascal(ObjectPath.Leaf(path)).TrimStart('@');
+
             if (context.TypeNames.IsUsed(name))
             {
                 string folder = ObjectPath.Leaf(ObjectPath.Folder(path));
+
                 if (folder.Length > 0)
                 {
                     name = Naming.Pascal(folder).TrimStart('@') + name;
                 }
             }
+
             return context.TypeNames.Claim(name);
         }
 
@@ -223,19 +238,24 @@ namespace MiiXRay.Generate
             requestNames.Reserve("Request");
             UniqueNames responseNames = new UniqueNames();
             responseNames.Reserve("Response");
+
             foreach (MiiParameter parameter in transaction.Inputs)
             {
                 contract.RequestProperties.Add(Property(contract, parameter, requestNames, false));
             }
+
             foreach (MiiParameter parameter in transaction.Outputs)
             {
                 contract.ResponseProperties.Add(Property(contract, parameter, responseNames, false));
             }
+
             UniqueNames localNames = new UniqueNames();
+
             foreach (string reserved in new string[] { "request", "response", "queryService", "pluginService" })
             {
                 localNames.Reserve(reserved);
             }
+
             foreach (MiiParameter parameter in transaction.Locals)
             {
                 contract.Locals.Add(Property(contract, parameter, localNames, true));
@@ -286,9 +306,11 @@ namespace MiiXRay.Generate
         private static CsType XmlTypeOf(TransactionContract contract, MiiParameter parameter)
         {
             string text = parameter.DefaultText;
+
             if (text.Trim().Length == 0 && parameter.ReferenceSource.StartsWith("Local.", StringComparison.Ordinal))
             {
                 string localName = parameter.ReferenceSource.Substring("Local.".Length);
+
                 foreach (MiiParameter local in contract.Transaction.Locals)
                 {
                     if (local.Name == localName)
@@ -297,11 +319,14 @@ namespace MiiXRay.Generate
                     }
                 }
             }
+
             XmlDocument document = MiiXml.TryParse(text);
+
             if (document == null || document.DocumentElement == null || document.DocumentElement.LocalName != "Rowsets")
             {
                 return CsType.Xml;
             }
+
             RowsetContract rowset = contract.CreateNestedContract(parameter.Name, "reference document of " + parameter.Name);
             ContractFactory.AddColumnsFromRowsets(rowset, document);
             return CsType.RowsetOf(contract.ShareIdentical(rowset));
@@ -333,6 +358,7 @@ namespace MiiXRay.Generate
                     {
                         return "Mii.ParseXml(" + CsLiteral.String(defaultText.Trim()) + ")";
                     }
+
                     return "new XmlDocument()";
                 default:
                     return "null";
@@ -343,29 +369,36 @@ namespace MiiXRay.Generate
         {
             MiiQuery query = contract.Query;
             UniqueNames names = new UniqueNames();
+
             foreach (string reserved in new string[] { contract.ClassName, "Request", "Row", "Result", "Text" })
             {
                 names.Reserve(reserved);
             }
+
             UniqueNames arguments = new UniqueNames();
+
             foreach (MiiQueryParameter parameter in query.Parameters)
             {
                 QueryParameterSpec spec = new QueryParameterSpec();
                 spec.Slot = parameter.Slot;
                 string baseName = parameter.Description.Length > 0 ? parameter.Description : "Param" + parameter.Slot;
+
                 if (query.Kind == MiiQueryKind.Xacute && query.XacuteMappedTargets.ContainsKey(parameter.Slot))
                 {
                     baseName = query.XacuteMappedTargets[parameter.Slot];
                 }
+
                 spec.PropertyName = names.Claim(Naming.Pascal(baseName).TrimStart('@'));
                 spec.ArgumentName = arguments.Claim(Naming.Camel(baseName));
                 spec.DefaultValue = parameter.DefaultValue ?? string.Empty;
                 spec.Description = parameter.Description;
                 contract.Parameters.Add(spec);
             }
+
             if (query.Kind == MiiQueryKind.Sql || query.Kind == MiiQueryKind.Mdo)
             {
                 contract.Result = new RowsetContract(contract.ClassName, "Row", "Result", "columns of " + query.Path);
+
                 if (query.Kind == MiiQueryKind.Sql)
                 {
                     foreach (string column in SqlColumns.Extract(query.Text))
@@ -381,6 +414,7 @@ namespace MiiXRay.Generate
                     }
                 }
             }
+
             if (query.Kind == MiiQueryKind.Xacute)
             {
                 contract.XacuteTarget = context.FindTransaction(query.XacuteTransaction);
@@ -392,18 +426,22 @@ namespace MiiXRay.Generate
             List<string> result = new List<string>();
             int select = text.IndexOf("SELECT ", StringComparison.Ordinal);
             int from = text.IndexOf(" FROM ", StringComparison.Ordinal);
+
             if (select < 0 || from < select)
             {
                 return result;
             }
+
             foreach (string part in text.Substring(select + 7, from - select - 7).Split(','))
             {
                 string name = part.Trim().Trim('[', ']').Trim();
+
                 if (name.Length > 0 && name != "*")
                 {
                     result.Add(name);
                 }
             }
+
             return result;
         }
 
@@ -419,11 +457,14 @@ namespace MiiXRay.Generate
                     {
                         continue;
                     }
+
                     QueryContract query = context.FindQuery(action.Static("QueryTemplate"));
+
                     if (query == null || query.Result == null)
                     {
                         continue;
                     }
+
                     XmlDocument cached = MiiXml.TryParse(MiiXml.OwnText(action.Property("Results")));
                     ContractFactory.AddColumnsFromRowsets(query.Result, cached);
                 }

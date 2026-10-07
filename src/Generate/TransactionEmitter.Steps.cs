@@ -28,35 +28,43 @@ namespace MiiXRay.Generate
             lines.Add("{");
             List<string> body = new List<string>();
             body.Add("Response response = new Response();");
+
             if (_contract.Locals.Count > 0)
             {
                 body.Add(string.Empty);
                 body.Add("// Local variables");
+
                 foreach (PropertySpec local in _contract.Locals)
                 {
                     body.Add(local.Type.Name + " " + local.Name + " = " + local.Initializer + ";");
                 }
             }
+
             List<string> results = new List<string>();
+
             foreach (MiiActionDefinition definition in _transaction.Actions.Values)
             {
                 ActionSymbol symbol = _actions[definition.Name];
+
                 if (symbol.Variable != null)
                 {
                     results.Add(symbol.VariableType.Name + " " + symbol.Variable + " = " + symbol.Initializer + ";");
                 }
             }
+
             if (results.Count > 0)
             {
                 body.Add(string.Empty);
                 body.Add("// Action results (MII keeps them for the whole run)");
                 body.AddRange(results);
             }
+
             if (flow.Count > 0)
             {
                 body.Add(string.Empty);
                 body.AddRange(flow);
             }
+
             body.Add(string.Empty);
             body.Add("return response;");
             lines.AddRange(Indent(body));
@@ -68,6 +76,7 @@ namespace MiiXRay.Generate
         private List<string> EmitSiblings(List<MiiStep> steps, List<string> before)
         {
             List<string> lines = before;
+
             foreach (MiiStep step in steps)
             {
                 if (step.StepType == "Catch")
@@ -79,6 +88,7 @@ namespace MiiXRay.Generate
                     lines.AddRange(EmitStep(step));
                 }
             }
+
             return lines;
         }
 
@@ -99,14 +109,17 @@ namespace MiiXRay.Generate
                     return WrapInTry(new List<string>(), step);
                 default:
                     List<string> lines = new List<string>();
+
                     if (step.StepType != "ActionSequence")
                     {
                         lines.Add("// X-Ray: unknown step type " + step.StepType + ", run as a sequence");
                     }
+
                     if (step.Action != null)
                     {
                         lines.AddRange(EmitAction(step.Action));
                     }
+
                     return EmitSiblings(step.Children, lines);
             }
         }
@@ -117,19 +130,24 @@ namespace MiiXRay.Generate
         {
             string name = catchStep.Action != null ? catchStep.Action.Name : catchStep.Name;
             _currentAction = name;
+
             if (!HasCode(guarded))
             {
                 guarded.Add("// " + name + ": catches nothing (no action runs before it), its handler never runs");
                 return guarded;
             }
+
             ActionSymbol symbol = null;
+
             if (catchStep.Action != null)
             {
                 _actions.TryGetValue(catchStep.Action.Name, out symbol);
             }
+
             string error = _names.Claim(Naming.Camel(name) + "Error");
             List<string> handler = new List<string>();
             handler.Add("// " + name);
+
             if (ContainsTermination(guarded))
             {
                 // Terminate Transaction is no exception in MII: a Catch does not stop it
@@ -138,16 +156,20 @@ namespace MiiXRay.Generate
                 handler.Add("    throw;");
                 handler.Add("}");
             }
+
             if (symbol != null && symbol.Variable != null)
             {
                 handler.Add(symbol.Variable + " = " + error + ";");
             }
+
             if (catchStep.Action != null)
             {
                 handler.AddRange(EmitOutgoing(catchStep.Action));
             }
+
             List<string> children = EmitSiblings(catchStep.Children, new List<string>());
             handler.AddRange(children);
+
             if (!HasCode(children) && (symbol == null || symbol.Variable == null))
             {
                 handler.Add("// the exception is swallowed");
@@ -174,6 +196,7 @@ namespace MiiXRay.Generate
                     return true;
                 }
             }
+
             return false;
         }
 
@@ -182,11 +205,13 @@ namespace MiiXRay.Generate
             foreach (string line in lines)
             {
                 string trimmed = line.Trim();
+
                 if (trimmed.Length > 0 && !trimmed.StartsWith("//", StringComparison.Ordinal))
                 {
                     return true;
                 }
             }
+
             return false;
         }
 
@@ -196,26 +221,31 @@ namespace MiiXRay.Generate
         {
             List<string> lines = new List<string>();
             MiiActionUse use = step.Action;
+
             if (use == null || use.Definition == null)
             {
                 lines.Add("// X-Ray: conditional step " + step.Name + " without action; its paths follow as a sequence");
                 return EmitSiblings(step.Children, lines);
             }
+
             _currentAction = use.Name;
             int count = ParseCount(use.Definition.Static("InputCount"), 1);
             bool logicalAnd = use.Definition.Static("LogicalAnd").Length == 0 || CsLiteral.IsTrue(use.Definition.Static("LogicalAnd"));
             List<TypedCode> terms = new List<TypedCode>();
+
             for (int index = 1; index <= count; index++)
             {
                 TypedCode term = InputValue(use, "Input" + index, CsType.Bool);
                 terms.Add(term ?? TypedCode.Primary("false", CsType.Bool));
             }
+
             TypedCode condition = Combine(terms, logicalAnd);
             lines.Add("// " + use.Name);
             lines.AddRange(EmitOutgoing(use));
 
             List<string> whenTrue = step.Children.Count > 0 ? EmitStep(step.Children[0]) : new List<string>();
             List<string> whenFalse = step.Children.Count > 1 ? EmitStep(step.Children[1]) : new List<string>();
+
             if (condition.Code == "true" && !HasCode(whenFalse))
             {
                 lines[0] = "// " + use.Name + ": always true";
@@ -227,6 +257,7 @@ namespace MiiXRay.Generate
                 lines.Add("{");
                 lines.AddRange(Indent(whenTrue));
                 lines.Add("}");
+
                 if (HasCode(whenFalse))
                 {
                     lines.Add("else");
@@ -235,6 +266,7 @@ namespace MiiXRay.Generate
                     lines.Add("}");
                 }
             }
+
             return EmitSiblings(Rest(step.Children, 2), lines);
         }
 
@@ -244,12 +276,15 @@ namespace MiiXRay.Generate
             {
                 return terms[0];
             }
+
             int precedence = logicalAnd ? Precedence.LogicalAnd : Precedence.LogicalOr;
             List<string> parts = new List<string>();
+
             foreach (TypedCode term in terms)
             {
                 parts.Add(term.At(precedence + 1));
             }
+
             return new TypedCode(string.Join(logicalAnd ? " && " : " || ", parts.ToArray()), CsType.Bool, precedence);
         }
 
@@ -257,11 +292,13 @@ namespace MiiXRay.Generate
         {
             List<string> lines = new List<string>();
             MiiActionUse use = step.Action;
+
             if (use == null || use.Definition == null)
             {
                 lines.Add("// X-Ray: switch step " + step.Name + " without action; its paths follow as a sequence");
                 return EmitSiblings(step.Children, lines);
             }
+
             _currentAction = use.Name;
             int matchCount = ParseCount(use.Definition.Static("MatchCount"), 0);
             TypedCode subject = InputValue(use, "InputValue", CsType.String) ?? TypedCode.Primary("\"\"", CsType.String);
@@ -269,9 +306,11 @@ namespace MiiXRay.Generate
             lines.Add("// " + use.Name);
             lines.Add("string " + variable + " = " + subject.Code + ";");
             lines.AddRange(EmitOutgoing(use));
+
             for (int index = 0; index <= matchCount && index < step.Children.Count; index++)
             {
                 List<string> branch = EmitStep(step.Children[index]);
+
                 if (index < matchCount)
                 {
                     TypedCode match = InputValue(use, "MatchValue" + (index + 1).ToString(CultureInfo.InvariantCulture), CsType.String)
@@ -284,12 +323,15 @@ namespace MiiXRay.Generate
                     {
                         break;
                     }
+
                     lines.Add(matchCount == 0 ? "// default path" : "else");
                 }
+
                 lines.Add("{");
                 lines.AddRange(Indent(branch));
                 lines.Add("}");
             }
+
             return EmitSiblings(Rest(step.Children, matchCount + 1), lines);
         }
 
@@ -299,11 +341,13 @@ namespace MiiXRay.Generate
         {
             List<string> lines = new List<string>();
             MiiActionUse use = step.Action;
+
             if (use == null || use.Definition == null)
             {
                 lines.Add("// X-Ray: loop step " + step.Name + " without action; its body follows as a sequence");
                 return EmitSiblings(step.Children, lines);
             }
+
             _currentAction = use.Name;
             string type = use.Definition.ActionType;
             LoopScope loop = new LoopScope();
@@ -311,6 +355,7 @@ namespace MiiXRay.Generate
             loop.ActionType = type;
             string camel = Naming.Camel(use.Name);
             lines.Add("// " + use.Name);
+
             if (IsLinkTarget(use.Name, "Break"))
             {
                 loop.BreakVariable = _names.Claim(camel + "Break");
@@ -319,6 +364,7 @@ namespace MiiXRay.Generate
 
             string header;
             bool countsItems = false;
+
             if (type == "ForNextRepeaterAction")
             {
                 header = ForHeader(use, loop, camel);
@@ -329,6 +375,7 @@ namespace MiiXRay.Generate
                 TypedCode maximum = InputValue(use, "MaxIterations", CsType.Int) ?? TypedCode.Primary("int.MaxValue", CsType.Int);
                 loop.Index = TypedCode.Primary(counter, CsType.Int);
                 header = "for (int " + counter + " = 1; " + counter + " <= " + maximum.At(Precedence.Relational + 1) + "; " + counter + "++)";
+
                 if (loop.BreakVariable == null)
                 {
                     Note("a while loop without a Break link never ends before MaxIterations");
@@ -338,6 +385,7 @@ namespace MiiXRay.Generate
             {
                 header = ForEachHeader(use, loop, camel, lines);
                 countsItems = type == "RepeaterAction" && IsReferenced(use.Name, "CurrentItem");
+
                 if (countsItems)
                 {
                     string index = _names.Claim(camel + "Index");
@@ -348,6 +396,7 @@ namespace MiiXRay.Generate
 
             _loops.Add(loop);
             List<string> body = new List<string>();
+
             if (loop.BreakVariable != null)
             {
                 body.Add("if (" + loop.BreakVariable + ")");
@@ -355,15 +404,19 @@ namespace MiiXRay.Generate
                 body.Add("    break;");
                 body.Add("}");
             }
+
             if (countsItems)
             {
                 body.Add(loop.Index.Code + "++;");
             }
+
             body.AddRange(EmitOutgoing(use));
+
             if (step.Children.Count > 0)
             {
                 body.AddRange(EmitStep(step.Children[0]));
             }
+
             _loops.RemoveAt(_loops.Count - 1);
 
             lines.Add(header);
@@ -391,9 +444,11 @@ namespace MiiXRay.Generate
         {
             string itemName = _names.Claim(camel + "Item");
             string sourceText = LinkedOrStatic(use, "Source");
+
             if (use.Definition.ActionType == "IteratorAction")
             {
                 TypedCode list = ExpressionTranslator.ConvertTo(TranslateExpression(sourceText), CsType.List);
+
                 if (IsReferenced(use.Name, "ItemCount"))
                 {
                     string items = _names.Claim(camel + "Items");
@@ -401,22 +456,27 @@ namespace MiiXRay.Generate
                     list = TypedCode.Primary(items, CsType.List);
                     loop.Count = TypedCode.Primary(items + ".Count", CsType.Int);
                 }
+
                 loop.Item = TypedCode.Primary(itemName, CsType.String);
                 return "foreach (string " + itemName + " in " + list.Code + ")";
             }
 
             ReferenceNode reference = ParseQuietly(sourceText) as ReferenceNode;
+
             if (reference != null && reference.Selector != null)
             {
                 ReferenceNode baseReference = new ReferenceNode();
                 baseReference.Path = reference.Path;
                 TypedCode baseCode = Resolve(baseReference);
+
                 if (baseCode == null)
                 {
                     Note("unknown reference " + reference.Path);
                     baseCode = _translator.Unresolved(reference.Path);
                 }
+
                 string path = reference.Selector.Trim();
+
                 if (baseCode.Type.Kind == TypeKind.Rowset && (path == "/Rowsets/Rowset/Row" || path == "Rowsets/Rowset/Row"))
                 {
                     string rows = baseCode.At(Precedence.Primary) + ".Rows";
@@ -424,6 +484,7 @@ namespace MiiXRay.Generate
                     loop.Count = TypedCode.Primary(rows + ".Count", CsType.Int);
                     return "foreach (" + loop.Item.Type.Name + " " + itemName + " in " + rows + ")";
                 }
+
                 string nodes = _names.Claim(camel + "Nodes");
                 lines.Add("List<XmlDocument> " + nodes + " = Mii.SelectNodes(" + baseCode.Code + ", " + CsLiteral.String(path) + ");");
                 loop.Item = TypedCode.Primary(itemName, CsType.Xml);
@@ -458,10 +519,12 @@ namespace MiiXRay.Generate
         private static List<MiiStep> Rest(List<MiiStep> steps, int skip)
         {
             List<MiiStep> rest = new List<MiiStep>();
+
             for (int index = skip; index < steps.Count; index++)
             {
                 rest.Add(steps[index]);
             }
+
             return rest;
         }
 
@@ -474,10 +537,12 @@ namespace MiiXRay.Generate
         public static List<string> Indent(List<string> lines)
         {
             List<string> result = new List<string>(lines.Count);
+
             foreach (string line in lines)
             {
                 result.Add(line.Length == 0 ? line : "    " + line);
             }
+
             return result;
         }
 

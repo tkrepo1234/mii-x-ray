@@ -13,12 +13,16 @@ namespace MiiXRay.Sources
             {
                 return string.Empty;
             }
+
             string result = path.Trim().Trim('"').Replace('\\', '/');
+
             while (result.Contains("//"))
             {
                 result = result.Replace("//", "/");
             }
+
             result = result.Trim('/');
+
             foreach (string extension in KnownExtensions)
             {
                 if (result.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
@@ -26,6 +30,7 @@ namespace MiiXRay.Sources
                     return result.Substring(0, result.Length - extension.Length);
                 }
             }
+
             return result;
         }
 
@@ -52,6 +57,7 @@ namespace MiiXRay.Sources
                     return true;
                 }
             }
+
             return false;
         }
     }

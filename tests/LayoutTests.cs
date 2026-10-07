@@ -16,6 +16,11 @@ namespace MiiXRay.Tests
             Assert.Equal("if (a)|{|}|else|{|}", Layout("if (a)", "{", "}", "else", "{", "}"));
         }
 
+        public static void UsingDirectivesStayTogether()
+        {
+            Assert.Equal("using System;|using System.Xml;||x();||using (a)|{|}", Layout("using System;", "using System.Xml;", "", "x();", "using (a)", "{", "}"));
+        }
+
         public static void BlankLineBeforeControlWithItsComment()
         {
             Assert.Equal("x();||// Check|if (a)|{|}", Layout("x();", "// Check", "if (a)", "{", "}"));

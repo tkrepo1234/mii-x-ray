@@ -67,6 +67,7 @@ namespace MiiXRay.Tests
         {
             string folder = Path.Combine(Path.GetTempPath(), "mii-x-ray-test-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Path.Combine(folder, "DEMO"));
+
             try
             {
                 File.WriteAllText(Path.Combine(folder, "DEMO\\trxCheckSite.trx"), Transaction, Encoding.UTF8);
@@ -99,15 +100,19 @@ namespace MiiXRay.Tests
             parameters.GenerateInMemory = true;
             parameters.CompilerOptions = "/langversion:5";
             CompilerResults results = provider.CompileAssemblyFromSource(parameters, Generate(), Runner);
+
             if (results.Errors.HasErrors)
             {
                 StringBuilder errors = new StringBuilder();
+
                 foreach (CompilerError error in results.Errors)
                 {
                     errors.AppendLine(error.ToString());
                 }
+
                 throw new Exception(errors.ToString());
             }
+
             MethodInfo check = results.CompiledAssembly.GetType("XRay.TrxCheckSiteLogic.Run").GetMethod("Check");
             Assert.Equal("Site M: 2 SFC, first S1-M | 2", check.Invoke(null, new object[] { "M" }));
             Assert.Equal("terminated: Failed: The site is empty", check.Invoke(null, new object[] { " " }));

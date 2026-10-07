@@ -23,20 +23,24 @@ namespace MiiXRay.Generate
                 LinkTarget target = new LinkTarget();
                 string text = (to ?? string.Empty).Trim();
                 int brace = text.IndexOf('{');
+
                 if (brace >= 0)
                 {
                     target.Path = text.Substring(0, brace);
                     string selector = text.Substring(brace + 1);
+
                     if (selector.EndsWith("}", StringComparison.Ordinal))
                     {
                         selector = selector.Substring(0, selector.Length - 1);
                     }
+
                     target.Selector = selector.Trim();
                 }
                 else
                 {
                     target.Path = text;
                 }
+
                 return target;
             }
 
@@ -66,14 +70,17 @@ namespace MiiXRay.Generate
         private MiiLink PlainIncoming(MiiActionUse use, string property)
         {
             MiiLink result = null;
+
             foreach (MiiLink link in use.Incoming)
             {
                 LinkTarget target = LinkTarget.Parse(link.To);
+
                 if (target.Selector == null && target.Property == property && link.Kind != "RemoveXml")
                 {
                     result = link;
                 }
             }
+
             return result;
         }
 
@@ -82,29 +89,36 @@ namespace MiiXRay.Generate
         private TypedCode InputValue(MiiActionUse use, string property, CsType type)
         {
             MiiLink link = PlainIncoming(use, property);
+
             if (link != null)
             {
                 return ExpressionTranslator.ConvertTo(LinkValue(link, type), type);
             }
+
             if (use.Definition == null || !use.Definition.HasProperty(property))
             {
                 return null;
             }
+
             string configured = use.Definition.Static(property);
+
             if (configured.Length == 0 && type.Kind != TypeKind.String)
             {
                 return null;
             }
+
             return StaticValue(configured, type);
         }
 
         private TypedCode LinkValue(MiiLink link, CsType target)
         {
             TypedCode value = TranslateExpression(link.From);
+
             if (link.Kind == "AssignXml" && value.XmlCode != null && target.Kind != TypeKind.String)
             {
                 return TypedCode.Primary(value.XmlCode, CsType.Xml);
             }
+
             return value;
         }
 
@@ -112,6 +126,7 @@ namespace MiiXRay.Generate
         private static TypedCode StaticValue(string text, CsType type)
         {
             TypedCode result;
+
             switch (type.Kind)
             {
                 case TypeKind.Bool:
@@ -122,10 +137,12 @@ namespace MiiXRay.Generate
                 case TypeKind.Double:
                 case TypeKind.Decimal:
                     result = TypedCode.Primary(CsLiteral.Number(text, type.Kind), type);
+
                     if (result.Code.StartsWith("-", StringComparison.Ordinal))
                     {
                         result.Precedence = Precedence.Unary;
                     }
+
                     break;
                 case TypeKind.String:
                 case TypeKind.Object:
@@ -135,6 +152,7 @@ namespace MiiXRay.Generate
                     result = TypedCode.Primary(ContractBuilder.Initializer(type, text), type);
                     break;
             }
+
             result.IsLiteral = true;
             result.LiteralText = text;
             return result;
@@ -145,10 +163,12 @@ namespace MiiXRay.Generate
         private List<string> EmitOutgoing(MiiActionUse use)
         {
             List<string> lines = new List<string>();
+
             foreach (MiiLink link in use.Outgoing)
             {
                 lines.AddRange(EmitWrite(link));
             }
+
             return lines;
         }
 
@@ -159,9 +179,11 @@ namespace MiiXRay.Generate
             int dot = target.Path.IndexOf('.');
             string scope = dot >= 0 ? target.Path.Substring(0, dot) : target.Path;
             string member = target.Property;
+
             if (scope == "Transaction")
             {
                 PropertySpec property = _contract.FindOutput(member) ?? _contract.FindInput(member);
+
                 if (property != null)
                 {
                     string owner = _contract.FindOutput(member) != null ? "response." : "request.";
@@ -171,6 +193,7 @@ namespace MiiXRay.Generate
             else if (scope == "Local")
             {
                 PropertySpec local = _contract.FindLocal(member);
+
                 if (local != null)
                 {
                     return Write(TypedCode.Primary(local.Name, local.Type), target.Selector, link);
@@ -185,16 +208,20 @@ namespace MiiXRay.Generate
             else if (member == "Break")
             {
                 LoopScope loop = FindLoop(scope);
+
                 if (loop != null && loop.BreakVariable != null)
                 {
                     return Write(TypedCode.Primary(loop.BreakVariable, CsType.Bool), null, link);
                 }
             }
+
             ActionSymbol action;
+
             if (_actions.TryGetValue(scope, out action) && action.Variable != null && IsWritableResult(action, member))
             {
                 return Write(TypedCode.Primary(action.Variable, action.VariableType), target.Selector, link);
             }
+
             Note("link to " + link.To + " has no C# target");
             List<string> lines = new List<string>();
             lines.Add("// X-Ray: not translated: " + OneLine(link.To) + " = " + OneLine(link.From));
@@ -215,28 +242,36 @@ namespace MiiXRay.Generate
         {
             List<string> lines = new List<string>();
             string kind = link.Kind;
+
             if (kind == "RemoveXml")
             {
                 lines.Add(RemoveXml(target, selector));
                 return lines;
             }
+
             TypedCode value = LinkValue(link, target.Type);
+
             if (selector == null && (kind == "Assign" || kind == "AssignXml"))
             {
                 lines.Add(target.Code + " = " + ExpressionTranslator.ConvertTo(value, target.Type).Code + ";");
                 return lines;
             }
+
             string pathCode = selector == null ? "\"/*\"" : SelectorPath(selector);
+
             if (kind == "Assign" && selector != null)
             {
                 string direct = DirectSelectorWrite(target, selector, value);
+
                 if (direct != null)
                 {
                     lines.Add(direct);
                     return lines;
                 }
             }
+
             string method;
+
             switch (kind)
             {
                 case "Assign": method = "Mii.SetXPathValue"; break;
@@ -249,6 +284,7 @@ namespace MiiXRay.Generate
                     method = "Mii.SetXPathValue";
                     break;
             }
+
             lines.Add(XmlEdit(target, method, pathCode + ", " + value.Code));
             return lines;
         }
@@ -260,22 +296,27 @@ namespace MiiXRay.Generate
             {
                 return target.Code + "[" + CsLiteral.String(selector) + "] = " + ExpressionTranslator.ToStringCode(value).Code + ";";
             }
+
             Match column = SingleRowColumnPath.Match(selector);
+
             if (target.Type.Kind == TypeKind.Row && column.Success)
             {
                 RowsetColumn rowColumn = target.Type.Contract.Ensure(column.Groups[1].Value);
                 return target.Code + "." + rowColumn.PropertyName + " = " + ExpressionTranslator.ConvertTo(value, rowColumn.Type).Code + ";";
             }
+
             return null;
         }
 
         private string RemoveXml(TypedCode target, string selector)
         {
             string path = selector ?? "/*";
+
             if (target.Type.Kind == TypeKind.Rowset && (path == "/*" || path == "/Rowsets/Rowset/Row" || path == "/Rowsets/Rowset/Row/*"))
             {
                 return target.Code + ".Rows.Clear();";
             }
+
             return XmlEdit(target, "Mii.RemoveXml", SelectorPath(path));
         }
 
@@ -286,6 +327,7 @@ namespace MiiXRay.Generate
             {
                 return method + "(" + target.Code + ", " + arguments + ");";
             }
+
             TypedCode edited = TypedCode.Primary(method + "(Mii.ToXml(" + target.Code + "), " + arguments + ")", CsType.Xml);
             return target.Code + " = " + ExpressionTranslator.ConvertTo(edited, target.Type).Code + ";";
         }

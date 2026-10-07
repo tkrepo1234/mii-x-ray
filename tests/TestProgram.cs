@@ -12,18 +12,21 @@ namespace MiiXRay.Tests
         {
             int passed = 0;
             List<string> failures = new List<string>();
+
             foreach (Type type in typeof(TestProgram).Assembly.GetTypes())
             {
                 if (!type.Name.EndsWith("Tests", StringComparison.Ordinal) || type.Namespace != "MiiXRay.Tests")
                 {
                     continue;
                 }
+
                 foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.Static))
                 {
                     if (method.ReturnType != typeof(void) || method.GetParameters().Length > 0)
                     {
                         continue;
                     }
+
                     try
                     {
                         method.Invoke(null, null);
@@ -35,10 +38,12 @@ namespace MiiXRay.Tests
                     }
                 }
             }
+
             foreach (string failure in failures)
             {
                 Console.WriteLine("FAIL " + failure);
             }
+
             Console.WriteLine(passed + " passed, " + failures.Count + " failed");
             return failures.Count == 0 ? 0 : 1;
         }

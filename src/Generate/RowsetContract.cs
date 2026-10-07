@@ -77,10 +77,12 @@ namespace MiiXRay.Generate
             get
             {
                 List<string> names = new List<string>();
+
                 foreach (RowsetColumn column in _columns)
                 {
                     names.Add(column.Name + ":" + column.Type.Name);
                 }
+
                 return string.Join(",", names.ToArray());
             }
         }
@@ -94,6 +96,7 @@ namespace MiiXRay.Generate
                     return column;
                 }
             }
+
             return null;
         }
 
@@ -106,6 +109,7 @@ namespace MiiXRay.Generate
         public RowsetColumn Add(string name, CsType type, bool tentative)
         {
             RowsetColumn existing = Find(name);
+
             if (existing == null)
             {
                 foreach (RowsetColumn candidate in _columns)
@@ -117,6 +121,7 @@ namespace MiiXRay.Generate
                     }
                 }
             }
+
             if (existing != null)
             {
                 if (!tentative && existing.Tentative)
@@ -126,8 +131,10 @@ namespace MiiXRay.Generate
                     existing.Type = type;
                     existing.Tentative = false;
                 }
+
                 return existing;
             }
+
             RowsetColumn column = new RowsetColumn();
             column.Name = name;
             column.PropertyName = PropertyNameFor(name);
@@ -140,12 +147,15 @@ namespace MiiXRay.Generate
         private string PropertyNameFor(string name)
         {
             string property = Naming.Sanitize(name);
+
             if (property == _rowClass || !Naming.IsValidIdentifier(property))
             {
                 property = Naming.Pascal(property) + "Column";
             }
+
             UniqueNames names = new UniqueNames();
             names.Reserve(_rowClass);
+
             foreach (RowsetColumn other in _columns)
             {
                 if (other.Name != name)
@@ -153,6 +163,7 @@ namespace MiiXRay.Generate
                     names.Reserve(other.PropertyName);
                 }
             }
+
             return names.Claim(property);
         }
     }
@@ -167,30 +178,39 @@ namespace MiiXRay.Generate
             {
                 return false;
             }
+
             XmlElement rowset = MiiXml.Child(document.DocumentElement, "Rowset");
+
             if (rowset == null)
             {
                 return true;
             }
+
             XmlElement columns = MiiXml.Child(rowset, "Columns");
             List<XmlElement> columnElements = MiiXml.Children(columns, "Column");
+
             if (columnElements.Count > 0)
             {
                 foreach (XmlElement column in columnElements)
                 {
                     string name = column.GetAttribute("Name").Trim();
+
                     if (name.Length > 0)
                     {
                         contract.Add(name, TypeOfSqlDataType(column.GetAttribute("SQLDataType")), false);
                     }
                 }
+
                 return true;
             }
+
             XmlElement row = MiiXml.Child(rowset, "Row");
+
             foreach (XmlElement cell in MiiXml.ChildElements(row))
             {
                 contract.Add(cell.LocalName, CsType.String, false);
             }
+
             return true;
         }
 
@@ -204,10 +224,12 @@ namespace MiiXRay.Generate
         public static CsType TypeOfSqlDataType(string code)
         {
             int value;
+
             if (!int.TryParse((code ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
             {
                 return CsType.String;
             }
+
             switch (value)
             {
                 case -7:
@@ -238,22 +260,27 @@ namespace MiiXRay.Generate
         public static CsType TypeOfColumnSpecification(string text)
         {
             string value = (text ?? string.Empty).Trim().ToUpperInvariant();
+
             if (value.StartsWith("NUM") || value == "DOUBLE" || value == "FLOAT" || value == "DECIMAL")
             {
                 return CsType.Double;
             }
+
             if (value == "INTEGER" || value == "INT" || value == "LONG")
             {
                 return CsType.Long;
             }
+
             if (value.StartsWith("DATE") || value == "TIMESTAMP")
             {
                 return CsType.DateTime;
             }
+
             if (value.StartsWith("BOOL"))
             {
                 return CsType.Bool;
             }
+
             return CsType.String;
         }
     }

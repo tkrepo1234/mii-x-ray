@@ -93,10 +93,12 @@ namespace MiiXRay.Model
         public List<MiiActionUse> AllActionUses()
         {
             List<MiiActionUse> result = new List<MiiActionUse>();
+
             foreach (MiiStep step in Steps)
             {
                 Collect(step, result);
             }
+
             return result;
         }
 
@@ -106,6 +108,7 @@ namespace MiiXRay.Model
             {
                 result.Add(step.Action);
             }
+
             foreach (MiiStep child in step.Children)
             {
                 Collect(child, result);

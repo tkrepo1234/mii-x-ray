@@ -23,6 +23,7 @@ namespace MiiXRay.Generate
         {
             StringBuilder result = new StringBuilder();
             bool upperNext = false;
+
             foreach (char c in name ?? string.Empty)
             {
                 if (char.IsLetterOrDigit(c) || c == '_')
@@ -35,14 +36,17 @@ namespace MiiXRay.Generate
                     upperNext = result.Length > 0;
                 }
             }
+
             if (result.Length == 0)
             {
                 result.Append("Value");
             }
+
             if (char.IsDigit(result[0]))
             {
                 result.Insert(0, '_');
             }
+
             return result.ToString();
         }
 
@@ -62,11 +66,14 @@ namespace MiiXRay.Generate
         {
             string clean = Sanitize(name);
             int upper = 0;
+
             while (upper < clean.Length && char.IsUpper(clean[upper]))
             {
                 upper++;
             }
+
             string result;
+
             if (upper <= 1)
             {
                 result = char.ToLowerInvariant(clean[0]) + clean.Substring(1);
@@ -80,6 +87,7 @@ namespace MiiXRay.Generate
                 // "SFCNumber" -> "sfcNumber"
                 result = clean.Substring(0, upper - 1).ToLowerInvariant() + clean.Substring(upper - 1);
             }
+
             return Keywords.Contains(result) ? result + "Value" : result;
         }
     }
@@ -103,11 +111,13 @@ namespace MiiXRay.Generate
         {
             string name = wanted;
             int counter = 2;
+
             while (_used.Contains(name))
             {
                 name = wanted + counter;
                 counter++;
             }
+
             _used.Add(name);
             return name;
         }

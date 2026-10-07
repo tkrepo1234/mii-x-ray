@@ -31,7 +31,9 @@ namespace MiiXRay.Sources
                 throw new SourceException("The folder " + _root + " does not exist.",
                     "Check the export folder in the profile (it is the folder that contains the project folders).");
             }
+
             EnsureIndex();
+
             if (_allPaths.Count == 0)
             {
                 throw new SourceException("The folder " + _root + " contains no MII objects (.trx, .tqsq, .tqmd, .tqxm, .tqxc).",
@@ -43,10 +45,12 @@ namespace MiiXRay.Sources
         {
             EnsureIndex();
             string file = Resolve(ObjectPath.Normalize(objectPath));
+
             if (file == null)
             {
                 return null;
             }
+
             LoadedObject result = new LoadedObject();
             result.CanonicalPath = RelativeWithoutExtension(file);
             result.Text = File.ReadAllText(file, Encoding.UTF8);
@@ -65,16 +69,20 @@ namespace MiiXRay.Sources
             {
                 return null;
             }
+
             string[] parts = path.Split('/');
+
             for (int count = parts.Length; count >= 1; count--)
             {
                 string key = string.Join("/", parts, parts.Length - count, count).ToLowerInvariant();
                 List<string> hits;
+
                 if (_bySuffix.TryGetValue(key, out hits))
                 {
                     return hits.Count == 1 ? hits[0] : null;
                 }
             }
+
             return null;
         }
 
@@ -84,32 +92,40 @@ namespace MiiXRay.Sources
             {
                 return;
             }
+
             _bySuffix = new Dictionary<string, List<string>>();
             _allPaths = new List<string>();
+
             if (!Directory.Exists(_root))
             {
                 return;
             }
+
             List<string> files = new List<string>(Directory.GetFiles(_root, "*", SearchOption.AllDirectories));
             files.Sort(StringComparer.Ordinal);
+
             foreach (string file in files)
             {
                 if (!ObjectPath.IsKnownExtension(Path.GetExtension(file)))
                 {
                     continue;
                 }
+
                 string relative = RelativeWithoutExtension(file);
                 _allPaths.Add(relative);
                 string[] parts = relative.Split('/');
+
                 for (int count = 1; count <= parts.Length; count++)
                 {
                     string key = string.Join("/", parts, parts.Length - count, count).ToLowerInvariant();
                     List<string> list;
+
                     if (!_bySuffix.TryGetValue(key, out list))
                     {
                         list = new List<string>();
                         _bySuffix.Add(key, list);
                     }
+
                     list.Add(file);
                 }
             }
@@ -131,13 +147,16 @@ namespace MiiXRay.Sources
             string leaf = ObjectPath.Leaf(objectPath).ToLowerInvariant();
             List<string> exact = new List<string>();
             List<string> partial = new List<string>();
+
             if (leaf.Length == 0)
             {
                 return exact;
             }
+
             foreach (string candidate in candidates)
             {
                 string candidateLeaf = ObjectPath.Leaf(candidate).ToLowerInvariant();
+
                 if (candidateLeaf == leaf)
                 {
                     exact.Add(candidate);
@@ -148,11 +167,14 @@ namespace MiiXRay.Sources
                     partial.Add(candidate);
                 }
             }
+
             exact.AddRange(partial);
+
             if (exact.Count > maximum)
             {
                 exact.RemoveRange(maximum, exact.Count - maximum);
             }
+
             return exact;
         }
 
@@ -161,22 +183,27 @@ namespace MiiXRay.Sources
         {
             int[] previous = new int[second.Length + 1];
             int[] current = new int[second.Length + 1];
+
             for (int j = 0; j <= second.Length; j++)
             {
                 previous[j] = j;
             }
+
             for (int i = 1; i <= first.Length; i++)
             {
                 current[0] = i;
+
                 for (int j = 1; j <= second.Length; j++)
                 {
                     int change = first[i - 1] == second[j - 1] ? 0 : 1;
                     current[j] = Math.Min(Math.Min(current[j - 1] + 1, previous[j] + 1), previous[j - 1] + change);
                 }
+
                 int[] swap = previous;
                 previous = current;
                 current = swap;
             }
+
             return previous[second.Length];
         }
     }

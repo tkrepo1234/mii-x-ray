@@ -14,12 +14,16 @@ namespace MiiXRay.Generate
             {
                 return "null";
             }
+
             bool multiLine = value.IndexOf('\n') >= 0;
+
             if (multiLine && value.Length > 60 && !HasOtherControlCharacters(value))
             {
                 return "@\"" + value.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", Environment.NewLine).Replace("\"", "\"\"") + "\"";
             }
+
             StringBuilder result = new StringBuilder("\"");
+
             foreach (char c in value)
             {
                 switch (c)
@@ -39,9 +43,11 @@ namespace MiiXRay.Generate
                         {
                             result.Append(c);
                         }
+
                         break;
                 }
             }
+
             result.Append('"');
             return result.ToString();
         }
@@ -55,6 +61,7 @@ namespace MiiXRay.Generate
                     return true;
                 }
             }
+
             return false;
         }
 
@@ -63,10 +70,12 @@ namespace MiiXRay.Generate
         {
             double value;
             string trimmed = (text ?? string.Empty).Trim();
+
             if (!double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out value) || double.IsNaN(value) || double.IsInfinity(value))
             {
                 value = 0;
             }
+
             switch (kind)
             {
                 case TypeKind.Int:
@@ -74,26 +83,32 @@ namespace MiiXRay.Generate
                     {
                         return ((int)Math.Truncate(value)).ToString(CultureInfo.InvariantCulture);
                     }
+
                     return "0";
                 case TypeKind.Long:
                     if (value >= long.MinValue && value <= long.MaxValue)
                     {
                         long parsed;
+
                         if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed))
                         {
                             return parsed.ToString(CultureInfo.InvariantCulture) + "L";
                         }
+
                         return ((long)Math.Truncate(value)).ToString(CultureInfo.InvariantCulture) + "L";
                     }
+
                     return "0L";
                 case TypeKind.Decimal:
                     return value.ToString("R", CultureInfo.InvariantCulture) + "m";
                 default:
                     string result = value.ToString("R", CultureInfo.InvariantCulture);
+
                     if (result.IndexOf('.') < 0 && result.IndexOf('E') < 0)
                     {
                         result += ".0";
                     }
+
                     return result;
             }
         }
@@ -109,15 +124,18 @@ namespace MiiXRay.Generate
         {
             DateTime value;
             string[] formats = { "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss.fff", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd" };
+
             if (DateTime.TryParseExact((text ?? string.Empty).Trim(), formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out value))
             {
                 if (value.TimeOfDay == TimeSpan.Zero)
                 {
                     return string.Format(CultureInfo.InvariantCulture, "new DateTime({0}, {1}, {2})", value.Year, value.Month, value.Day);
                 }
+
                 return string.Format(CultureInfo.InvariantCulture, "new DateTime({0}, {1}, {2}, {3}, {4}, {5})",
                     value.Year, value.Month, value.Day, value.Hour, value.Minute, value.Second);
             }
+
             return "DateTime.MinValue";
         }
     }

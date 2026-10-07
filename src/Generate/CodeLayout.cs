@@ -10,18 +10,21 @@ namespace MiiXRay.Generate
     /// already there. Comment lines directly above a statement stay with it.</summary>
     public static class CodeLayout
     {
-        private static readonly Regex ControlStatement = new Regex(@"^(if|for|foreach|while|do|try|switch|using|lock)(\s|\(|$)", RegexOptions.Compiled);
+        private static readonly Regex ControlStatement = new Regex(@"^((if|for|foreach|while|do|try|switch|lock)(\s|\(|$)|using\s*\()", RegexOptions.Compiled);
         private static readonly Regex Continuation = new Regex(@"^(else|catch|finally|while)(\s|\(|$)", RegexOptions.Compiled);
 
         public static List<string> AddBlankLines(List<string> lines)
         {
             List<string> result = new List<string>(lines.Count + lines.Count / 4);
+
             foreach (string line in lines)
             {
                 string text = line.Trim();
+
                 if (text.Length > 0 && result.Count > 0)
                 {
                     string previous = result[result.Count - 1].Trim();
+
                     if (IsBlockEnd(previous) && !text.StartsWith("}", StringComparison.Ordinal) && !Continuation.IsMatch(text))
                     {
                         result.Add(string.Empty);
@@ -31,8 +34,10 @@ namespace MiiXRay.Generate
                         InsertBlankBeforeComments(result);
                     }
                 }
+
                 result.Add(line);
             }
+
             return result;
         }
 
@@ -44,19 +49,24 @@ namespace MiiXRay.Generate
         private static void InsertBlankBeforeComments(List<string> result)
         {
             int index = result.Count;
+
             while (index > 0 && IsComment(result[index - 1].Trim()))
             {
                 index--;
             }
+
             if (index == 0)
             {
                 return;
             }
+
             string above = result[index - 1].Trim();
+
             if (above.Length == 0 || above.EndsWith("{", StringComparison.Ordinal) || above.EndsWith(":", StringComparison.Ordinal))
             {
                 return;
             }
+
             result.Insert(index, string.Empty);
         }
 

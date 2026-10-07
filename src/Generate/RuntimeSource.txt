@@ -192,6 +192,7 @@ public abstract class RowsetBase<TRow> : RowsetCore where TRow : RowBase, new()
     public TRow FirstRowWhere(string column, object value)
     {
         string wanted = Mii.ToStr(value);
+
         foreach (TRow row in _rows)
         {
             if (Mii.ToStr(Mii.RowValue(row, column)) == wanted)
@@ -199,6 +200,7 @@ public abstract class RowsetBase<TRow> : RowsetCore where TRow : RowBase, new()
                 return row;
             }
         }
+
         return new TRow();
     }
 
@@ -211,26 +213,31 @@ public abstract class RowsetBase<TRow> : RowsetCore where TRow : RowBase, new()
         rowsets.AppendChild(rowset);
         XmlElement columns = document.CreateElement("Columns");
         rowset.AppendChild(columns);
+
         foreach (PropertyInfo property in Mii.ColumnsOf(typeof(TRow)))
         {
             XmlElement column = document.CreateElement("Column");
             column.SetAttribute("Name", property.Name);
             columns.AppendChild(column);
         }
+
         foreach (TRow row in _rows)
         {
             rowset.AppendChild(Mii.RowElement(document, row));
         }
+
         return document;
     }
 
     public override void LoadXml(XmlDocument document)
     {
         _rows.Clear();
+
         if (document == null || document.DocumentElement == null)
         {
             return;
         }
+
         foreach (XmlNode node in document.SelectNodes("/Rowsets/Rowset/Row"))
         {
             TRow row = new TRow();
@@ -252,6 +259,7 @@ public static class Mii
         "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss.fff", "yyyy-MM-dd'T'HH:mm:sszzz", "yyyy-MM-dd'T'HH:mm:ss.fffzzz",
         "yyyy-MM-dd'T'HH:mm:sszz", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "MM/dd/yyyy HH:mm:ss"
     };
+
     private static readonly string RunId = Guid.NewGuid().ToString();
 
     public static string UserName
@@ -277,65 +285,84 @@ public static class Mii
         {
             return string.Empty;
         }
+
         string text = value as string;
+
         if (text != null)
         {
             return text;
         }
+
         if (value is bool)
         {
             return (bool)value ? "true" : "false";
         }
+
         if (value is DateTime)
         {
             return ((DateTime)value).ToString("yyyy-MM-dd'T'HH:mm:ss", Invariant);
         }
+
         if (value is double)
         {
             return ((double)value).ToString("R", Invariant);
         }
+
         if (value is XmlDocument)
         {
             XmlDocument document = (XmlDocument)value;
             return document.DocumentElement == null ? string.Empty : document.DocumentElement.OuterXml;
         }
+
         if (value is XmlNode)
         {
             return ((XmlNode)value).OuterXml;
         }
+
         if (value is RowsetCore)
         {
             return ((RowsetCore)value).ToXml().DocumentElement.OuterXml;
         }
+
         if (value is RowBase)
         {
             XmlDocument document = new XmlDocument();
             return RowElement(document, value).OuterXml;
         }
+
         if (value is Exception)
         {
             return ((Exception)value).Message;
         }
+
         IDictionary<string, string> map = value as IDictionary<string, string>;
+
         if (map != null)
         {
             List<string> pairs = new List<string>();
+
             foreach (KeyValuePair<string, string> pair in map)
             {
                 pairs.Add(pair.Key + "=" + pair.Value);
             }
+
             return "{" + string.Join(", ", pairs.ToArray()) + "}";
         }
+
         List<string> list = value as List<string>;
+
         if (list != null)
         {
             return ListToString(list);
         }
+
         IFormattable formattable = value as IFormattable;
+
         if (formattable != null)
         {
             return formattable.ToString(null, Invariant);
         }
+
         return value.ToString();
     }
 
@@ -345,10 +372,12 @@ public static class Mii
         {
             return (bool)value;
         }
+
         if (value is int || value is long || value is double || value is decimal)
         {
             return Convert.ToDouble(value, Invariant) != 0;
         }
+
         return TrueValue.IsMatch(ToStr(value));
     }
 
@@ -358,14 +387,17 @@ public static class Mii
         {
             return (double)value;
         }
+
         if (value is int || value is long || value is decimal || value is float)
         {
             return Convert.ToDouble(value, Invariant);
         }
+
         if (value is bool)
         {
             return (bool)value ? 1 : 0;
         }
+
         double result;
         return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result) ? result : 0;
     }
@@ -382,11 +414,14 @@ public static class Mii
         {
             return (long)value;
         }
+
         long result;
+
         if (long.TryParse(ToStr(value).Trim(), NumberStyles.Integer, Invariant, out result))
         {
             return result;
         }
+
         return (long)ToDouble(value);
     }
 
@@ -396,11 +431,14 @@ public static class Mii
         {
             return (decimal)value;
         }
+
         decimal result;
+
         if (decimal.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result))
         {
             return result;
         }
+
         double number = ToDouble(value);
         return number > (double)decimal.MaxValue || number < (double)decimal.MinValue ? 0m : (decimal)number;
     }
@@ -411,36 +449,45 @@ public static class Mii
         {
             return (DateTime)value;
         }
+
         DateTime result;
+
         if (DateTime.TryParseExact(ToStr(value).Trim(), DateFormats, Invariant, DateTimeStyles.None, out result))
         {
             return result;
         }
+
         return DateTime.MinValue;
     }
 
     public static XmlDocument ToXml(object value)
     {
         XmlDocument document = value as XmlDocument;
+
         if (document != null)
         {
             return document;
         }
+
         if (value is RowsetCore)
         {
             return ((RowsetCore)value).ToXml();
         }
+
         if (value is RowBase)
         {
             XmlDocument rowDocument = new XmlDocument();
             rowDocument.AppendChild(RowElement(rowDocument, value));
             return rowDocument;
         }
+
         XmlNode node = value as XmlNode;
+
         if (node != null)
         {
             return NodeAsDocument(node);
         }
+
         string text = ToStr(value).Trim();
         return text.StartsWith("<") ? ParseXml(text) : new XmlDocument();
     }
@@ -448,67 +495,86 @@ public static class Mii
     public static List<string> ToList(object value)
     {
         List<string> list = value as List<string>;
+
         if (list != null)
         {
             return list;
         }
+
         List<string> result = new List<string>();
+
         if (value == null)
         {
             return result;
         }
+
         IDictionary<string, string> map = value as IDictionary<string, string>;
+
         if (map != null)
         {
             result.AddRange(map.Values);
             return result;
         }
+
         System.Collections.IEnumerable items = value as System.Collections.IEnumerable;
+
         if (items != null && !(value is string) && !(value is XmlNode))
         {
             foreach (object item in items)
             {
                 result.Add(ToStr(item));
             }
+
             return result;
         }
+
         string text = ToStr(value).Trim();
+
         if (text.StartsWith("[") && text.EndsWith("]"))
         {
             foreach (Match match in Regex.Matches(text, @"\[(?:[A-Za-z]+:)?([^\[\]]*)\]"))
             {
                 result.Add(match.Groups[1].Value);
             }
+
             return result;
         }
+
         if (text.Length > 0)
         {
             result.Add(text);
         }
+
         return result;
     }
 
     public static Dictionary<string, string> ToMap(object value)
     {
         Dictionary<string, string> map = value as Dictionary<string, string>;
+
         if (map != null)
         {
             return map;
         }
+
         Dictionary<string, string> result = new Dictionary<string, string>();
         IDictionary<string, string> other = value as IDictionary<string, string>;
+
         if (other != null)
         {
             foreach (KeyValuePair<string, string> pair in other)
             {
                 result[pair.Key] = pair.Value;
             }
+
             return result;
         }
+
         foreach (Match match in Regex.Matches(ToStr(value), @"([^{},=\s][^{},=]*)=\[(?:[A-Za-z]+:)?([^\[\]]*)\]"))
         {
             result[match.Groups[1].Value.Trim()] = match.Groups[2].Value;
         }
+
         return result;
     }
 
@@ -518,6 +584,7 @@ public static class Mii
         {
             return (T)value;
         }
+
         T result = new T();
         result.LoadXml(ToXml(value));
         return result;
@@ -529,13 +596,16 @@ public static class Mii
         {
             return (T)value;
         }
+
         T row = new T();
         XmlDocument document = ToXml(value);
         XmlNode node = document.SelectSingleNode("//Row") ?? document.DocumentElement;
+
         if (node != null)
         {
             FillRow(row, node);
         }
+
         return row;
     }
 
@@ -548,15 +618,18 @@ public static class Mii
         {
             double a;
             double b;
+
             if (TryNumber(left, out a) && TryNumber(right, out b))
             {
                 return a == b;
             }
         }
+
         if (left is bool || right is bool)
         {
             return ToBool(left) == ToBool(right);
         }
+
         return ToStr(left) == ToStr(right);
     }
 
@@ -565,14 +638,17 @@ public static class Mii
     {
         double a;
         double b;
+
         if (TryNumber(left, out a) && TryNumber(right, out b))
         {
             return a.CompareTo(b);
         }
+
         if (left is DateTime || right is DateTime)
         {
             return ToDateTime(left).CompareTo(ToDateTime(right));
         }
+
         return string.CompareOrdinal(ToStr(left), ToStr(right));
     }
 
@@ -588,6 +664,7 @@ public static class Mii
             number = Convert.ToDouble(value, Invariant);
             return true;
         }
+
         return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out number);
     }
 
@@ -596,10 +673,12 @@ public static class Mii
     public static XmlDocument ParseXml(string text)
     {
         XmlDocument document = new XmlDocument();
+
         if (text != null && text.Trim().Length > 0)
         {
             document.LoadXml(text.Trim());
         }
+
         return document;
     }
 
@@ -607,21 +686,26 @@ public static class Mii
     public static string XPath(object source, string xpath)
     {
         XmlDocument document = ToXml(source);
+
         if (document.DocumentElement == null)
         {
             return string.Empty;
         }
+
         object result = document.CreateNavigator().Evaluate(xpath, Namespaces(document));
         System.Xml.XPath.XPathNodeIterator nodes = result as System.Xml.XPath.XPathNodeIterator;
+
         if (nodes != null)
         {
             return nodes.MoveNext() ? nodes.Current.Value : string.Empty;
         }
+
         if (result is double)
         {
             double number = (double)result;
             return number == Math.Floor(number) && Math.Abs(number) < 1e15 ? ((long)number).ToString(Invariant) : number.ToString("R", Invariant);
         }
+
         return ToStr(result);
     }
 
@@ -629,10 +713,12 @@ public static class Mii
     public static XmlDocument SelectXml(object source, string xpath)
     {
         XmlDocument document = ToXml(source);
+
         if (document.DocumentElement == null)
         {
             return new XmlDocument();
         }
+
         XmlNode node = document.SelectSingleNode(xpath, Namespaces(document));
         return node == null ? new XmlDocument() : NodeAsDocument(node);
     }
@@ -642,14 +728,17 @@ public static class Mii
     {
         List<XmlDocument> result = new List<XmlDocument>();
         XmlDocument document = ToXml(source);
+
         if (document.DocumentElement == null)
         {
             return result;
         }
+
         foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))
         {
             result.Add(NodeAsDocument(node));
         }
+
         return result;
     }
 
@@ -657,10 +746,12 @@ public static class Mii
     public static string Select(object source, string key)
     {
         IDictionary<string, string> map = source as IDictionary<string, string>;
+
         if (map != null)
         {
             return MapGet(map, key);
         }
+
         return XPath(source, key);
     }
 
@@ -668,10 +759,12 @@ public static class Mii
     public static XmlDocument SetXPathValue(XmlDocument document, string xpath, object value)
     {
         XmlNode node = FindOrCreate(document, xpath);
+
         if (node != null)
         {
             node.InnerText = ToStr(value);
         }
+
         return document;
     }
 
@@ -679,17 +772,21 @@ public static class Mii
     public static XmlDocument AssignXml(XmlDocument document, string xpath, object source)
     {
         XmlDocument sourceDocument = ToXml(source);
+
         if (sourceDocument.DocumentElement == null)
         {
             return document;
         }
+
         XmlNode node = FindOrCreate(document, xpath);
+
         if (node == null || node == document.DocumentElement || node == document)
         {
             document.RemoveAll();
             document.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
             return document;
         }
+
         node.ParentNode.ReplaceChild(document.ImportNode(sourceDocument.DocumentElement, true), node);
         return document;
     }
@@ -699,10 +796,12 @@ public static class Mii
     {
         XmlDocument sourceDocument = ToXml(source);
         XmlNode node = FindOrCreate(document, xpath);
+
         if (node != null && sourceDocument.DocumentElement != null)
         {
             node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
         }
+
         return document;
     }
 
@@ -711,10 +810,12 @@ public static class Mii
     {
         XmlDocument sourceDocument = ToXml(source);
         XmlNode node = FindOrCreate(document, xpath);
+
         if (node != null && node.ParentNode != null && sourceDocument.DocumentElement != null)
         {
             node.ParentNode.InsertAfter(document.ImportNode(sourceDocument.DocumentElement, true), node);
         }
+
         return document;
     }
 
@@ -723,14 +824,17 @@ public static class Mii
     {
         XmlDocument sourceDocument = ToXml(source);
         XmlNode node = FindOrCreate(document, xpath);
+
         if (node != null && sourceDocument.DocumentElement != null)
         {
             while (node.FirstChild != null)
             {
                 node.RemoveChild(node.FirstChild);
             }
+
             node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
         }
+
         return document;
     }
 
@@ -741,11 +845,14 @@ public static class Mii
         {
             return document;
         }
+
         List<XmlNode> nodes = new List<XmlNode>();
+
         foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))
         {
             nodes.Add(node);
         }
+
         foreach (XmlNode node in nodes)
         {
             if (node.ParentNode != null)
@@ -753,6 +860,7 @@ public static class Mii
                 node.ParentNode.RemoveChild(node);
             }
         }
+
         return document;
     }
 
@@ -760,15 +868,19 @@ public static class Mii
     public static XmlDocument XslTransform(object input, object stylesheet)
     {
         XslCompiledTransform transform = new XslCompiledTransform();
+
         using (XmlReader reader = new XmlNodeReader(ToXml(stylesheet)))
         {
             transform.Load(reader);
         }
+
         StringBuilder output = new StringBuilder();
+
         using (StringWriter writer = new StringWriter(output, Invariant))
         {
             transform.Transform(ToXml(input), null, writer);
         }
+
         string text = output.ToString().Trim();
         return text.StartsWith("<") ? ParseXml(text) : new XmlDocument();
     }
@@ -778,17 +890,21 @@ public static class Mii
     {
         XmlDocument xml = ToXml(document);
         XmlNode rowset = xml.SelectSingleNode("/Rowsets/Rowset");
+
         if (rowset == null)
         {
             return;
         }
+
         XmlElement row = xml.CreateElement("Row");
+
         for (int index = 0; index + 1 < columnsAndValues.Length; index += 2)
         {
             XmlElement cell = xml.CreateElement(ToStr(columnsAndValues[index]));
             cell.InnerText = ToStr(columnsAndValues[index + 1]);
             row.AppendChild(cell);
         }
+
         rowset.AppendChild(row);
     }
 
@@ -796,14 +912,17 @@ public static class Mii
     {
         List<string> result = new List<string>();
         XmlDocument document = ToXml(source);
+
         if (document.DocumentElement == null)
         {
             return result;
         }
+
         foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))
         {
             result.Add(node.InnerText);
         }
+
         return result;
     }
 
@@ -811,14 +930,17 @@ public static class Mii
     {
         Dictionary<string, string> result = new Dictionary<string, string>();
         XmlDocument document = ToXml(source);
+
         if (document.DocumentElement == null)
         {
             return result;
         }
+
         foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))
         {
             result[node.Name] = node.InnerText;
         }
+
         return result;
     }
 
@@ -831,34 +953,42 @@ public static class Mii
     private static XmlNamespaceManager Namespaces(XmlDocument document)
     {
         XmlNamespaceManager manager = new XmlNamespaceManager(document.NameTable);
+
         foreach (XmlNode node in document.SelectNodes("//namespace::*"))
         {
             string prefix = node.LocalName == "xmlns" ? string.Empty : node.LocalName;
+
             if (prefix.Length > 0 && prefix != "xml" && manager.LookupNamespace(prefix) == null)
             {
                 manager.AddNamespace(prefix, node.Value);
             }
         }
+
         return manager;
     }
 
     private static XmlDocument NodeAsDocument(XmlNode node)
     {
         XmlDocument document = new XmlDocument();
+
         if (node is XmlDocument)
         {
             XmlNode root = ((XmlDocument)node).DocumentElement;
+
             if (root != null)
             {
                 document.AppendChild(document.ImportNode(root, true));
             }
+
             return document;
         }
+
         if (node is XmlElement)
         {
             document.AppendChild(document.ImportNode(node, true));
             return document;
         }
+
         XmlElement value = document.CreateElement("Value");
         value.InnerText = node.Value ?? node.InnerText;
         document.AppendChild(value);
@@ -871,19 +1001,24 @@ public static class Mii
         if (document.DocumentElement != null)
         {
             XmlNode found = document.SelectSingleNode(xpath, Namespaces(document));
+
             if (found != null)
             {
                 return found;
             }
         }
+
         if (!Regex.IsMatch(xpath, @"^(/[A-Za-z_][\w.\-]*)+$"))
         {
             return null;
         }
+
         XmlNode current = document;
+
         foreach (string name in xpath.Trim('/').Split('/'))
         {
             XmlNode next = null;
+
             foreach (XmlNode child in current.ChildNodes)
             {
                 if (child.NodeType == XmlNodeType.Element && child.Name == name)
@@ -892,17 +1027,21 @@ public static class Mii
                     break;
                 }
             }
+
             if (next == null)
             {
                 if (current == document && document.DocumentElement != null)
                 {
                     return null;
                 }
+
                 next = document.CreateElement(name);
                 current.AppendChild(next);
             }
+
             current = next;
         }
+
         return current;
     }
 
@@ -911,6 +1050,7 @@ public static class Mii
     public static List<PropertyInfo> ColumnsOf(Type rowType)
     {
         List<PropertyInfo> result = new List<PropertyInfo>();
+
         foreach (PropertyInfo property in rowType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
             if (property.CanRead && property.CanWrite && property.GetIndexParameters().Length == 0)
@@ -918,6 +1058,7 @@ public static class Mii
                 result.Add(property);
             }
         }
+
         return result;
     }
 
@@ -930,12 +1071,14 @@ public static class Mii
     public static XmlElement RowElement(XmlDocument document, object row)
     {
         XmlElement element = document.CreateElement("Row");
+
         foreach (PropertyInfo property in ColumnsOf(row.GetType()))
         {
             XmlElement cell = document.CreateElement(property.Name);
             cell.InnerText = ToStr(property.GetValue(row, null));
             element.AppendChild(cell);
         }
+
         return element;
     }
 
@@ -947,7 +1090,9 @@ public static class Mii
             {
                 continue;
             }
+
             PropertyInfo property = FindColumn(row.GetType(), cell.LocalName);
+
             if (property != null)
             {
                 property.SetValue(row, ConvertTo(cell.InnerText, property.PropertyType), null);
@@ -959,23 +1104,27 @@ public static class Mii
     {
         string wanted = Simplify(column);
         PropertyInfo loose = null;
+
         foreach (PropertyInfo property in ColumnsOf(rowType))
         {
             if (property.Name == column)
             {
                 return property;
             }
+
             if (loose == null && Simplify(property.Name) == wanted)
             {
                 loose = property;
             }
         }
+
         return loose;
     }
 
     private static string Simplify(string name)
     {
         StringBuilder result = new StringBuilder();
+
         foreach (char c in name)
         {
             if (char.IsLetterOrDigit(c))
@@ -983,17 +1132,24 @@ public static class Mii
                 result.Append(char.ToLowerInvariant(c));
             }
         }
+
         return result.ToString();
     }
 
     private static object ConvertTo(string text, Type type)
     {
         if (type == typeof(string)) return text;
+
         if (type == typeof(bool)) return ToBool(text);
+
         if (type == typeof(int)) return ToInt(text);
+
         if (type == typeof(long)) return ToLong(text);
+
         if (type == typeof(double)) return ToDouble(text);
+
         if (type == typeof(decimal)) return ToDecimal(text);
+
         if (type == typeof(DateTime)) return ToDateTime(text);
         return text;
     }
@@ -1003,20 +1159,24 @@ public static class Mii
     public static List<string> List(params object[] values)
     {
         List<string> result = new List<string>();
+
         foreach (object value in values)
         {
             result.Add(ToStr(value));
         }
+
         return result;
     }
 
     public static Dictionary<string, string> Map(params object[] keysAndValues)
     {
         Dictionary<string, string> result = new Dictionary<string, string>();
+
         for (int index = 0; index + 1 < keysAndValues.Length; index += 2)
         {
             result[ToStr(keysAndValues[index])] = ToStr(keysAndValues[index + 1]);
         }
+
         return result;
     }
 
@@ -1040,10 +1200,12 @@ public static class Mii
     public static int Size(object value)
     {
         IDictionary<string, string> map = value as IDictionary<string, string>;
+
         if (map != null)
         {
             return map.Count;
         }
+
         return ToList(value).Count;
     }
 
@@ -1066,10 +1228,12 @@ public static class Mii
     {
         List<string> items = ToList(list);
         int position = ToInt(index);
+
         if (position >= 0 && position < items.Count)
         {
             items[position] = ToStr(value);
         }
+
         return items;
     }
 
@@ -1077,10 +1241,12 @@ public static class Mii
     {
         List<string> items = ToList(list);
         int position = ToInt(index);
+
         if (position >= 0 && position < items.Count)
         {
             items.RemoveAt(position);
         }
+
         return items;
     }
 
@@ -1140,10 +1306,12 @@ public static class Mii
         List<string> keyList = ToList(keys);
         List<string> valueList = ToList(values);
         Dictionary<string, string> result = new Dictionary<string, string>();
+
         for (int index = 0; index < keyList.Count; index++)
         {
             result[keyList[index]] = index < valueList.Count ? valueList[index] : string.Empty;
         }
+
         return result;
     }
 
@@ -1168,10 +1336,12 @@ public static class Mii
     public static List<string> TimeZoneIds()
     {
         List<string> result = new List<string>();
+
         foreach (TimeZoneInfo zone in TimeZoneInfo.GetSystemTimeZones())
         {
             result.Add(zone.Id);
         }
+
         return result;
     }
 
@@ -1195,10 +1365,12 @@ public static class Mii
     {
         string value = ToStr(text);
         int begin = Math.Max(0, ToInt(start) - 1);
+
         if (begin >= value.Length)
         {
             return string.Empty;
         }
+
         return value.Substring(begin, Math.Max(0, Math.Min(value.Length - begin, ToInt(length))));
     }
 
@@ -1288,10 +1460,12 @@ public static class Mii
     public static string DateFormat(object value, object fromFormat, object toFormat)
     {
         DateTime date;
+
         if (!(value is DateTime) && DateTime.TryParseExact(ToStr(value).Trim(), NetFormat(ToStr(fromFormat)), Invariant, DateTimeStyles.None, out date))
         {
             return date.ToString(NetFormat(ToStr(toFormat)), Invariant);
         }
+
         return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);
     }
 
@@ -1378,10 +1552,12 @@ public static class Mii
     public static DateTime ConvertTimeZone(object value, params object[] zones)
     {
         DateTime date = ToDateTime(value);
+
         if (zones.Length == 0)
         {
             return date;
         }
+
         try
         {
             TimeZoneInfo source = zones.Length >= 2 ? TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[0])) : TimeZoneInfo.Local;
@@ -1429,10 +1605,12 @@ public static class Mii
     {
         List<double> numbers = Numbers(values);
         double result = numbers.Count > 0 ? numbers[0] : 0;
+
         foreach (double number in numbers)
         {
             result = Math.Min(result, number);
         }
+
         return result;
     }
 
@@ -1440,20 +1618,24 @@ public static class Mii
     {
         List<double> numbers = Numbers(values);
         double result = numbers.Count > 0 ? numbers[0] : 0;
+
         foreach (double number in numbers)
         {
             result = Math.Max(result, number);
         }
+
         return result;
     }
 
     public static double Sum(params object[] values)
     {
         double result = 0;
+
         foreach (double number in Numbers(values))
         {
             result += number;
         }
+
         return result;
     }
 
@@ -1488,6 +1670,7 @@ public static class Mii
     private static List<double> Numbers(object[] values)
     {
         List<double> result = new List<double>();
+
         foreach (object value in values)
         {
             if (value is List<string>)
@@ -1502,6 +1685,7 @@ public static class Mii
                 result.Add(ToDouble(value));
             }
         }
+
         return result;
     }
 
@@ -1520,10 +1704,12 @@ public static class Mii
     public static string ExceptionSource(Exception exception)
     {
         MiiException mii = exception as MiiException;
+
         if (mii != null)
         {
             return mii.ActionName;
         }
+
         return exception == null ? string.Empty : exception.Source ?? string.Empty;
     }
 

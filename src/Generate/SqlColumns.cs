@@ -16,24 +16,30 @@ namespace MiiXRay.Generate
         public static List<string> Extract(string sql)
         {
             List<string> result = new List<string>();
+
             if (string.IsNullOrEmpty(sql))
             {
                 return result;
             }
+
             List<string> tokens = Tokenize(sql);
             List<string> statement = LastSelectStatement(tokens);
+
             if (statement == null)
             {
                 return result;
             }
+
             foreach (List<string> item in SelectItems(statement))
             {
                 string name = ColumnName(item);
+
                 if (name != null && !result.Contains(name))
                 {
                     result.Add(name);
                 }
             }
+
             return result;
         }
 
@@ -42,9 +48,11 @@ namespace MiiXRay.Generate
         {
             List<string> tokens = new List<string>();
             int position = 0;
+
             while (position < sql.Length)
             {
                 char c = sql[position];
+
                 if (char.IsWhiteSpace(c))
                 {
                     position++;
@@ -62,6 +70,7 @@ namespace MiiXRay.Generate
                 else if (c == '\'' || c == '"')
                 {
                     int end = position + 1;
+
                     while (end < sql.Length)
                     {
                         if (sql[end] == c)
@@ -71,10 +80,13 @@ namespace MiiXRay.Generate
                                 end += 2;
                                 continue;
                             }
+
                             break;
                         }
+
                         end++;
                     }
+
                     tokens.Add(sql.Substring(position, Math.Min(end + 1, sql.Length) - position));
                     position = end + 1;
                 }
@@ -89,10 +101,12 @@ namespace MiiXRay.Generate
                 else if (char.IsLetterOrDigit(c) || c == '_' || c == '$' || c == ':' || c == '#' || c == '@')
                 {
                     int end = position;
+
                     while (end < sql.Length && (char.IsLetterOrDigit(sql[end]) || sql[end] == '_' || sql[end] == '$' || sql[end] == ':' || sql[end] == '#' || sql[end] == '@'))
                     {
                         end++;
                     }
+
                     tokens.Add(sql.Substring(position, end - position));
                     position = end;
                 }
@@ -102,6 +116,7 @@ namespace MiiXRay.Generate
                     position++;
                 }
             }
+
             return tokens;
         }
 
@@ -112,6 +127,7 @@ namespace MiiXRay.Generate
             List<List<string>> statements = new List<List<string>>();
             List<string> current = new List<string>();
             int depth = 0;
+
             foreach (string token in tokens)
             {
                 if (token == "(")
@@ -122,40 +138,50 @@ namespace MiiXRay.Generate
                 {
                     depth--;
                 }
+
                 if (token == ";" && depth <= 0)
                 {
                     statements.Add(current);
                     current = new List<string>();
                     continue;
                 }
+
                 current.Add(token);
             }
+
             statements.Add(current);
 
             for (int index = statements.Count - 1; index >= 0; index--)
             {
                 List<string> statement = TrimBlockKeywords(statements[index]);
+
                 if (statement.Count == 0)
                 {
                     continue;
                 }
+
                 int select = FindTopLevelSelect(statement);
+
                 if (select < 0 || HasTopLevelInto(statement, select))
                 {
                     continue;
                 }
+
                 return statement.GetRange(select, statement.Count - select);
             }
+
             return null;
         }
 
         private static List<string> TrimBlockKeywords(List<string> statement)
         {
             int start = 0;
+
             while (start < statement.Count && IsWord(statement[start], "DO", "BEGIN", "END"))
             {
                 start++;
             }
+
             return statement.GetRange(start, statement.Count - start);
         }
 
@@ -165,14 +191,18 @@ namespace MiiXRay.Generate
             {
                 return 0;
             }
+
             if (!IsWord(statement[0], "WITH"))
             {
                 return -1;
             }
+
             int depth = 0;
+
             for (int index = 0; index < statement.Count; index++)
             {
                 string token = statement[index];
+
                 if (token == "(")
                 {
                     depth++;
@@ -186,15 +216,18 @@ namespace MiiXRay.Generate
                     return index;
                 }
             }
+
             return -1;
         }
 
         private static bool HasTopLevelInto(List<string> statement, int select)
         {
             int depth = 0;
+
             for (int index = select; index < statement.Count; index++)
             {
                 string token = statement[index];
+
                 if (token == "(")
                 {
                     depth++;
@@ -212,6 +245,7 @@ namespace MiiXRay.Generate
                     return true;
                 }
             }
+
             return false;
         }
 
@@ -219,19 +253,24 @@ namespace MiiXRay.Generate
         {
             List<List<string>> items = new List<List<string>>();
             int index = 1;
+
             while (index < statement.Count && IsWord(statement[index], "DISTINCT", "ALL"))
             {
                 index++;
             }
+
             if (index < statement.Count && IsWord(statement[index], "TOP"))
             {
                 index += 2;
             }
+
             List<string> current = new List<string>();
             int depth = 0;
+
             for (; index < statement.Count; index++)
             {
                 string token = statement[index];
+
                 if (token == "(")
                 {
                     depth++;
@@ -240,18 +279,22 @@ namespace MiiXRay.Generate
                 {
                     depth--;
                 }
+
                 if (depth == 0 && IsWord(token, "FROM"))
                 {
                     break;
                 }
+
                 if (depth == 0 && token == ",")
                 {
                     items.Add(current);
                     current = new List<string>();
                     continue;
                 }
+
                 current.Add(token);
             }
+
             items.Add(current);
             return items;
         }
@@ -262,19 +305,24 @@ namespace MiiXRay.Generate
             {
                 return null;
             }
+
             string last = item[item.Count - 1];
+
             if (last == "*")
             {
                 return null;
             }
+
             if (item.Count >= 2 && IsWord(item[item.Count - 2], "AS"))
             {
                 return NameOf(last);
             }
+
             if (item.Count == 1)
             {
                 return NameOf(last);
             }
+
             if (item.Count >= 3 && item[item.Count - 2] == ".")
             {
                 // t.Column (and nothing before it except further qualifiers)
@@ -285,14 +333,18 @@ namespace MiiXRay.Generate
                         return null;
                     }
                 }
+
                 return NameOf(last);
             }
+
             // expression followed by an implicit alias: "count(*) Total", "x.y Name"
             string previous = item[item.Count - 2];
+
             if (IsName(last) && !NotAnAlias.Contains(last) && (previous == ")" || IsName(previous) || previous.StartsWith("'")))
             {
                 return NameOf(last);
             }
+
             return null;
         }
 
@@ -302,10 +354,12 @@ namespace MiiXRay.Generate
             {
                 return token.Substring(1, token.Length - 2).Replace("\"\"", "\"");
             }
+
             if (!IsName(token) || NotAnAlias.Contains(token))
             {
                 return null;
             }
+
             return token;
         }
 
@@ -315,14 +369,17 @@ namespace MiiXRay.Generate
             {
                 return false;
             }
+
             if (token[0] == '"')
             {
                 return true;
             }
+
             if (!(char.IsLetter(token[0]) || token[0] == '_'))
             {
                 return false;
             }
+
             foreach (char c in token)
             {
                 if (!(char.IsLetterOrDigit(c) || c == '_' || c == '$' || c == '#'))
@@ -330,6 +387,7 @@ namespace MiiXRay.Generate
                     return false;
                 }
             }
+
             return true;
         }
 
@@ -342,6 +400,7 @@ namespace MiiXRay.Generate
                     return true;
                 }
             }
+
             return false;
         }
     }

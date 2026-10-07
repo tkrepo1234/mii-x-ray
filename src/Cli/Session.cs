@@ -17,14 +17,18 @@ namespace MiiXRay.Cli
         public void Run()
         {
             _profiles = LoadProfiles();
+
             while (true)
             {
                 Profile profile = ChooseProfile();
+
                 if (profile == null)
                 {
                     return;
                 }
+
                 IObjectSource source = Connect(profile);
+
                 if (source != null)
                 {
                     RunTransactions(profile, source);
@@ -60,6 +64,7 @@ namespace MiiXRay.Cli
                     ConsoleUi.Hint("Check that " + ProfileStore.DataFolder + " is writable.");
                     return;
                 }
+
                 throw;
             }
         }
@@ -71,35 +76,44 @@ namespace MiiXRay.Cli
             while (true)
             {
                 ConsoleUi.Title("Profiles");
+
                 if (_profiles.Count == 0)
                 {
                     ConsoleUi.Info("No profile yet. A profile says where the transactions come from (an MII server or an export folder)");
                     ConsoleUi.Info("and where the C# files go. It is stored in " + _store.FilePath + ".");
                     Profile created = EditProfile(new Profile());
+
                     if (created != null)
                     {
                         return created;
                     }
+
                     continue;
                 }
+
                 List<string> options = new List<string>();
+
                 foreach (Profile profile in _profiles)
                 {
                     options.Add(profile.Summary());
                 }
+
                 int create = options.Count;
                 options.Add("New profile");
                 options.Add("Edit a profile");
                 options.Add("Delete a profile");
                 options.Add("Quit");
                 int choice = ConsoleUi.Choose("Choose", options, 0);
+
                 if (choice < create)
                 {
                     return _profiles[choice];
                 }
+
                 if (choice == create)
                 {
                     Profile created = EditProfile(new Profile());
+
                     if (created != null)
                     {
                         return created;
@@ -108,6 +122,7 @@ namespace MiiXRay.Cli
                 else if (choice == create + 1)
                 {
                     Profile chosen = PickExisting("Which profile to edit");
+
                     if (chosen != null)
                     {
                         EditProfile(chosen);
@@ -116,6 +131,7 @@ namespace MiiXRay.Cli
                 else if (choice == create + 2)
                 {
                     Profile chosen = PickExisting("Which profile to delete");
+
                     if (chosen != null && ConsoleUi.AskYesNo("Delete profile " + chosen.Name + "?", false))
                     {
                         _profiles.Remove(chosen);
@@ -132,10 +148,12 @@ namespace MiiXRay.Cli
         private Profile PickExisting(string question)
         {
             List<string> names = new List<string>();
+
             foreach (Profile profile in _profiles)
             {
                 names.Add(profile.Summary());
             }
+
             names.Add("Back");
             int choice = ConsoleUi.Choose(question, names, names.Count - 1);
             return choice < _profiles.Count ? _profiles[choice] : null;
@@ -148,12 +166,14 @@ namespace MiiXRay.Cli
             ConsoleUi.Title(isNew ? "New profile" : "Edit profile " + profile.Name);
             string name = ConsoleUi.AskRequired("Profile name (e.g. DEV, QA, Export)", profile.Name);
             Profile sameName = FindProfile(name);
+
             if (sameName != null && sameName != profile)
             {
                 ConsoleUi.Warning("A profile named " + name + " exists already; it will be edited instead.");
                 profile = sameName;
                 isNew = false;
             }
+
             profile.Name = name;
 
             List<string> kinds = new List<string>();
@@ -167,12 +187,15 @@ namespace MiiXRay.Cli
                 profile.UseHttps = ConsoleUi.AskYesNo("Use https", isNew ? true : profile.UseHttps);
                 int defaultPort = isNew ? (profile.UseHttps ? 50001 : 50000) : profile.Port;
                 profile.Port = ConsoleUi.AskNumber("Port", defaultPort, 1, 65535);
+
                 if (profile.UseHttps)
                 {
                     profile.AcceptAnyCertificate = ConsoleUi.AskYesNo("Accept a certificate this PC does not trust (only for test systems)", profile.AcceptAnyCertificate);
                 }
+
                 profile.UserName = ConsoleUi.AskRequired("MII user", profile.UserName.Length > 0 ? profile.UserName : Environment.UserName);
                 bool hasPassword = profile.ProtectedPassword.Length > 0;
+
                 if (ConsoleUi.AskYesNo(hasPassword ? "Change the saved password" : "Save the password (encrypted for your Windows user)", false))
                 {
                     profile.ProtectedPassword = ProfileStore.Protect(ConsoleUi.AskPassword("Password"));
@@ -187,11 +210,13 @@ namespace MiiXRay.Cli
                 while (true)
                 {
                     string folder = ConsoleUi.AskRequired("Export folder", profile.ExportFolder).Trim('"');
+
                     if (Directory.Exists(folder))
                     {
                         profile.ExportFolder = Path.GetFullPath(folder);
                         break;
                     }
+
                     ConsoleUi.Warning("  The folder " + folder + " does not exist.");
                 }
             }
@@ -199,15 +224,18 @@ namespace MiiXRay.Cli
             string defaultOutput = profile.OutputFolder.Length > 0
                 ? profile.OutputFolder
                 : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "MiiXRay");
+
             while (true)
             {
                 string folder = ConsoleUi.AskRequired("Working directory for the generated C# files", defaultOutput).Trim('"');
                 string problem = CheckWritableFolder(folder);
+
                 if (problem == null)
                 {
                     profile.OutputFolder = Path.GetFullPath(folder);
                     break;
                 }
+
                 ConsoleUi.Warning("  " + problem);
             }
 
@@ -215,6 +243,7 @@ namespace MiiXRay.Cli
             {
                 _profiles.Add(profile);
             }
+
             SaveProfiles();
             ConsoleUi.Success("Profile " + profile.Name + " saved.");
             return profile;
@@ -239,6 +268,7 @@ namespace MiiXRay.Cli
                 {
                     return "The folder cannot be used: " + exception.Message;
                 }
+
                 throw;
             }
         }
@@ -248,15 +278,19 @@ namespace MiiXRay.Cli
         {
             string value = host.Trim();
             int scheme = value.IndexOf("://", StringComparison.Ordinal);
+
             if (scheme >= 0)
             {
                 value = value.Substring(scheme + 3);
             }
+
             int slash = value.IndexOf('/');
+
             if (slash >= 0)
             {
                 value = value.Substring(0, slash);
             }
+
             int colon = value.IndexOf(':');
             return colon >= 0 ? value.Substring(0, colon) : value;
         }
@@ -270,6 +304,7 @@ namespace MiiXRay.Cli
                     return profile;
                 }
             }
+
             return null;
         }
 
@@ -281,9 +316,11 @@ namespace MiiXRay.Cli
             string password = null;
             bool useStoredPassword = true;
             bool typedPassword = false;
+
             while (true)
             {
                 IObjectSource source;
+
                 if (profile.Kind == SourceKind.Folder)
                 {
                     source = new FolderSource(profile.ExportFolder);
@@ -293,29 +330,36 @@ namespace MiiXRay.Cli
                     if (password == null && useStoredPassword)
                     {
                         password = ProfileStore.Unprotect(profile.ProtectedPassword);
+
                         if (password == null && profile.ProtectedPassword.Length > 0)
                         {
                             ConsoleUi.Warning("The saved password cannot be read on this account; please enter it.");
                         }
                     }
+
                     if (password == null)
                     {
                         password = ConsoleUi.AskPassword("Password for " + profile.UserName + " on " + profile.Host);
                         typedPassword = true;
                     }
+
                     source = new CatalogSource(profile.Host, profile.Port, profile.UseHttps, profile.UserName, password, profile.AcceptAnyCertificate);
                 }
+
                 ConsoleUi.Info("Connecting to " + source.Description + " ...");
+
                 try
                 {
                     source.CheckConnection();
                     ConsoleUi.Success("Connected.");
+
                     if (typedPassword && profile.ProtectedPassword.Length > 0)
                     {
                         // the profile keeps a password: keep the one that worked
                         profile.ProtectedPassword = ProfileStore.Protect(password);
                         SaveProfiles();
                     }
+
                     return source;
                 }
                 catch (SourceException exception)
@@ -323,12 +367,14 @@ namespace MiiXRay.Cli
                     ConsoleUi.Error(exception.Message);
                     ConsoleUi.Hint(exception.Hint);
                 }
+
                 List<string> options = new List<string>();
                 options.Add("Try again");
                 options.Add("Edit the profile");
                 options.Add("Enter the password again");
                 options.Add("Back to the profiles");
                 int choice = ConsoleUi.Choose("What now", options, 0);
+
                 if (choice == 1)
                 {
                     EditProfile(profile);
@@ -351,30 +397,38 @@ namespace MiiXRay.Cli
         private void RunTransactions(Profile profile, IObjectSource source)
         {
             XRayRunner runner = new XRayRunner(source, false);
+
             while (true)
             {
                 ConsoleUi.Title("X-Ray (" + profile.Name + ")");
                 string path = AskTransaction(profile);
+
                 if (path == null)
                 {
                     return;
                 }
+
                 if (path.Length == 0)
                 {
                     continue;
                 }
+
                 ConsoleUi.Info("Loading " + ObjectPath.Normalize(path) + " and everything it uses ...");
+
                 try
                 {
                     XRayResult result;
                     string file = runner.Run(path, profile.OutputFolder, out result);
+
                     if (file == null)
                     {
                         continue;
                     }
+
                     profile.Remember(ObjectPath.Normalize(path));
                     SaveProfiles();
                     XRayRunner.Report(result, file);
+
                     if (ConsoleUi.AskYesNo("Open the working directory", false))
                     {
                         Process.Start("explorer.exe", "/select,\"" + file + "\"");
@@ -409,35 +463,44 @@ namespace MiiXRay.Cli
             if (profile.RecentTransactions.Count > 0)
             {
                 ConsoleUi.Info("Recent:");
+
                 for (int index = 0; index < profile.RecentTransactions.Count; index++)
                 {
                     ConsoleUi.Info("  " + (index + 1) + ") " + profile.RecentTransactions[index]);
                 }
             }
+
             ConsoleUi.Dim("Enter a transaction path (PROJECT/Folder/trxName), a number from the list, 'p' for the profiles or 'q' to quit.");
             string answer = ConsoleUi.Ask("Transaction", string.Empty);
+
             if (answer.Length == 0)
             {
                 return string.Empty;
             }
+
             if (answer == "p" || answer == "P")
             {
                 return null;
             }
+
             if (answer == "q" || answer == "Q")
             {
                 Environment.Exit(0);
             }
+
             int number;
+
             if (int.TryParse(answer, out number))
             {
                 if (number >= 1 && number <= profile.RecentTransactions.Count)
                 {
                     return profile.RecentTransactions[number - 1];
                 }
+
                 ConsoleUi.Warning("  There is no entry " + number + ".");
                 return string.Empty;
             }
+
             return answer;
         }
     }

@@ -40,7 +40,9 @@ namespace MiiXRay.Profiles
             {
                 return new List<Profile>();
             }
+
             XmlSerializer serializer = new XmlSerializer(typeof(List<Profile>), new XmlRootAttribute("Profiles"));
+
             using (FileStream stream = File.OpenRead(_path))
             {
                 List<Profile> profiles = (List<Profile>)serializer.Deserialize(stream);
@@ -53,10 +55,12 @@ namespace MiiXRay.Profiles
             Directory.CreateDirectory(Path.GetDirectoryName(_path));
             string temporary = _path + ".tmp";
             XmlSerializer serializer = new XmlSerializer(typeof(List<Profile>), new XmlRootAttribute("Profiles"));
+
             using (FileStream stream = File.Create(temporary))
             {
                 serializer.Serialize(stream, profiles);
             }
+
             if (File.Exists(_path))
             {
                 File.Replace(temporary, _path, null);
@@ -73,6 +77,7 @@ namespace MiiXRay.Profiles
             {
                 return string.Empty;
             }
+
             byte[] encrypted = ProtectedData.Protect(Encoding.UTF8.GetBytes(password), Entropy, DataProtectionScope.CurrentUser);
             return Convert.ToBase64String(encrypted);
         }
@@ -84,6 +89,7 @@ namespace MiiXRay.Profiles
             {
                 return null;
             }
+
             try
             {
                 byte[] decrypted = ProtectedData.Unprotect(Convert.FromBase64String(protectedPassword), Entropy, DataProtectionScope.CurrentUser);

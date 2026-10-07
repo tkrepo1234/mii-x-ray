@@ -51,6 +51,7 @@ namespace MiiXRay.Profiles
             {
                 return Name + "  (export folder " + ExportFolder + ")";
             }
+
             return Name + "  (" + (UseHttps ? "https" : "http") + "://" + Host + ":" + Port + ", user " + UserName + ")";
         }
 
@@ -59,6 +60,7 @@ namespace MiiXRay.Profiles
         {
             RecentTransactions.RemoveAll(delegate(string existing) { return string.Equals(existing, transactionPath, StringComparison.OrdinalIgnoreCase); });
             RecentTransactions.Insert(0, transactionPath);
+
             if (RecentTransactions.Count > 9)
             {
                 RecentTransactions.RemoveRange(9, RecentTransactions.Count - 9);

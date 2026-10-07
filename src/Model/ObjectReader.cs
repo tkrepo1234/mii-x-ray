@@ -28,6 +28,7 @@ namespace MiiXRay.Model
             {
                 MiiParameter parameter = ReadParameter(item);
                 parameter.IsOutput = string.Equals(MiiXml.ChildText(item, "ReadOnly").Trim(), "true", StringComparison.OrdinalIgnoreCase);
+
                 if (parameter.IsOutput)
                 {
                     transaction.Outputs.Add(parameter);
@@ -37,25 +38,30 @@ namespace MiiXRay.Model
                     transaction.Inputs.Add(parameter);
                 }
             }
+
             foreach (XmlElement item in MiiXml.Children(MiiXml.Child(root, "Local"), "ContextItem"))
             {
                 transaction.Locals.Add(ReadParameter(item));
             }
+
             foreach (XmlElement item in MiiXml.Children(MiiXml.Child(root, "Actions"), "ContextItem"))
             {
                 MiiActionDefinition definition = new MiiActionDefinition();
                 definition.Name = MiiXml.ChildText(item, "Name");
                 definition.Value = MiiXml.Child(item, "Value");
                 definition.ActionType = MiiXml.XsiType(definition.Value);
+
                 if (definition.Name.Length > 0 && !transaction.Actions.ContainsKey(definition.Name))
                 {
                     transaction.Actions.Add(definition.Name, definition);
                 }
             }
+
             foreach (XmlElement step in MiiXml.Children(MiiXml.Child(root, "Steps"), "Step"))
             {
                 transaction.Steps.Add(ReadStep(step, transaction));
             }
+
             return transaction;
         }
 
@@ -68,6 +74,7 @@ namespace MiiXRay.Model
                     return MiiXml.OwnText(MiiXml.Child(item, "Value")).Trim();
                 }
             }
+
             return string.Empty;
         }
 
@@ -80,10 +87,12 @@ namespace MiiXRay.Model
             parameter.Type = MiiXml.XsiType(value);
             parameter.DefaultText = MiiXml.OwnText(value);
             parameter.ReferenceSource = MiiXml.ChildText(value, "ReferenceDocumentSource").Trim();
+
             if (parameter.Type != "xml")
             {
                 parameter.DefaultText = parameter.DefaultText.Trim();
             }
+
             return parameter;
         }
 
@@ -93,6 +102,7 @@ namespace MiiXRay.Model
             step.StepType = MiiXml.XsiType(element);
             step.Name = MiiXml.ChildText(element, "Name");
             XmlElement action = MiiXml.Child(MiiXml.Child(element, "Actions"), "Action");
+
             if (action != null)
             {
                 MiiActionUse use = new MiiActionUse();
@@ -100,34 +110,42 @@ namespace MiiXRay.Model
                 use.Incoming = ReadLinks(MiiXml.Child(action, "IncomingLinks"));
                 use.Outgoing = ReadLinks(MiiXml.Child(action, "OutgoingLinks"));
                 MiiActionDefinition definition;
+
                 if (transaction.Actions.TryGetValue(use.Name, out definition))
                 {
                     use.Definition = definition;
                 }
+
                 step.Action = use;
             }
+
             foreach (XmlElement child in MiiXml.Children(MiiXml.Child(element, "Steps"), "Step"))
             {
                 step.Children.Add(ReadStep(child, transaction));
             }
+
             return step;
         }
 
         private static List<MiiLink> ReadLinks(XmlElement links)
         {
             List<MiiLink> result = new List<MiiLink>();
+
             foreach (XmlElement assign in MiiXml.Children(links, "Assign"))
             {
                 MiiLink link = new MiiLink();
                 link.Kind = MiiXml.XsiType(assign);
+
                 if (link.Kind.Length == 0)
                 {
                     link.Kind = "Assign";
                 }
+
                 link.From = MiiXml.ChildText(assign, "From");
                 link.To = MiiXml.ChildText(assign, "To").Trim();
                 result.Add(link);
             }
+
             return result;
         }
 
@@ -140,6 +158,7 @@ namespace MiiXRay.Model
             query.Path = path;
             query.RootName = root.LocalName;
             query.Mode = root.GetAttribute("Mode");
+
             switch (root.LocalName)
             {
                 case "SQLQuery":
@@ -159,14 +178,17 @@ namespace MiiXRay.Model
                     query.Kind = MiiQueryKind.Xacute;
                     query.XacuteTransaction = root.GetAttribute("Transaction").Trim();
                     query.XacuteOutputParameter = root.GetAttribute("OutputParameter").Trim();
+
                     for (int slot = 1; slot <= 32; slot++)
                     {
                         string target = root.GetAttribute("MappedParamTarget." + slot.ToString(CultureInfo.InvariantCulture)).Trim();
+
                         if (target.Length > 0)
                         {
                             query.XacuteMappedTargets[slot] = target;
                         }
                     }
+
                     query.Text = string.Empty;
                     break;
                 default:
@@ -174,10 +196,12 @@ namespace MiiXRay.Model
                     query.Text = root.GetAttribute("Query");
                     break;
             }
+
             if (query.Text == null)
             {
                 query.Text = string.Empty;
             }
+
             ReadQueryParameters(root, query);
             return query;
         }
@@ -185,10 +209,12 @@ namespace MiiXRay.Model
         private static void ReadQueryParameters(XmlElement root, MiiQuery query)
         {
             Dictionary<int, bool> inText = new Dictionary<int, bool>();
+
             foreach (Match match in ParamSlotInText.Matches(query.Text))
             {
                 inText[int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture)] = true;
             }
+
             for (int slot = 1; slot <= 32; slot++)
             {
                 string suffix = slot.ToString(CultureInfo.InvariantCulture);
@@ -196,10 +222,12 @@ namespace MiiXRay.Model
                 string type = root.GetAttribute("ParamType." + suffix).Trim();
                 string value = root.GetAttribute("Param." + suffix);
                 bool mapped = query.XacuteMappedTargets.ContainsKey(slot);
+
                 if (description.Length == 0 && !inText.ContainsKey(slot) && !mapped)
                 {
                     continue;
                 }
+
                 MiiQueryParameter parameter = new MiiQueryParameter();
                 parameter.Slot = slot;
                 parameter.Description = description;
@@ -218,6 +246,7 @@ namespace MiiXRay.Model
             string sort = root.GetAttribute("SortExpr").Trim();
             StringBuilder text = new StringBuilder();
             text.Append("/* MDO query, mode ").Append(mode).Append(" */ ");
+
             if (string.Equals(mode, "Select", StringComparison.OrdinalIgnoreCase))
             {
                 string attributes = root.GetAttribute("Attributes").Trim();
@@ -230,15 +259,18 @@ namespace MiiXRay.Model
             else
             {
                 List<string> assignments = new List<string>();
+
                 for (int index = 1; index <= 128; index++)
                 {
                     string suffix = index.ToString(CultureInfo.InvariantCulture);
                     string name = root.GetAttribute("AttributeName." + suffix).Trim();
+
                     if (name.Length > 0)
                     {
                         assignments.Add("[" + name + "] = " + root.GetAttribute("AttributeValue." + suffix).Trim());
                     }
                 }
+
                 if (string.Equals(mode, "Insert", StringComparison.OrdinalIgnoreCase))
                 {
                     text.Append("INSERT INTO [").Append(mdo).Append("] SET ").Append(string.Join(", ", assignments.ToArray()));
@@ -248,14 +280,17 @@ namespace MiiXRay.Model
                     text.Append(mode.ToUpperInvariant()).Append(" [").Append(mdo).Append("] SET ").Append(string.Join(", ", assignments.ToArray()));
                 }
             }
+
             if (filter.Length > 0)
             {
                 text.Append(" WHERE ").Append(filter);
             }
+
             if (sort.Length > 0)
             {
                 text.Append(" ORDER BY ").Append(sort);
             }
+
             return text.ToString();
         }
     }

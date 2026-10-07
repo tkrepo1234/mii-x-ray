@@ -29,6 +29,7 @@ namespace MiiXRay.Cli
             resolver.Progress += delegate(string message)
             {
                 loaded++;
+
                 if (_verbose)
                 {
                     ConsoleUi.Dim("  " + message);
@@ -38,18 +39,23 @@ namespace MiiXRay.Cli
                     Console.Write(".");
                 }
             };
+
             ObjectGraph graph = resolver.Resolve(transactionPath);
+
             if (!_verbose && loaded >= 10)
             {
                 Console.WriteLine();
             }
+
             if (graph == null)
             {
                 ConsoleUi.Error("The transaction " + ObjectPath.Normalize(transactionPath) + " was not found (or is no transaction).");
                 List<string> similar = _source.FindSimilar(transactionPath, 8);
+
                 if (similar.Count > 0)
                 {
                     ConsoleUi.Info("  Similar objects:");
+
                     foreach (string candidate in similar)
                     {
                         ConsoleUi.Info("    " + candidate);
@@ -59,8 +65,10 @@ namespace MiiXRay.Cli
                 {
                     ConsoleUi.Hint("Write the path as in the Workbench, e.g. PROJECT/Folder/trxName (with or without .trx).");
                 }
+
                 return null;
             }
+
             result = CodeFile.Generate(graph, _source.Description);
             Directory.CreateDirectory(outputFolder);
             string file = Path.Combine(outputFolder, result.RootClassName + ".xray.cs");
@@ -74,6 +82,7 @@ namespace MiiXRay.Cli
             ConsoleUi.Info("  " + result.TransactionCount + " transaction(s), " + result.QueryCount + " query template(s)"
                 + (result.Missing.Count > 0 ? ", " + result.Missing.Count + " not found" : string.Empty)
                 + (result.Notes.Count > 0 ? ", " + result.Notes.Count + " note(s) in the file header" : string.Empty) + ".");
+
             foreach (string missing in result.Missing)
             {
                 ConsoleUi.Warning("  not found: " + missing);

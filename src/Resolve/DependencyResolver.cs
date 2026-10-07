@@ -54,19 +54,24 @@ namespace MiiXRay.Resolve
         public ObjectGraph Resolve(string rootPath)
         {
             MiiTransaction root = LoadTransaction(rootPath);
+
             if (root == null)
             {
                 return null;
             }
+
             _graph.Root = root;
+
             while (_pending.Count > 0)
             {
                 MiiTransaction transaction = _pending.Dequeue();
+
                 foreach (MiiActionDefinition action in transaction.Actions.Values)
                 {
                     FollowAction(transaction, action);
                 }
             }
+
             return _graph;
         }
 
@@ -75,28 +80,36 @@ namespace MiiXRay.Resolve
             if (action.ActionType == "TransactionCall")
             {
                 string name = action.Static("TransactionName");
+
                 if (name.Length > 0)
                 {
                     LoadTransaction(name);
                 }
+
                 return;
             }
+
             if (action.ActionType == "DynamicTransactionCall")
             {
                 string name = LiteralLinkedValue(owner, action.Name, "TransactionName");
+
                 if (name != null)
                 {
                     LoadTransaction(name);
                 }
+
                 return;
             }
+
             if (action.HasProperty("QueryTemplate"))
             {
                 string name = action.Static("QueryTemplate");
+
                 if (name.Length == 0)
                 {
                     name = LiteralLinkedValue(owner, action.Name, "QueryTemplate");
                 }
+
                 if (!string.IsNullOrEmpty(name))
                 {
                     LoadQuery(name);
@@ -113,6 +126,7 @@ namespace MiiXRay.Resolve
                 {
                     continue;
                 }
+
                 foreach (MiiLink link in use.Incoming)
                 {
                     if (link.To == actionName + "." + property)
@@ -122,6 +136,7 @@ namespace MiiXRay.Resolve
                     }
                 }
             }
+
             return null;
         }
 
@@ -129,21 +144,26 @@ namespace MiiXRay.Resolve
         {
             string key = ObjectPath.Normalize(reference);
             MiiTransaction known;
+
             if (_graph.TransactionsByReference.TryGetValue(key, out known))
             {
                 return known;
             }
+
             if (_graph.Missing.Contains(key))
             {
                 return null;
             }
+
             object loaded = LoadObject(key);
             MiiTransaction transaction = loaded as MiiTransaction;
+
             if (transaction == null)
             {
                 Remember(key, loaded);
                 return null;
             }
+
             _graph.TransactionsByReference[key] = transaction;
             return transaction;
         }
@@ -151,18 +171,23 @@ namespace MiiXRay.Resolve
         private void LoadQuery(string reference)
         {
             string key = ObjectPath.Normalize(reference);
+
             if (_graph.QueriesByReference.ContainsKey(key) || _graph.TransactionsByReference.ContainsKey(key) || _graph.Missing.Contains(key))
             {
                 return;
             }
+
             object loaded = LoadObject(key);
             MiiQuery query = loaded as MiiQuery;
+
             if (query == null)
             {
                 Remember(key, loaded);
                 return;
             }
+
             _graph.QueriesByReference[key] = query;
+
             if (query.Kind == MiiQueryKind.Xacute && query.XacuteTransaction.Length > 0)
             {
                 LoadTransaction(query.XacuteTransaction);
@@ -172,17 +197,21 @@ namespace MiiXRay.Resolve
         private void Remember(string key, object loaded)
         {
             MiiTransaction transaction = loaded as MiiTransaction;
+
             if (transaction != null)
             {
                 _graph.TransactionsByReference[key] = transaction;
                 return;
             }
+
             MiiQuery query = loaded as MiiQuery;
+
             if (query != null)
             {
                 _graph.QueriesByReference[key] = query;
                 return;
             }
+
             if (loaded == null && !_graph.Missing.Contains(key))
             {
                 _graph.Missing.Add(key);
@@ -193,17 +222,22 @@ namespace MiiXRay.Resolve
         private object LoadObject(string key)
         {
             LoadedObject loaded = _source.Load(key);
+
             if (loaded == null)
             {
                 Report("not found: " + key);
                 return null;
             }
+
             object existing;
+
             if (_byCanonicalPath.TryGetValue(loaded.CanonicalPath, out existing))
             {
                 return existing;
             }
+
             XmlDocument document;
+
             try
             {
                 document = MiiXml.Parse(loaded.Text);
@@ -213,7 +247,9 @@ namespace MiiXRay.Resolve
                 Report("not readable (" + exception.Message + "): " + key);
                 return null;
             }
+
             object result;
+
             if (ObjectReader.IsTransaction(document))
             {
                 MiiTransaction transaction = ObjectReader.ReadTransaction(key, document);
@@ -227,6 +263,7 @@ namespace MiiXRay.Resolve
                 _graph.Queries.Add(query);
                 result = query;
             }
+
             _byCanonicalPath[loaded.CanonicalPath] = result;
             Report("loaded " + key);
             return result;
@@ -235,6 +272,7 @@ namespace MiiXRay.Resolve
         private void Report(string message)
         {
             Action<string> handler = Progress;
+
             if (handler != null)
             {
                 handler(message);

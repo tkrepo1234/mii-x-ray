@@ -32,6 +32,7 @@ namespace MiiXRay.Generate
 
             // bodies first: they complete the rowset contracts (columns read by XPath)
             Dictionary<TransactionContract, List<string>> methods = new Dictionary<TransactionContract, List<string>>();
+
             foreach (MiiTransaction transaction in graph.Transactions)
             {
                 TransactionContract contract = context.Transactions[transaction];
@@ -56,27 +57,33 @@ namespace MiiXRay.Generate
             lines.Add("{");
             List<string> body = new List<string>();
             body.Add("#region Transactions");
+
             foreach (MiiTransaction transaction in graph.Transactions)
             {
                 TransactionContract contract = context.Transactions[transaction];
                 body.Add(string.Empty);
                 body.AddRange(TransactionClass(contract, methods[contract]));
             }
+
             body.Add(string.Empty);
             body.Add("#endregion");
             List<QueryContract> queries = QueryClasses(context);
+
             if (queries.Count > 0)
             {
                 body.Add(string.Empty);
                 body.Add("#region Queries");
+
                 foreach (QueryContract query in queries)
                 {
                     body.Add(string.Empty);
                     body.AddRange(QueryClass(query));
                 }
+
                 body.Add(string.Empty);
                 body.Add("#endregion");
             }
+
             body.Add(string.Empty);
             body.AddRange(ResourceLines("MiiXRay.RuntimeSource.txt"));
             lines.AddRange(TransactionEmitter.Indent(body));
@@ -108,13 +115,16 @@ namespace MiiXRay.Generate
             lines.Add("// Entry point: " + root.ClassName + ".Execute(request, queryService, pluginService)");
             lines.Add("//");
             lines.Add("// Transactions (" + context.Graph.Transactions.Count + "):");
+
             foreach (MiiTransaction transaction in context.Graph.Transactions)
             {
                 lines.Add("//   " + context.Transactions[transaction].ClassName + " = " + transaction.Path);
             }
+
             if (context.Graph.Queries.Count > 0)
             {
                 lines.Add("// Queries (" + context.Graph.Queries.Count + "):");
+
                 foreach (MiiQuery query in context.Graph.Queries)
                 {
                     QueryContract contract = context.Queries[query];
@@ -123,22 +133,27 @@ namespace MiiXRay.Generate
                     lines.Add("//   " + contract.ClassName + " = " + query.Path + " (" + kind + ")");
                 }
             }
+
             if (context.Graph.Missing.Count > 0)
             {
                 lines.Add("// Not found (called through IPluginService instead):");
+
                 foreach (string missing in context.Graph.Missing)
                 {
                     lines.Add("//   " + missing);
                 }
             }
+
             if (context.Notes.Count > 0)
             {
                 lines.Add("// Notes (" + context.Notes.Count + "):");
+
                 foreach (string note in context.Notes)
                 {
                     lines.Add("//   " + note);
                 }
             }
+
             lines.Add(rule);
             lines.Add(string.Empty);
             return lines;
@@ -151,6 +166,7 @@ namespace MiiXRay.Generate
             List<string> lines = new List<string>();
             lines.Add("/// <summary>");
             lines.Add("/// " + XmlText(contract.Transaction.Path));
+
             if (contract.Transaction.Description.Length > 0)
             {
                 foreach (string line in SplitLines(contract.Transaction.Description))
@@ -158,6 +174,7 @@ namespace MiiXRay.Generate
                     lines.Add("/// " + XmlText(line));
                 }
             }
+
             lines.Add("/// </summary>");
             lines.Add("public static class " + contract.ClassName);
             lines.Add("{");
@@ -167,11 +184,13 @@ namespace MiiXRay.Generate
             body.AddRange(PropertyClass("Request", "The inputs of the transaction (defaults as configured in MII).", contract.RequestProperties));
             body.Add(string.Empty);
             body.AddRange(PropertyClass("Response", "The outputs of the transaction.", contract.ResponseProperties));
+
             foreach (RowsetContract rowset in contract.NestedContracts)
             {
                 body.Add(string.Empty);
                 body.AddRange(RowsetClasses(rowset));
             }
+
             body.Add(string.Empty);
             body.AddRange(method);
             lines.AddRange(TransactionEmitter.Indent(body));
@@ -188,20 +207,26 @@ namespace MiiXRay.Generate
             List<string> body = new List<string>();
             body.Add("public " + name + "()");
             body.Add("{");
+
             foreach (PropertySpec property in properties)
             {
                 body.Add("    " + property.Name + " = " + property.Initializer + ";");
             }
+
             body.Add("}");
+
             foreach (PropertySpec property in properties)
             {
                 body.Add(string.Empty);
+
                 if (property.Description.Length > 0)
                 {
                     body.Add("/// <summary>" + XmlText(OneLine(property.Description)) + "</summary>");
                 }
+
                 body.Add("public " + property.Type.Name + " " + property.Name + " { get; set; }");
             }
+
             lines.AddRange(TransactionEmitter.Indent(body));
             lines.Add("}");
             return lines;
@@ -216,20 +241,26 @@ namespace MiiXRay.Generate
             List<string> body = new List<string>();
             body.Add("public " + contract.RowClass + "()");
             body.Add("{");
+
             foreach (RowsetColumn column in contract.Columns)
             {
                 body.Add("    " + column.PropertyName + " = " + ContractBuilder.Initializer(column.Type, string.Empty) + ";");
             }
+
             body.Add("}");
+
             foreach (RowsetColumn column in contract.Columns)
             {
                 body.Add(string.Empty);
+
                 if (column.PropertyName != column.Name)
                 {
                     body.Add("/// <summary>Column " + XmlText(column.Name) + ".</summary>");
                 }
+
                 body.Add("public " + column.Type.Name + " " + column.PropertyName + " { get; set; }");
             }
+
             lines.AddRange(TransactionEmitter.Indent(body));
             lines.Add("}");
             lines.Add(string.Empty);
@@ -245,14 +276,17 @@ namespace MiiXRay.Generate
         private static List<QueryContract> QueryClasses(GenerationContext context)
         {
             List<QueryContract> result = new List<QueryContract>();
+
             foreach (MiiQuery query in context.Graph.Queries)
             {
                 QueryContract contract = context.Queries[query];
+
                 if (contract.Result != null)
                 {
                     result.Add(contract);
                 }
             }
+
             return result;
         }
 
@@ -283,10 +317,12 @@ namespace MiiXRay.Generate
             lines.Add("{");
             List<string> body = new List<string>();
             List<string> parameters = new List<string>();
+
             foreach (QueryParameterSpec parameter in contract.Parameters)
             {
                 parameters.Add("string " + parameter.ArgumentName + " = " + CsLiteral.String(parameter.DefaultValue));
             }
+
             if (parameters.Count <= 2)
             {
                 body.Add("public Request(" + string.Join(", ", parameters.ToArray()) + ")");
@@ -294,17 +330,22 @@ namespace MiiXRay.Generate
             else
             {
                 body.Add("public Request(");
+
                 for (int index = 0; index < parameters.Count; index++)
                 {
                     body.Add("    " + parameters[index] + (index < parameters.Count - 1 ? "," : ")"));
                 }
             }
+
             body.Add("{");
+
             foreach (QueryParameterSpec parameter in contract.Parameters)
             {
                 body.Add("    " + parameter.PropertyName + " = " + parameter.ArgumentName + ";");
             }
+
             body.Add("}");
+
             foreach (QueryParameterSpec parameter in contract.Parameters)
             {
                 body.Add(string.Empty);
@@ -312,14 +353,17 @@ namespace MiiXRay.Generate
                 body.Add("/// <summary>[Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "]" + description + "</summary>");
                 body.Add("public string " + parameter.PropertyName + " { get; set; }");
             }
+
             body.Add(string.Empty);
             body.Add("public IDictionary<string, string> GetParameters()");
             body.Add("{");
             body.Add("    Dictionary<string, string> parameters = new Dictionary<string, string>();");
+
             foreach (QueryParameterSpec parameter in contract.Parameters)
             {
                 body.Add("    parameters.Add(\"Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "\", " + parameter.PropertyName + ");");
             }
+
             body.Add("    return parameters;");
             body.Add("}");
             lines.AddRange(TransactionEmitter.Indent(body));
@@ -332,12 +376,14 @@ namespace MiiXRay.Generate
         private static List<string> ResourceLines(string name)
         {
             Assembly assembly = typeof(CodeFile).Assembly;
+
             using (Stream stream = assembly.GetManifestResourceStream(name))
             {
                 if (stream == null)
                 {
                     throw new InvalidOperationException("The embedded resource " + name + " is missing (build problem).");
                 }
+
                 using (StreamReader reader = new StreamReader(stream, Encoding.UTF8))
                 {
                     return new List<string>(SplitLines(reader.ReadToEnd().TrimEnd()));

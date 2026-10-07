@@ -17,11 +17,14 @@ namespace MiiXRay.Model
             XmlReaderSettings settings = new XmlReaderSettings();
             settings.DtdProcessing = DtdProcessing.Prohibit;
             settings.XmlResolver = null;
+
             using (StringReader stringReader = new StringReader(text))
+
             using (XmlReader reader = XmlReader.Create(stringReader, settings))
             {
                 document.Load(reader);
             }
+
             return document;
         }
 
@@ -31,50 +34,61 @@ namespace MiiXRay.Model
             {
                 return null;
             }
+
             foreach (XmlNode node in parent.ChildNodes)
             {
                 XmlElement element = node as XmlElement;
+
                 if (element != null && element.LocalName == name)
                 {
                     return element;
                 }
             }
+
             return null;
         }
 
         public static List<XmlElement> Children(XmlNode parent, string name)
         {
             List<XmlElement> result = new List<XmlElement>();
+
             if (parent == null)
             {
                 return result;
             }
+
             foreach (XmlNode node in parent.ChildNodes)
             {
                 XmlElement element = node as XmlElement;
+
                 if (element != null && element.LocalName == name)
                 {
                     result.Add(element);
                 }
             }
+
             return result;
         }
 
         public static List<XmlElement> ChildElements(XmlNode parent)
         {
             List<XmlElement> result = new List<XmlElement>();
+
             if (parent == null)
             {
                 return result;
             }
+
             foreach (XmlNode node in parent.ChildNodes)
             {
                 XmlElement element = node as XmlElement;
+
                 if (element != null)
                 {
                     result.Add(element);
                 }
             }
+
             return result;
         }
 
@@ -91,6 +105,7 @@ namespace MiiXRay.Model
             {
                 return string.Empty;
             }
+
             string value = element.GetAttribute("type", XsiNamespace);
             int colon = value.IndexOf(':');
             return colon >= 0 ? value.Substring(colon + 1) : value;
@@ -104,7 +119,9 @@ namespace MiiXRay.Model
             {
                 return string.Empty;
             }
+
             StringBuilder text = new StringBuilder();
+
             foreach (XmlNode node in element.ChildNodes)
             {
                 if (node.NodeType == XmlNodeType.Text || node.NodeType == XmlNodeType.CDATA
@@ -113,6 +130,7 @@ namespace MiiXRay.Model
                     text.Append(node.Value);
                 }
             }
+
             return text.ToString();
         }
 
@@ -123,6 +141,7 @@ namespace MiiXRay.Model
             {
                 return null;
             }
+
             try
             {
                 return Parse(text.Trim());
