@@ -131,7 +131,7 @@ input[type="text"]:focus {
 }
 
 .hint {
-  margin: 0 0 12px 110px;
+  margin: 0 0 12px;
   color: var(--warning);
 }
 

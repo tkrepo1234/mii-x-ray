@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.1 - 2026-10-07
+
+- The web page reads only the MII server it comes from; the export folder source is test-only
+  (`web/test/folder-source.js`) and no longer part of the page.
+- Layout: hidden rows stay hidden, the code view no longer widens the page.
+
 ## 2.1.0 - 2026-10-07
 
 - MII X-Ray as a web page for the MII server (`web/dist/mii-x-ray.html`, one self-contained file): reads through the

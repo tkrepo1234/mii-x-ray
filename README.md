@@ -19,13 +19,15 @@ port was proven against: 526 of 526 corpus transactions give byte-identical file
 Deploy: in the MII Workbench, open the **Web** tab of a project, import `mii-x-ray.html` into a folder and open
 `https://<mii-server>/XMII/CM/<Project>/<Folder>/mii-x-ray.html`. The page reads transactions through the Catalog
 service with the signed-in user's session (the user needs access to the Catalog service, e.g. SAP_XMII_Developer);
-nothing is installed and no password is stored. Instead of the server it can also read an export folder chosen in
-the browser. The last transactions are kept in the browser (local storage).
+nothing is installed and no password is stored. The page only reads the MII server it comes from; opened as a local
+file it does nothing. The last transactions are kept in the browser (local storage).
 
 ```
 node web/build.mjs                                   builds web/dist/mii-x-ray.html from web/src
 node web/test/equivalence.mjs <export folder> <C# output of --all>    JS and C# output must be identical
 node web/test/serve.mjs 5300 http://localhost:50100 dev:dev           the page at /XMII/CM/XRay/ with a Catalog proxy
+
+web/test/folder-source.js reads an export folder; it serves the tests only and is not part of the page.
 ```
 
 The sources in `web/src` are plain ES modules without dependencies (own XML parser, so the browser, Node and the

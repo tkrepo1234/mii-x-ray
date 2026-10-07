@@ -139,7 +139,7 @@ input[type="text"]:focus {
 }
 
 .hint {
-  margin: 0 0 12px 110px;
+  margin: 0 0 12px;
   color: var(--warning);
 }
 
@@ -220,17 +220,7 @@ pre {
 
   <main>
     <section class="panel">
-      <div class="row">
-        <span class="label">Source</span>
-        <label><input type="radio" name="source" id="source-server"> This MII server</label>
-        <label><input type="radio" name="source" id="source-folder"> Export folder</label>
-      </div>
       <p class="hint" id="server-hint" hidden>Open this page from the MII server (…/XMII/CM/…) to read its transactions.</p>
-      <div class="row" id="folder-row" hidden>
-        <span class="label"></span>
-        <label class="button secondary">Choose folder<input type="file" id="folder" webkitdirectory multiple hidden></label>
-        <span id="folder-name" class="muted">No folder chosen</span>
-      </div>
       <div class="row">
         <label class="label" for="transaction">Transaction</label>
         <input type="text" id="transaction" list="recent" placeholder="PROJECT/Folder/trxName" spellcheck="false" autocomplete="off">
@@ -264,8 +254,8 @@ const __exports = {};
 const __define = (name, factory) => { __factories[name] = factory; };
 const __require = (name) => (__exports[name] ??= __factories[name]());
 __define('app.js', () => {
-// The page: choose the source, enter a transaction, X-Ray it, copy or download the C# file.
-const { CatalogSource, FolderSource, SourceError, ObjectPath } = __require('sources.js');
+// The page: enter a transaction of the MII server the page comes from, X-Ray it, copy or download the C# file.
+const { CatalogSource, SourceError, ObjectPath } = __require('sources.js');
 const { DependencyResolver } = __require('resolver.js');
 const { generateCode } = __require('codefile.js');
 const { RUNTIME_SOURCE } = __require('runtime.js');
@@ -273,7 +263,7 @@ const { RUNTIME_SOURCE } = __require('runtime.js');
 const RECENT_KEY = 'mii-x-ray.recent';
 const $ = (id) => document.getElementById(id);
 
-const state = { source: null, folderSource: null, result: null, busy: false };
+const state = { source: null, result: null, busy: false };
 
 function readRecent() {
   try {
@@ -310,35 +300,11 @@ function onServer() {
 }
 
 function currentSource() {
-  if ($('source-folder').checked) {
-    return state.folderSource;
-  }
-
   if (!state.source) {
     state.source = new CatalogSource(location.origin);
   }
 
   return state.source;
-}
-
-function updateSourceControls() {
-  const folder = $('source-folder').checked;
-  $('folder-row').hidden = !folder;
-  $('source-server').disabled = !onServer();
-  $('server-hint').hidden = onServer();
-}
-
-async function chooseFolder(event) {
-  const files = [...event.target.files];
-
-  if (files.length === 0) {
-    return;
-  }
-
-  const name = files[0].webkitRelativePath.split('/')[0];
-  state.folderSource = new FolderSource(name, files.map((file) => ({ path: file.webkitRelativePath, read: () => file.text() })));
-  $('folder-name').textContent = name + ' (' + state.folderSource.transactions().length + ' transactions)';
-  setStatus('');
 }
 
 async function xray() {
@@ -352,11 +318,6 @@ async function xray() {
 
   if (path.length === 0) {
     setStatus('Enter a transaction path, e.g. PROJECT/Folder/trxName.', 'warning');
-    return;
-  }
-
-  if (!source) {
-    setStatus('Choose an export folder first.', 'warning');
     return;
   }
 
@@ -443,11 +404,6 @@ function download() {
 }
 
 function start() {
-  $('source-server').checked = onServer();
-  $('source-folder').checked = !onServer();
-  $('source-server').addEventListener('change', updateSourceControls);
-  $('source-folder').addEventListener('change', updateSourceControls);
-  $('folder').addEventListener('change', chooseFolder);
   $('run').addEventListener('click', xray);
   $('transaction').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -457,7 +413,15 @@ function start() {
   $('copy').addEventListener('click', copy);
   $('download').addEventListener('click', download);
   showRecent();
-  updateSourceControls();
+
+  if (!onServer()) {
+    // opened as a file: there is no MII server to read from
+    $('server-hint').hidden = false;
+    $('run').disabled = true;
+    $('transaction').disabled = true;
+    return;
+  }
+
   $('transaction').focus();
 }
 
@@ -474,7 +438,7 @@ const { TransactionEmitter, indent } = __require('emitter.js');
 const { addBlankLines } = __require('placer.js');
 const { TypeKind } = __require('types.js');
 
-const TOOL_VERSION = '2.1.0';
+const TOOL_VERSION = '2.1.1';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -4417,69 +4381,6 @@ function editDistance(first, second) {
   return previous[second.length];
 }
 
-/** An export folder: a list of { path, read() } with the paths relative to the chosen folder. A logical path is
- * resolved by its longest unique suffix (export folders carry the project name, references the internal one). */
-class FolderSource {
-  constructor(name, files) {
-    this.description = 'export folder ' + name;
-    this._bySuffix = new Map();
-    this._allPaths = [];
-    const sorted = files.filter((file) => ObjectPath.isKnownExtension(file.path)).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-
-    for (const file of sorted) {
-      const relative = ObjectPath.normalize(file.path);
-      this._allPaths.push(relative);
-      const parts = relative.split('/');
-
-      for (let count = 1; count <= parts.length; count++) {
-        const key = parts.slice(parts.length - count).join('/').toLowerCase();
-
-        if (!this._bySuffix.has(key)) {
-          this._bySuffix.set(key, []);
-        }
-
-        this._bySuffix.get(key).push({ file, relative });
-      }
-    }
-  }
-
-  async checkConnection() {
-    if (this._allPaths.length === 0) {
-      throw new SourceError('The folder contains no MII objects (.trx, .tqsq, .tqmd, .tqxm, .tqxc).',
-        'Choose the folder of an unpacked project export.');
-    }
-  }
-
-  async load(objectPath) {
-    const path = ObjectPath.normalize(objectPath);
-
-    if (path.length === 0) {
-      return null;
-    }
-
-    const parts = path.split('/');
-
-    for (let count = parts.length; count >= 1; count--) {
-      const hits = this._bySuffix.get(parts.slice(parts.length - count).join('/').toLowerCase());
-
-      if (hits) {
-        return hits.length === 1 ? { canonicalPath: hits[0].relative, text: await hits[0].file.read() } : null;
-      }
-    }
-
-    return null;
-  }
-
-  async findSimilar(objectPath, maximum) {
-    return findSimilar(this._allPaths, objectPath, maximum);
-  }
-
-  /** Every transaction of the folder (relative paths). */
-  transactions() {
-    return this._allPaths.filter((path) => this._bySuffix.get(path.toLowerCase())[0].file.path.toLowerCase().endsWith('.trx'));
-  }
-}
-
 /** The Catalog service (/XMII/Catalog) of the MII server the page comes from, with the session of the signed-in
  * user. MII may protect POST requests with a CSRF token; the token is fetched once when the server asks for it. */
 class CatalogSource {
@@ -4627,7 +4528,7 @@ function descendants(node, name) {
   return result;
 }
 
-return { ObjectPath, SourceError, findSimilar, editDistance, FolderSource, CatalogSource };
+return { ObjectPath, SourceError, findSimilar, editDistance, CatalogSource };
 });
 __define('translator.js', () => {
 // MII expressions as C#. Known types use native operators; anything else goes through the Mii.* helpers, which take

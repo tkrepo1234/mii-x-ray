@@ -1,5 +1,5 @@
-// The page: choose the source, enter a transaction, X-Ray it, copy or download the C# file.
-import { CatalogSource, FolderSource, SourceError, ObjectPath } from './sources.js';
+// The page: enter a transaction of the MII server the page comes from, X-Ray it, copy or download the C# file.
+import { CatalogSource, SourceError, ObjectPath } from './sources.js';
 import { DependencyResolver } from './resolver.js';
 import { generateCode } from './codefile.js';
 import { RUNTIME_SOURCE } from './runtime.js';
@@ -7,7 +7,7 @@ import { RUNTIME_SOURCE } from './runtime.js';
 const RECENT_KEY = 'mii-x-ray.recent';
 const $ = (id) => document.getElementById(id);
 
-const state = { source: null, folderSource: null, result: null, busy: false };
+const state = { source: null, result: null, busy: false };
 
 function readRecent() {
   try {
@@ -44,35 +44,11 @@ function onServer() {
 }
 
 function currentSource() {
-  if ($('source-folder').checked) {
-    return state.folderSource;
-  }
-
   if (!state.source) {
     state.source = new CatalogSource(location.origin);
   }
 
   return state.source;
-}
-
-function updateSourceControls() {
-  const folder = $('source-folder').checked;
-  $('folder-row').hidden = !folder;
-  $('source-server').disabled = !onServer();
-  $('server-hint').hidden = onServer();
-}
-
-async function chooseFolder(event) {
-  const files = [...event.target.files];
-
-  if (files.length === 0) {
-    return;
-  }
-
-  const name = files[0].webkitRelativePath.split('/')[0];
-  state.folderSource = new FolderSource(name, files.map((file) => ({ path: file.webkitRelativePath, read: () => file.text() })));
-  $('folder-name').textContent = name + ' (' + state.folderSource.transactions().length + ' transactions)';
-  setStatus('');
 }
 
 async function xray() {
@@ -86,11 +62,6 @@ async function xray() {
 
   if (path.length === 0) {
     setStatus('Enter a transaction path, e.g. PROJECT/Folder/trxName.', 'warning');
-    return;
-  }
-
-  if (!source) {
-    setStatus('Choose an export folder first.', 'warning');
     return;
   }
 
@@ -177,11 +148,6 @@ function download() {
 }
 
 function start() {
-  $('source-server').checked = onServer();
-  $('source-folder').checked = !onServer();
-  $('source-server').addEventListener('change', updateSourceControls);
-  $('source-folder').addEventListener('change', updateSourceControls);
-  $('folder').addEventListener('change', chooseFolder);
   $('run').addEventListener('click', xray);
   $('transaction').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
@@ -191,7 +157,15 @@ function start() {
   $('copy').addEventListener('click', copy);
   $('download').addEventListener('click', download);
   showRecent();
-  updateSourceControls();
+
+  if (!onServer()) {
+    // opened as a file: there is no MII server to read from
+    $('server-hint').hidden = false;
+    $('run').disabled = true;
+    $('transaction').disabled = true;
+    return;
+  }
+
   $('transaction').focus();
 }
 

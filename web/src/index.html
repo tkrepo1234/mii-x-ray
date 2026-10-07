@@ -15,17 +15,7 @@
 
   <main>
     <section class="panel">
-      <div class="row">
-        <span class="label">Source</span>
-        <label><input type="radio" name="source" id="source-server"> This MII server</label>
-        <label><input type="radio" name="source" id="source-folder"> Export folder</label>
-      </div>
       <p class="hint" id="server-hint" hidden>Open this page from the MII server (…/XMII/CM/…) to read its transactions.</p>
-      <div class="row" id="folder-row" hidden>
-        <span class="label"></span>
-        <label class="button secondary">Choose folder<input type="file" id="folder" webkitdirectory multiple hidden></label>
-        <span id="folder-name" class="muted">No folder chosen</span>
-      </div>
       <div class="row">
         <label class="label" for="transaction">Transaction</label>
         <input type="text" id="transaction" list="recent" placeholder="PROJECT/Folder/trxName" spellcheck="false" autocomplete="off">

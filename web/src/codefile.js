@@ -6,7 +6,7 @@ import { TransactionEmitter, indent } from './emitter.js';
 import { addBlankLines } from './placer.js';
 import { TypeKind } from './types.js';
 
-export const TOOL_VERSION = '2.1.0';
+export const TOOL_VERSION = '2.1.1';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 

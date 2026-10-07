@@ -4,7 +4,8 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, relative, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FolderSource, ObjectPath } from '../src/sources.js';
+import { ObjectPath } from '../src/sources.js';
+import { FolderSource } from './folder-source.js';
 import { DependencyResolver } from '../src/resolver.js';
 import { generateCode } from '../src/codefile.js';
 
