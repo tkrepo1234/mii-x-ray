@@ -61,6 +61,8 @@ namespace MiiXRay.Tests
         {
             Assert.Equal("&&", ((BinaryNode)Parser.Parse("x.a and x.b")).Operator);
             Assert.True(Parser.Parse("and(x.a, x.b)") is FunctionNode, "and(...) is the function");
+            Assert.Equal("&&", ((BinaryNode)Parser.Parse("(x.a != \"\") and (x.b != \"\")")).Operator);
+            Assert.Equal("||", ((BinaryNode)Parser.Parse("x.a or (x.b)")).Operator);
         }
 
         public static void SelectorKeepsQuotesAndBrackets()

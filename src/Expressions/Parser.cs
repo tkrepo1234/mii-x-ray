@@ -71,12 +71,6 @@ namespace MiiXRay.Expressions
             get { return _tokens[_index]; }
         }
 
-        private Token Peek(int offset)
-        {
-            int position = Math.Min(_index + offset, _tokens.Count - 1);
-            return _tokens[position];
-        }
-
         private bool IsOperator(params string[] operators)
         {
             Token token = Current;
@@ -88,9 +82,9 @@ namespace MiiXRay.Expressions
                     return true;
                 }
 
-                // the word operators "and" / "or" (not followed by "(", which would be the function)
-                if (token.Kind == TokenKind.Identifier && string.Equals(token.Text, op, StringComparison.OrdinalIgnoreCase)
-                    && Peek(1).Kind != TokenKind.LeftParen)
+                // the word operators "and" / "or": asked only after a complete operand, where a function call cannot
+                // follow, so "x and (y)" is the operator even with a parenthesis behind it
+                if (token.Kind == TokenKind.Identifier && string.Equals(token.Text, op, StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }

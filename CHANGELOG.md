@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.0 - 2026-10-07
+
+The generated code is C# 12 (.NET 8) and written the way one writes C#; the tool itself stays C# 5 / .NET 4.8.
+The classic C# 5 output is the git tag v1.1.0.
+
+- One class with one method per transaction (services through the primary constructor) instead of a static class
+  with Request/Response/Execute per transaction. Inputs are optional method parameters, outputs the return value
+  (a record when there are several); calls use named arguments.
+- Queries are local `Query` variables with `AddParameter(name, value)` and a comment mapping `[Param.N]` to the names
+  instead of query classes; `queries.Execute<Row>(query)`.
+- Rowsets are `List<Row>` of row records; `FirstOrEmpty()`, `RowAt(n)`, `FirstOrEmpty(row => ...)`, `Count`.
+- No MII default values and no reference documents; a local the flow never writes keeps its value (XSLT, options).
+- String interpolation, raw string literals for SQL and XML, verbatim literals for regular expressions, `var`.
+- Plugin calls with a dictionary initializer (`new() { ["Setting"] = value }`).
+- Parser: `x and (y)` is the operator, not a call of the function `and`.
+- Corpus check and the end-to-end test compile as C# 12 against .NET 8; the end-to-end test runs the result.
+
 ## 1.1.0 - 2026-10-07
 
 For the analysis with an LLM (Copilot) and closer to how one writes C#:
