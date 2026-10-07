@@ -23,7 +23,7 @@ namespace MiiXRay.Generate
     /// <summary>Assembles the generated file: header, transaction classes, query classes, service interfaces and the runtime.</summary>
     public static class CodeFile
     {
-        public const string ToolVersion = "1.0.0";
+        public const string ToolVersion = "1.1.0";
 
         public static XRayResult Generate(ObjectGraph graph, string sourceDescription)
         {

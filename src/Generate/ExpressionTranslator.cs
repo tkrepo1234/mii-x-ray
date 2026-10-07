@@ -761,6 +761,13 @@ namespace MiiXRay.Generate
                 case "match":
                     if (arguments.Count == 2)
                     {
+                        TypedCode idiom = MatchIdiom(arguments);
+
+                        if (idiom != null)
+                        {
+                            return idiom;
+                        }
+
                         // case-sensitive on the system unless the pattern carries (?i)
                         return TypedCode.Primary("Regex.IsMatch(" + ToStringCode(Translate(arguments[0])).Code + ", " + ToStringCode(Translate(arguments[1])).Code + ")", CsType.Bool);
                     }
@@ -810,6 +817,13 @@ namespace MiiXRay.Generate
                 case "number":
                     if (arguments.Count == 1)
                     {
+                        TypedCode count = ZeroPrefixedNumber(arguments[0]);
+
+                        if (count != null)
+                        {
+                            return count;
+                        }
+
                         return ConvertTo(Translate(arguments[0]), CsType.Double);
                     }
 
@@ -852,6 +866,52 @@ namespace MiiXRay.Generate
             }
 
             return HelperCall(function);
+        }
+
+        /// <summary>The MII empty and boolean checks by name: match(x, "(?i)^\s*(null|---)?\s*$") is Mii.IsEmpty(x),
+        /// match(x, "(?i)^\s*(true|1)\s*$") is Mii.IsTrue(x). Only these exact patterns.</summary>
+        private TypedCode MatchIdiom(List<Node> arguments)
+        {
+            StringNode pattern = arguments[1] as StringNode;
+
+            if (pattern == null)
+            {
+                return null;
+            }
+
+            string method = null;
+
+            if (pattern.Value == @"(?i)^\s*(null|---)?\s*$" || pattern.Value == @"(?i)^\s*(null|\-{3})?\s*$")
+            {
+                method = "Mii.IsEmpty";
+            }
+            else if (pattern.Value == @"(?i)^\s*(true|1)\s*$")
+            {
+                method = "Mii.IsTrue";
+            }
+
+            return method == null ? null : TypedCode.Primary(method + "(" + Translate(arguments[0]).Code + ")", CsType.Bool);
+        }
+
+        /// <summary>number("0" &amp; n) guards against an empty value; for a whole number n it is n itself.</summary>
+        private TypedCode ZeroPrefixedNumber(Node argument)
+        {
+            BinaryNode binary = argument as BinaryNode;
+
+            if (binary == null || binary.Operator != "&")
+            {
+                return null;
+            }
+
+            StringNode zero = binary.Left as StringNode;
+
+            if (zero == null || zero.Value != "0")
+            {
+                return null;
+            }
+
+            TypedCode value = Translate(binary.Right);
+            return value.Type.Kind == TypeKind.Int || value.Type.Kind == TypeKind.Long ? value : null;
         }
 
         private string StringArgument(Node argument)

@@ -77,6 +77,13 @@ namespace MiiXRay.Tests
             Assert.Equal("Regex.IsMatch(request.Site, \"^M$\")", Translate("match(Transaction.Site, \"^M$\")"));
         }
 
+        public static void MiiIdiomsHaveNames()
+        {
+            Assert.Equal("Mii.IsEmpty(request.Site)", Translate("match(Transaction.Site, \"(?i)^\\s*(null|\\-{3})?\\s*$\")"));
+            Assert.Equal("Mii.IsTrue(request.Site)", Translate("match(Transaction.Site, \"(?i)^\\s*(true|1)\\s*$\")"));
+            Assert.Equal("request.Count > 5", Translate("number(\"0\" & Transaction.Count) > 5"));
+        }
+
         public static void StringIfBecomesConditional()
         {
             Assert.Equal("request.Flag ? \"yes\" : \"no\"", Translate("stringif(Transaction.Flag, \"yes\", \"no\")"));

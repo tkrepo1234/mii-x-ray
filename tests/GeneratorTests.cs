@@ -86,10 +86,12 @@ namespace MiiXRay.Tests
             string code = Generate();
             Assert.Contains("if (Regex.IsMatch(request.Site, \"^\\\\s*$\"))", code);
             Assert.Contains("throw new MiiException(\"The site is empty\", \"ThrowEmptySite\");", code);
-            Assert.Contains("queryService.ExecuteQuery<SqlSelectSfcs.Result>(SqlSelectSfcs.Text, new SqlSelectSfcs.Request(site: request.Site));", code);
+            Assert.Contains("SqlSelectSfcs.Result selectSfcs = queryService.ExecuteQuery<SqlSelectSfcs.Result>(SqlSelectSfcs.Text, new SqlSelectSfcs.Request(site: request.Site));", code);
+            Assert.NotContains("Action results", code);
             Assert.Contains("selectSfcs.Rows.Count", code);
             Assert.Contains("selectSfcs.FirstRow.Sfc", code);
-            Assert.Contains("catch (Exception catchAllError)", code);
+            Assert.Contains("catch (Exception catchAll)", code);
+            Assert.Contains("\"Failed: \" + Mii.ExceptionMessage(catchAll)", code);
             Assert.Contains("public string Sfc { get; set; }", code);
         }
 

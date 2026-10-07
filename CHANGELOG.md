@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.0 - 2026-10-07
+
+For the analysis with an LLM (Copilot) and closer to how one writes C#:
+
+- Header: reading rules, call tree in execution order with its flow context ([if X], [else X], [loop X],
+  [on error X]) and a query overview (parameters, the actions that run it, columns read and not read by name).
+- Default documents keep two elements of each repeated name plus a comment with the number left out (test data no
+  longer fills the file); XSLT stays as it is.
+- Action results are declared where they come into being; only values read outside their block stay at the top.
+  A Catch result is the catch clause's variable.
+- MII idioms by name: the empty check `(?i)^\s*(null|---)?\s*$` is `Mii.IsEmpty(x)`, the boolean check
+  `(?i)^\s*(true|1)\s*$` is `Mii.IsTrue(x)`, `number("0" & n)` of a whole number is `n`.
+- Tests: 32.
+
 ## 1.0.0 - 2026-10-07
 
 First version.

@@ -254,6 +254,7 @@ public static class Mii
 {
     private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
     private static readonly Regex TrueValue = new Regex(@"^\s*(true|1)\s*$", RegexOptions.IgnoreCase);
+    private static readonly Regex EmptyValue = new Regex(@"^\s*(null|---)?\s*$", RegexOptions.IgnoreCase);
     private static readonly string[] DateFormats =
     {
         "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss.fff", "yyyy-MM-dd'T'HH:mm:sszzz", "yyyy-MM-dd'T'HH:mm:ss.fffzzz",
@@ -1395,6 +1396,18 @@ public static class Mii
     public static string StringReplaceAll(object text, object pattern, object replacement)
     {
         return Regex.Replace(ToStr(text), ToStr(pattern), ToStr(replacement));
+    }
+
+    /// <summary>MII's empty check: null, "", blanks, the text "null" or "---" (any case), as match(x, "(?i)^\s*(null|---)?\s*$").</summary>
+    public static bool IsEmpty(object value)
+    {
+        return EmptyValue.IsMatch(ToStr(value));
+    }
+
+    /// <summary>MII's boolean check on text: "true" or "1" (any case, blanks around), as match(x, "(?i)^\s*(true|1)\s*$").</summary>
+    public static bool IsTrue(object value)
+    {
+        return TrueValue.IsMatch(ToStr(value));
     }
 
     /// <summary>match(text, pattern) with more arguments than usual; case-sensitive like on the system.</summary>

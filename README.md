@@ -63,6 +63,12 @@ A server profile without saved password reads it from the environment variable `
 | shared / global properties (`Inline.X`, `Global.X`) | `pluginService.GetProperty` / `SetProperty` |
 | expressions | C# with native operators where the types are known; MII functions as `Mii.*` helpers |
 
+The header is written for a reader without MII at hand (a colleague or an LLM): how to read the file, the call tree
+in execution order with the condition, loop or error handler each call runs in, and per query its parameters, the
+actions that run it and the result columns read by name. Default documents show their structure (two elements of
+each repeated name). Action results are declared where they come into being, as in hand-written C#; the MII empty and
+boolean checks appear as `Mii.IsEmpty(x)` and `Mii.IsTrue(x)`.
+
 MII runtime settings (Persist, ResetState, logging, transaction attributes, layout, cached test results) are left
 out. The file ends with the service interfaces (`IQueryService`, `IPluginService`) and the `Mii` helper class, so
 each file compiles on its own.

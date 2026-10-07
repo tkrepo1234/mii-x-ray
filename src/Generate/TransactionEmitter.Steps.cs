@@ -40,7 +40,7 @@ namespace MiiXRay.Generate
                 }
             }
 
-            List<string> results = new List<string>();
+            List<HoistedVariable> variables = new List<HoistedVariable>();
 
             foreach (MiiActionDefinition definition in _transaction.Actions.Values)
             {
@@ -48,15 +48,26 @@ namespace MiiXRay.Generate
 
                 if (symbol.Variable != null)
                 {
-                    results.Add(symbol.VariableType.Name + " " + symbol.Variable + " = " + symbol.Initializer + ";");
+                    HoistedVariable variable = new HoistedVariable();
+                    variable.Type = symbol.VariableType.Name;
+                    variable.Name = symbol.Variable;
+                    variable.Initializer = symbol.Initializer;
+                    variable.IsCatch = symbol.Kind == ActionKind.Catch;
+                    variables.Add(variable);
                 }
             }
 
-            if (results.Count > 0)
+            List<HoistedVariable> hoisted = DeclarationPlacer.Place(flow, variables);
+
+            if (hoisted.Count > 0)
             {
                 body.Add(string.Empty);
-                body.Add("// Action results (MII keeps them for the whole run)");
-                body.AddRange(results);
+                body.Add("// Action results read outside the block that sets them (MII keeps them for the whole run)");
+
+                foreach (HoistedVariable variable in hoisted)
+                {
+                    body.Add(variable.Type + " " + variable.Name + " = " + variable.Initializer + ";");
+                }
             }
 
             if (flow.Count > 0)
