@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The tests as a console program (no test framework packages): run it, exit code 0 = all passed. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>5</LangVersion>
+    <RootNamespace>MiiXRay.Tests</RootNamespace>
+    <AssemblyName>MiiXRay.Tests</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>1591</NoWarn>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <StartupObject>MiiXRay.Tests.TestProgram</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\src\**\*.cs" />
+    <Compile Include="*.cs" />
+    <EmbeddedResource Include="..\src\Generate\RuntimeSource.txt" LogicalName="MiiXRay.RuntimeSource.txt" />
+    <Reference Include="System.Security" />
+  </ItemGroup>
+
+</Project>

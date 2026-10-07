@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Same build as build.cmd: .NET Framework 4.8, C# 5, no packages. Opens in Visual Studio 2017 or later. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>5</LangVersion>
+    <RootNamespace>MiiXRay</RootNamespace>
+    <AssemblyName>MiiXRay</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>1591</NoWarn>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <StartupObject>MiiXRay.Program</StartupObject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src\**\*.cs" />
+    <EmbeddedResource Include="src\Generate\RuntimeSource.txt" LogicalName="MiiXRay.RuntimeSource.txt" />
+    <Reference Include="System.Security" />
+  </ItemGroup>
+
+</Project>

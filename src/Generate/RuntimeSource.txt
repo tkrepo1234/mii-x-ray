@@ -1,0 +1,1575 @@
+#region Services (implement these to run the code)
+
+/// <summary>Runs query templates. MII replaces every [Param.N] in the text by the parameter's value as text
+/// (no bind variables), so values that go into quotes are escaped by the callers (stringreplace "'" -> "''").</summary>
+public interface IQueryService
+{
+    /// <summary>Runs a statement that returns rows and maps the columns to the properties of T's rows by name.</summary>
+    T ExecuteQuery<T>(string text, IQueryRequest request) where T : RowsetCore, new();
+
+    /// <summary>Runs a statement without result rows (query mode Command).</summary>
+    void ExecuteCommand(string text, IQueryRequest request);
+}
+
+/// <summary>The parameters of a query: "Param.1" -> value, ...</summary>
+public interface IQueryRequest
+{
+    IDictionary<string, string> GetParameters();
+}
+
+/// <summary>Everything MII does that has no plain C# equivalent: SAP ME PAPI calls, web services, HTTP, mail, files,
+/// sort/filter actions, logging.</summary>
+public interface IPluginService
+{
+    /// <summary>Runs an MII action; actionType is the MII action class (e.g. SAPMEPAPIInterface), the request holds its settings and inputs.</summary>
+    PluginResult Invoke(string actionType, PluginRequest request);
+
+    /// <summary>Tracer and Event Logger.</summary>
+    void Log(string level, string message);
+
+    /// <summary>Loads a web resource of the MII server (e.g. an XSLT stylesheet) as text.</summary>
+    string LoadResource(string path);
+
+    /// <summary>Reads a shared or global property of the MII server (Inline.X, Persistent.X, Global.X).</summary>
+    object GetProperty(string name);
+
+    /// <summary>Writes a shared property of the MII server.</summary>
+    void SetProperty(string name, object value);
+}
+
+/// <summary>The settings and inputs of a plugin call, by MII property name.</summary>
+public sealed class PluginRequest
+{
+    private readonly string _actionName;
+    private readonly Dictionary<string, object> _values = new Dictionary<string, object>();
+
+    public PluginRequest(string actionName)
+    {
+        _actionName = actionName;
+    }
+
+    public string ActionName
+    {
+        get { return _actionName; }
+    }
+
+    public IDictionary<string, object> Values
+    {
+        get { return _values; }
+    }
+
+    public void Set(string name, object value)
+    {
+        _values[name] = value;
+    }
+
+    public object Get(string name)
+    {
+        object value;
+        return _values.TryGetValue(name, out value) ? value : null;
+    }
+}
+
+/// <summary>The outputs of a plugin call, by MII property name ("" for an output that is not set).</summary>
+public sealed class PluginResult
+{
+    private readonly Dictionary<string, object> _values = new Dictionary<string, object>();
+
+    public IDictionary<string, object> Values
+    {
+        get { return _values; }
+    }
+
+    public void Set(string name, object value)
+    {
+        _values[name] = value;
+    }
+
+    public object Get(string name)
+    {
+        object value;
+        return _values.TryGetValue(name, out value) ? value : string.Empty;
+    }
+}
+
+#endregion
+
+#region X-Ray runtime (stand-ins for MII expression functions and XML handling)
+
+/// <summary>An exception raised by a Throw action (or by an action that failed).</summary>
+public class MiiException : Exception
+{
+    private readonly string _actionName;
+    private readonly string _actionType;
+
+    public MiiException(string message, string actionName)
+        : this(message, actionName, "Throw")
+    {
+    }
+
+    public MiiException(string message, string actionName, string actionType)
+        : base(message)
+    {
+        _actionName = actionName;
+        _actionType = actionType;
+    }
+
+    /// <summary>The MII action that raised the exception (Catch output Source).</summary>
+    public string ActionName
+    {
+        get { return _actionName; }
+    }
+
+    /// <summary>The MII action class (Catch output ActionType).</summary>
+    public string ActionType
+    {
+        get { return _actionType; }
+    }
+}
+
+/// <summary>Terminate Transaction with error: ends the transaction; a Catch of the same transaction does not stop it,
+/// the calling transaction sees it as a failed call.</summary>
+public sealed class TransactionTerminatedException : MiiException
+{
+    private readonly string _transactionPath;
+
+    public TransactionTerminatedException(string transactionPath, string message)
+        : base(message, transactionPath, "TerminateTransaction")
+    {
+        _transactionPath = transactionPath;
+    }
+
+    public string TransactionPath
+    {
+        get { return _transactionPath; }
+    }
+}
+
+/// <summary>Base of the generated row classes (one property per column).</summary>
+public abstract class RowBase
+{
+    public override string ToString()
+    {
+        return Mii.ToStr(this);
+    }
+}
+
+/// <summary>Base of the generated rowset classes: an MII rowset document as a list of typed rows.</summary>
+public abstract class RowsetCore
+{
+    public abstract XmlDocument ToXml();
+
+    public abstract void LoadXml(XmlDocument document);
+
+    public override string ToString()
+    {
+        return Mii.ToStr(this);
+    }
+}
+
+public abstract class RowsetBase<TRow> : RowsetCore where TRow : RowBase, new()
+{
+    private readonly List<TRow> _rows = new List<TRow>();
+
+    public List<TRow> Rows
+    {
+        get { return _rows; }
+    }
+
+    /// <summary>The first row, or an empty row when there is none (MII yields "" for a column of a missing row).</summary>
+    public TRow FirstRow
+    {
+        get { return _rows.Count > 0 ? _rows[0] : new TRow(); }
+    }
+
+    /// <summary>The row at a 1-based position (XPath Row[n]), or an empty row.</summary>
+    public TRow RowAt(int position)
+    {
+        return position >= 1 && position <= _rows.Count ? _rows[position - 1] : new TRow();
+    }
+
+    /// <summary>The first row whose column has the value (XPath Row[Column = 'value']), or an empty row.</summary>
+    public TRow FirstRowWhere(string column, object value)
+    {
+        string wanted = Mii.ToStr(value);
+        foreach (TRow row in _rows)
+        {
+            if (Mii.ToStr(Mii.RowValue(row, column)) == wanted)
+            {
+                return row;
+            }
+        }
+        return new TRow();
+    }
+
+    public override XmlDocument ToXml()
+    {
+        XmlDocument document = new XmlDocument();
+        XmlElement rowsets = document.CreateElement("Rowsets");
+        document.AppendChild(rowsets);
+        XmlElement rowset = document.CreateElement("Rowset");
+        rowsets.AppendChild(rowset);
+        XmlElement columns = document.CreateElement("Columns");
+        rowset.AppendChild(columns);
+        foreach (PropertyInfo property in Mii.ColumnsOf(typeof(TRow)))
+        {
+            XmlElement column = document.CreateElement("Column");
+            column.SetAttribute("Name", property.Name);
+            columns.AppendChild(column);
+        }
+        foreach (TRow row in _rows)
+        {
+            rowset.AppendChild(Mii.RowElement(document, row));
+        }
+        return document;
+    }
+
+    public override void LoadXml(XmlDocument document)
+    {
+        _rows.Clear();
+        if (document == null || document.DocumentElement == null)
+        {
+            return;
+        }
+        foreach (XmlNode node in document.SelectNodes("/Rowsets/Rowset/Row"))
+        {
+            TRow row = new TRow();
+            Mii.FillRow(row, node);
+            _rows.Add(row);
+        }
+    }
+}
+
+/// <summary>Stand-ins for the MII expression language and XML handling. MII rules kept: booleans are true for
+/// "true" or "1" (any case, blanks around); match() is case-sensitive unless the pattern starts with (?i);
+/// datediff() returns seconds; append() changes the list it gets.</summary>
+public static class Mii
+{
+    private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
+    private static readonly Regex TrueValue = new Regex(@"^\s*(true|1)\s*$", RegexOptions.IgnoreCase);
+    private static readonly string[] DateFormats =
+    {
+        "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss.fff", "yyyy-MM-dd'T'HH:mm:sszzz", "yyyy-MM-dd'T'HH:mm:ss.fffzzz",
+        "yyyy-MM-dd'T'HH:mm:sszz", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "MM/dd/yyyy HH:mm:ss"
+    };
+    private static readonly string RunId = Guid.NewGuid().ToString();
+
+    public static string UserName
+    {
+        get { return Environment.UserName; }
+    }
+
+    public static string TransactionId
+    {
+        get { return RunId; }
+    }
+
+    public static string UserLocale
+    {
+        get { return CultureInfo.CurrentCulture.Name; }
+    }
+
+    // ------------------------------------------------------------------ conversions
+
+    public static string ToStr(object value)
+    {
+        if (value == null)
+        {
+            return string.Empty;
+        }
+        string text = value as string;
+        if (text != null)
+        {
+            return text;
+        }
+        if (value is bool)
+        {
+            return (bool)value ? "true" : "false";
+        }
+        if (value is DateTime)
+        {
+            return ((DateTime)value).ToString("yyyy-MM-dd'T'HH:mm:ss", Invariant);
+        }
+        if (value is double)
+        {
+            return ((double)value).ToString("R", Invariant);
+        }
+        if (value is XmlDocument)
+        {
+            XmlDocument document = (XmlDocument)value;
+            return document.DocumentElement == null ? string.Empty : document.DocumentElement.OuterXml;
+        }
+        if (value is XmlNode)
+        {
+            return ((XmlNode)value).OuterXml;
+        }
+        if (value is RowsetCore)
+        {
+            return ((RowsetCore)value).ToXml().DocumentElement.OuterXml;
+        }
+        if (value is RowBase)
+        {
+            XmlDocument document = new XmlDocument();
+            return RowElement(document, value).OuterXml;
+        }
+        if (value is Exception)
+        {
+            return ((Exception)value).Message;
+        }
+        IDictionary<string, string> map = value as IDictionary<string, string>;
+        if (map != null)
+        {
+            List<string> pairs = new List<string>();
+            foreach (KeyValuePair<string, string> pair in map)
+            {
+                pairs.Add(pair.Key + "=" + pair.Value);
+            }
+            return "{" + string.Join(", ", pairs.ToArray()) + "}";
+        }
+        List<string> list = value as List<string>;
+        if (list != null)
+        {
+            return ListToString(list);
+        }
+        IFormattable formattable = value as IFormattable;
+        if (formattable != null)
+        {
+            return formattable.ToString(null, Invariant);
+        }
+        return value.ToString();
+    }
+
+    public static bool ToBool(object value)
+    {
+        if (value is bool)
+        {
+            return (bool)value;
+        }
+        if (value is int || value is long || value is double || value is decimal)
+        {
+            return Convert.ToDouble(value, Invariant) != 0;
+        }
+        return TrueValue.IsMatch(ToStr(value));
+    }
+
+    public static double ToDouble(object value)
+    {
+        if (value is double)
+        {
+            return (double)value;
+        }
+        if (value is int || value is long || value is decimal || value is float)
+        {
+            return Convert.ToDouble(value, Invariant);
+        }
+        if (value is bool)
+        {
+            return (bool)value ? 1 : 0;
+        }
+        double result;
+        return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result) ? result : 0;
+    }
+
+    public static int ToInt(object value)
+    {
+        double number = ToDouble(value);
+        return number > int.MaxValue ? int.MaxValue : number < int.MinValue ? int.MinValue : (int)number;
+    }
+
+    public static long ToLong(object value)
+    {
+        if (value is long)
+        {
+            return (long)value;
+        }
+        long result;
+        if (long.TryParse(ToStr(value).Trim(), NumberStyles.Integer, Invariant, out result))
+        {
+            return result;
+        }
+        return (long)ToDouble(value);
+    }
+
+    public static decimal ToDecimal(object value)
+    {
+        if (value is decimal)
+        {
+            return (decimal)value;
+        }
+        decimal result;
+        if (decimal.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result))
+        {
+            return result;
+        }
+        double number = ToDouble(value);
+        return number > (double)decimal.MaxValue || number < (double)decimal.MinValue ? 0m : (decimal)number;
+    }
+
+    public static DateTime ToDateTime(object value)
+    {
+        if (value is DateTime)
+        {
+            return (DateTime)value;
+        }
+        DateTime result;
+        if (DateTime.TryParseExact(ToStr(value).Trim(), DateFormats, Invariant, DateTimeStyles.None, out result))
+        {
+            return result;
+        }
+        return DateTime.MinValue;
+    }
+
+    public static XmlDocument ToXml(object value)
+    {
+        XmlDocument document = value as XmlDocument;
+        if (document != null)
+        {
+            return document;
+        }
+        if (value is RowsetCore)
+        {
+            return ((RowsetCore)value).ToXml();
+        }
+        if (value is RowBase)
+        {
+            XmlDocument rowDocument = new XmlDocument();
+            rowDocument.AppendChild(RowElement(rowDocument, value));
+            return rowDocument;
+        }
+        XmlNode node = value as XmlNode;
+        if (node != null)
+        {
+            return NodeAsDocument(node);
+        }
+        string text = ToStr(value).Trim();
+        return text.StartsWith("<") ? ParseXml(text) : new XmlDocument();
+    }
+
+    public static List<string> ToList(object value)
+    {
+        List<string> list = value as List<string>;
+        if (list != null)
+        {
+            return list;
+        }
+        List<string> result = new List<string>();
+        if (value == null)
+        {
+            return result;
+        }
+        IDictionary<string, string> map = value as IDictionary<string, string>;
+        if (map != null)
+        {
+            result.AddRange(map.Values);
+            return result;
+        }
+        System.Collections.IEnumerable items = value as System.Collections.IEnumerable;
+        if (items != null && !(value is string) && !(value is XmlNode))
+        {
+            foreach (object item in items)
+            {
+                result.Add(ToStr(item));
+            }
+            return result;
+        }
+        string text = ToStr(value).Trim();
+        if (text.StartsWith("[") && text.EndsWith("]"))
+        {
+            foreach (Match match in Regex.Matches(text, @"\[(?:[A-Za-z]+:)?([^\[\]]*)\]"))
+            {
+                result.Add(match.Groups[1].Value);
+            }
+            return result;
+        }
+        if (text.Length > 0)
+        {
+            result.Add(text);
+        }
+        return result;
+    }
+
+    public static Dictionary<string, string> ToMap(object value)
+    {
+        Dictionary<string, string> map = value as Dictionary<string, string>;
+        if (map != null)
+        {
+            return map;
+        }
+        Dictionary<string, string> result = new Dictionary<string, string>();
+        IDictionary<string, string> other = value as IDictionary<string, string>;
+        if (other != null)
+        {
+            foreach (KeyValuePair<string, string> pair in other)
+            {
+                result[pair.Key] = pair.Value;
+            }
+            return result;
+        }
+        foreach (Match match in Regex.Matches(ToStr(value), @"([^{},=\s][^{},=]*)=\[(?:[A-Za-z]+:)?([^\[\]]*)\]"))
+        {
+            result[match.Groups[1].Value.Trim()] = match.Groups[2].Value;
+        }
+        return result;
+    }
+
+    public static T ToRowset<T>(object value) where T : RowsetCore, new()
+    {
+        if (value is T)
+        {
+            return (T)value;
+        }
+        T result = new T();
+        result.LoadXml(ToXml(value));
+        return result;
+    }
+
+    public static T ToRow<T>(object value) where T : RowBase, new()
+    {
+        if (value is T)
+        {
+            return (T)value;
+        }
+        T row = new T();
+        XmlDocument document = ToXml(value);
+        XmlNode node = document.SelectSingleNode("//Row") ?? document.DocumentElement;
+        if (node != null)
+        {
+            FillRow(row, node);
+        }
+        return row;
+    }
+
+    // ------------------------------------------------------------------ comparisons
+
+    /// <summary>== in MII: numbers compare as numbers, everything else as text.</summary>
+    public static bool AreEqual(object left, object right)
+    {
+        if (IsNumber(left) || IsNumber(right))
+        {
+            double a;
+            double b;
+            if (TryNumber(left, out a) && TryNumber(right, out b))
+            {
+                return a == b;
+            }
+        }
+        if (left is bool || right is bool)
+        {
+            return ToBool(left) == ToBool(right);
+        }
+        return ToStr(left) == ToStr(right);
+    }
+
+    /// <summary>&lt; &gt; in MII: as numbers when both are numbers, else as text.</summary>
+    public static int Compare(object left, object right)
+    {
+        double a;
+        double b;
+        if (TryNumber(left, out a) && TryNumber(right, out b))
+        {
+            return a.CompareTo(b);
+        }
+        if (left is DateTime || right is DateTime)
+        {
+            return ToDateTime(left).CompareTo(ToDateTime(right));
+        }
+        return string.CompareOrdinal(ToStr(left), ToStr(right));
+    }
+
+    private static bool IsNumber(object value)
+    {
+        return value is int || value is long || value is double || value is decimal || value is float;
+    }
+
+    private static bool TryNumber(object value, out double number)
+    {
+        if (IsNumber(value))
+        {
+            number = Convert.ToDouble(value, Invariant);
+            return true;
+        }
+        return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out number);
+    }
+
+    // ------------------------------------------------------------------ XML
+
+    public static XmlDocument ParseXml(string text)
+    {
+        XmlDocument document = new XmlDocument();
+        if (text != null && text.Trim().Length > 0)
+        {
+            document.LoadXml(text.Trim());
+        }
+        return document;
+    }
+
+    /// <summary>Doc{xpath}: the text of the first matching node, or the value of an XPath expression such as count(...).</summary>
+    public static string XPath(object source, string xpath)
+    {
+        XmlDocument document = ToXml(source);
+        if (document.DocumentElement == null)
+        {
+            return string.Empty;
+        }
+        object result = document.CreateNavigator().Evaluate(xpath, Namespaces(document));
+        System.Xml.XPath.XPathNodeIterator nodes = result as System.Xml.XPath.XPathNodeIterator;
+        if (nodes != null)
+        {
+            return nodes.MoveNext() ? nodes.Current.Value : string.Empty;
+        }
+        if (result is double)
+        {
+            double number = (double)result;
+            return number == Math.Floor(number) && Math.Abs(number) < 1e15 ? ((long)number).ToString(Invariant) : number.ToString("R", Invariant);
+        }
+        return ToStr(result);
+    }
+
+    /// <summary>Doc{xpath} used as XML: the first matching node as a document of its own.</summary>
+    public static XmlDocument SelectXml(object source, string xpath)
+    {
+        XmlDocument document = ToXml(source);
+        if (document.DocumentElement == null)
+        {
+            return new XmlDocument();
+        }
+        XmlNode node = document.SelectSingleNode(xpath, Namespaces(document));
+        return node == null ? new XmlDocument() : NodeAsDocument(node);
+    }
+
+    /// <summary>The nodes a repeater runs over, each as a document of its own.</summary>
+    public static List<XmlDocument> SelectNodes(object source, string xpath)
+    {
+        List<XmlDocument> result = new List<XmlDocument>();
+        XmlDocument document = ToXml(source);
+        if (document.DocumentElement == null)
+        {
+            return result;
+        }
+        foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))
+        {
+            result.Add(NodeAsDocument(node));
+        }
+        return result;
+    }
+
+    /// <summary>X{key} on a value of unknown type: a map lookup, else an XPath.</summary>
+    public static string Select(object source, string key)
+    {
+        IDictionary<string, string> map = source as IDictionary<string, string>;
+        if (map != null)
+        {
+            return MapGet(map, key);
+        }
+        return XPath(source, key);
+    }
+
+    /// <summary>Assign link with XPath: sets the text of the node (created when the path is a plain element path).</summary>
+    public static XmlDocument SetXPathValue(XmlDocument document, string xpath, object value)
+    {
+        XmlNode node = FindOrCreate(document, xpath);
+        if (node != null)
+        {
+            node.InnerText = ToStr(value);
+        }
+        return document;
+    }
+
+    /// <summary>Assign XML link: replaces the selected node by the source document's root element.</summary>
+    public static XmlDocument AssignXml(XmlDocument document, string xpath, object source)
+    {
+        XmlDocument sourceDocument = ToXml(source);
+        if (sourceDocument.DocumentElement == null)
+        {
+            return document;
+        }
+        XmlNode node = FindOrCreate(document, xpath);
+        if (node == null || node == document.DocumentElement || node == document)
+        {
+            document.RemoveAll();
+            document.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
+            return document;
+        }
+        node.ParentNode.ReplaceChild(document.ImportNode(sourceDocument.DocumentElement, true), node);
+        return document;
+    }
+
+    /// <summary>Append XML link: the source root element becomes the last child of the selected node.</summary>
+    public static XmlDocument AppendXml(XmlDocument document, string xpath, object source)
+    {
+        XmlDocument sourceDocument = ToXml(source);
+        XmlNode node = FindOrCreate(document, xpath);
+        if (node != null && sourceDocument.DocumentElement != null)
+        {
+            node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
+        }
+        return document;
+    }
+
+    /// <summary>Append After XML link: the source root element is inserted after the selected node.</summary>
+    public static XmlDocument AppendAfterXml(XmlDocument document, string xpath, object source)
+    {
+        XmlDocument sourceDocument = ToXml(source);
+        XmlNode node = FindOrCreate(document, xpath);
+        if (node != null && node.ParentNode != null && sourceDocument.DocumentElement != null)
+        {
+            node.ParentNode.InsertAfter(document.ImportNode(sourceDocument.DocumentElement, true), node);
+        }
+        return document;
+    }
+
+    /// <summary>Replace XML link: the children of the selected node are replaced by the source root element.</summary>
+    public static XmlDocument ReplaceXml(XmlDocument document, string xpath, object source)
+    {
+        XmlDocument sourceDocument = ToXml(source);
+        XmlNode node = FindOrCreate(document, xpath);
+        if (node != null && sourceDocument.DocumentElement != null)
+        {
+            while (node.FirstChild != null)
+            {
+                node.RemoveChild(node.FirstChild);
+            }
+            node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
+        }
+        return document;
+    }
+
+    /// <summary>Remove XML link: removes every node the XPath selects.</summary>
+    public static XmlDocument RemoveXml(XmlDocument document, string xpath)
+    {
+        if (document.DocumentElement == null)
+        {
+            return document;
+        }
+        List<XmlNode> nodes = new List<XmlNode>();
+        foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))
+        {
+            nodes.Add(node);
+        }
+        foreach (XmlNode node in nodes)
+        {
+            if (node.ParentNode != null)
+            {
+                node.ParentNode.RemoveChild(node);
+            }
+        }
+        return document;
+    }
+
+    /// <summary>XSLT action.</summary>
+    public static XmlDocument XslTransform(object input, object stylesheet)
+    {
+        XslCompiledTransform transform = new XslCompiledTransform();
+        using (XmlReader reader = new XmlNodeReader(ToXml(stylesheet)))
+        {
+            transform.Load(reader);
+        }
+        StringBuilder output = new StringBuilder();
+        using (StringWriter writer = new StringWriter(output, Invariant))
+        {
+            transform.Transform(ToXml(input), null, writer);
+        }
+        string text = output.ToString().Trim();
+        return text.StartsWith("<") ? ParseXml(text) : new XmlDocument();
+    }
+
+    /// <summary>A row for a rowset document that is not typed: column name, value, column name, value, ...</summary>
+    public static void AddRow(object document, params object[] columnsAndValues)
+    {
+        XmlDocument xml = ToXml(document);
+        XmlNode rowset = xml.SelectSingleNode("/Rowsets/Rowset");
+        if (rowset == null)
+        {
+            return;
+        }
+        XmlElement row = xml.CreateElement("Row");
+        for (int index = 0; index + 1 < columnsAndValues.Length; index += 2)
+        {
+            XmlElement cell = xml.CreateElement(ToStr(columnsAndValues[index]));
+            cell.InnerText = ToStr(columnsAndValues[index + 1]);
+            row.AppendChild(cell);
+        }
+        rowset.AppendChild(row);
+    }
+
+    public static List<string> GetListFromXPath(object source, object xpath)
+    {
+        List<string> result = new List<string>();
+        XmlDocument document = ToXml(source);
+        if (document.DocumentElement == null)
+        {
+            return result;
+        }
+        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))
+        {
+            result.Add(node.InnerText);
+        }
+        return result;
+    }
+
+    public static Dictionary<string, string> GetMapFromXPath(object source, object xpath)
+    {
+        Dictionary<string, string> result = new Dictionary<string, string>();
+        XmlDocument document = ToXml(source);
+        if (document.DocumentElement == null)
+        {
+            return result;
+        }
+        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))
+        {
+            result[node.Name] = node.InnerText;
+        }
+        return result;
+    }
+
+    public static string Name(object source)
+    {
+        XmlDocument document = ToXml(source);
+        return document.DocumentElement == null ? string.Empty : document.DocumentElement.Name;
+    }
+
+    private static XmlNamespaceManager Namespaces(XmlDocument document)
+    {
+        XmlNamespaceManager manager = new XmlNamespaceManager(document.NameTable);
+        foreach (XmlNode node in document.SelectNodes("//namespace::*"))
+        {
+            string prefix = node.LocalName == "xmlns" ? string.Empty : node.LocalName;
+            if (prefix.Length > 0 && prefix != "xml" && manager.LookupNamespace(prefix) == null)
+            {
+                manager.AddNamespace(prefix, node.Value);
+            }
+        }
+        return manager;
+    }
+
+    private static XmlDocument NodeAsDocument(XmlNode node)
+    {
+        XmlDocument document = new XmlDocument();
+        if (node is XmlDocument)
+        {
+            XmlNode root = ((XmlDocument)node).DocumentElement;
+            if (root != null)
+            {
+                document.AppendChild(document.ImportNode(root, true));
+            }
+            return document;
+        }
+        if (node is XmlElement)
+        {
+            document.AppendChild(document.ImportNode(node, true));
+            return document;
+        }
+        XmlElement value = document.CreateElement("Value");
+        value.InnerText = node.Value ?? node.InnerText;
+        document.AppendChild(value);
+        return document;
+    }
+
+    /// <summary>The node of an XPath; a missing plain element path (/a/b/c) is created.</summary>
+    private static XmlNode FindOrCreate(XmlDocument document, string xpath)
+    {
+        if (document.DocumentElement != null)
+        {
+            XmlNode found = document.SelectSingleNode(xpath, Namespaces(document));
+            if (found != null)
+            {
+                return found;
+            }
+        }
+        if (!Regex.IsMatch(xpath, @"^(/[A-Za-z_][\w.\-]*)+$"))
+        {
+            return null;
+        }
+        XmlNode current = document;
+        foreach (string name in xpath.Trim('/').Split('/'))
+        {
+            XmlNode next = null;
+            foreach (XmlNode child in current.ChildNodes)
+            {
+                if (child.NodeType == XmlNodeType.Element && child.Name == name)
+                {
+                    next = child;
+                    break;
+                }
+            }
+            if (next == null)
+            {
+                if (current == document && document.DocumentElement != null)
+                {
+                    return null;
+                }
+                next = document.CreateElement(name);
+                current.AppendChild(next);
+            }
+            current = next;
+        }
+        return current;
+    }
+
+    // ------------------------------------------------------------------ rows (reflection over the generated row classes)
+
+    public static List<PropertyInfo> ColumnsOf(Type rowType)
+    {
+        List<PropertyInfo> result = new List<PropertyInfo>();
+        foreach (PropertyInfo property in rowType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (property.CanRead && property.CanWrite && property.GetIndexParameters().Length == 0)
+            {
+                result.Add(property);
+            }
+        }
+        return result;
+    }
+
+    public static object RowValue(object row, string column)
+    {
+        PropertyInfo property = FindColumn(row.GetType(), column);
+        return property == null ? null : property.GetValue(row, null);
+    }
+
+    public static XmlElement RowElement(XmlDocument document, object row)
+    {
+        XmlElement element = document.CreateElement("Row");
+        foreach (PropertyInfo property in ColumnsOf(row.GetType()))
+        {
+            XmlElement cell = document.CreateElement(property.Name);
+            cell.InnerText = ToStr(property.GetValue(row, null));
+            element.AppendChild(cell);
+        }
+        return element;
+    }
+
+    public static void FillRow(object row, XmlNode node)
+    {
+        foreach (XmlNode cell in node.ChildNodes)
+        {
+            if (cell.NodeType != XmlNodeType.Element)
+            {
+                continue;
+            }
+            PropertyInfo property = FindColumn(row.GetType(), cell.LocalName);
+            if (property != null)
+            {
+                property.SetValue(row, ConvertTo(cell.InnerText, property.PropertyType), null);
+            }
+        }
+    }
+
+    private static PropertyInfo FindColumn(Type rowType, string column)
+    {
+        string wanted = Simplify(column);
+        PropertyInfo loose = null;
+        foreach (PropertyInfo property in ColumnsOf(rowType))
+        {
+            if (property.Name == column)
+            {
+                return property;
+            }
+            if (loose == null && Simplify(property.Name) == wanted)
+            {
+                loose = property;
+            }
+        }
+        return loose;
+    }
+
+    private static string Simplify(string name)
+    {
+        StringBuilder result = new StringBuilder();
+        foreach (char c in name)
+        {
+            if (char.IsLetterOrDigit(c))
+            {
+                result.Append(char.ToLowerInvariant(c));
+            }
+        }
+        return result.ToString();
+    }
+
+    private static object ConvertTo(string text, Type type)
+    {
+        if (type == typeof(string)) return text;
+        if (type == typeof(bool)) return ToBool(text);
+        if (type == typeof(int)) return ToInt(text);
+        if (type == typeof(long)) return ToLong(text);
+        if (type == typeof(double)) return ToDouble(text);
+        if (type == typeof(decimal)) return ToDecimal(text);
+        if (type == typeof(DateTime)) return ToDateTime(text);
+        return text;
+    }
+
+    // ------------------------------------------------------------------ lists and maps
+
+    public static List<string> List(params object[] values)
+    {
+        List<string> result = new List<string>();
+        foreach (object value in values)
+        {
+            result.Add(ToStr(value));
+        }
+        return result;
+    }
+
+    public static Dictionary<string, string> Map(params object[] keysAndValues)
+    {
+        Dictionary<string, string> result = new Dictionary<string, string>();
+        for (int index = 0; index + 1 < keysAndValues.Length; index += 2)
+        {
+            result[ToStr(keysAndValues[index])] = ToStr(keysAndValues[index + 1]);
+        }
+        return result;
+    }
+
+    public static string MapGet(object map, string key)
+    {
+        string value;
+        return ToMap(map).TryGetValue(key, out value) ? value : string.Empty;
+    }
+
+    public static string GetValueFromMap(object map, object key)
+    {
+        return MapGet(map, ToStr(key));
+    }
+
+    public static string ListGet(object list, int index)
+    {
+        List<string> items = ToList(list);
+        return index >= 0 && index < items.Count ? items[index] : string.Empty;
+    }
+
+    public static int Size(object value)
+    {
+        IDictionary<string, string> map = value as IDictionary<string, string>;
+        if (map != null)
+        {
+            return map.Count;
+        }
+        return ToList(value).Count;
+    }
+
+    /// <summary>append() works by reference in MII: the list itself gets the value.</summary>
+    public static List<string> Append(object list, object value)
+    {
+        List<string> items = ToList(list);
+        items.Add(ToStr(value));
+        return items;
+    }
+
+    public static List<string> Insert(object list, object index, object value)
+    {
+        List<string> items = ToList(list);
+        items.Insert(Math.Max(0, Math.Min(items.Count, ToInt(index))), ToStr(value));
+        return items;
+    }
+
+    public static List<string> Set(object list, object index, object value)
+    {
+        List<string> items = ToList(list);
+        int position = ToInt(index);
+        if (position >= 0 && position < items.Count)
+        {
+            items[position] = ToStr(value);
+        }
+        return items;
+    }
+
+    public static List<string> Remove(object list, object index)
+    {
+        List<string> items = ToList(list);
+        int position = ToInt(index);
+        if (position >= 0 && position < items.Count)
+        {
+            items.RemoveAt(position);
+        }
+        return items;
+    }
+
+    public static int Find(object list, object value)
+    {
+        return ToList(list).IndexOf(ToStr(value));
+    }
+
+    public static string First(object list)
+    {
+        List<string> items = ToList(list);
+        return items.Count > 0 ? items[0] : string.Empty;
+    }
+
+    public static string Last(object list)
+    {
+        List<string> items = ToList(list);
+        return items.Count > 0 ? items[items.Count - 1] : string.Empty;
+    }
+
+    public static List<string> Sort(object list)
+    {
+        List<string> items = new List<string>(ToList(list));
+        items.Sort(StringComparer.Ordinal);
+        return items;
+    }
+
+    public static List<string> Keys(object map)
+    {
+        return new List<string>(ToMap(map).Keys);
+    }
+
+    public static List<string> Values(object map)
+    {
+        return new List<string>(ToMap(map).Values);
+    }
+
+    public static Dictionary<string, string> Put(object map, object key, object value)
+    {
+        Dictionary<string, string> items = ToMap(map);
+        items[ToStr(key)] = ToStr(value);
+        return items;
+    }
+
+    public static bool ContainsKey(object map, object key)
+    {
+        return ToMap(map).ContainsKey(ToStr(key));
+    }
+
+    public static bool ContainsValue(object map, object value)
+    {
+        return ToMap(map).ContainsValue(ToStr(value));
+    }
+
+    public static Dictionary<string, string> ListsToMap(object keys, object values)
+    {
+        List<string> keyList = ToList(keys);
+        List<string> valueList = ToList(values);
+        Dictionary<string, string> result = new Dictionary<string, string>();
+        for (int index = 0; index < keyList.Count; index++)
+        {
+            result[keyList[index]] = index < valueList.Count ? valueList[index] : string.Empty;
+        }
+        return result;
+    }
+
+    /// <summary>Splits on a regular expression (default ","); further MII arguments are ignored.</summary>
+    public static List<string> StringToList(object text, params object[] options)
+    {
+        string delimiter = options.Length > 0 ? ToStr(options[0]) : ",";
+        return new List<string>(Regex.Split(ToStr(text), delimiter));
+    }
+
+    public static List<string> StringToListWithLimit(object text, object delimiter, object limit)
+    {
+        return new List<string>(new Regex(ToStr(delimiter)).Split(ToStr(text), Math.Max(1, ToInt(limit))));
+    }
+
+    public static string ListToString(object list, params object[] delimiter)
+    {
+        string separator = delimiter.Length > 0 ? ToStr(delimiter[0]) : ",";
+        return string.Join(separator, ToList(list).ToArray());
+    }
+
+    public static List<string> TimeZoneIds()
+    {
+        List<string> result = new List<string>();
+        foreach (TimeZoneInfo zone in TimeZoneInfo.GetSystemTimeZones())
+        {
+            result.Add(zone.Id);
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------------ strings
+
+    public static string StringLeft(object text, object length)
+    {
+        string value = ToStr(text);
+        return value.Substring(0, Math.Max(0, Math.Min(value.Length, ToInt(length))));
+    }
+
+    public static string StringRight(object text, object length)
+    {
+        string value = ToStr(text);
+        int count = Math.Max(0, Math.Min(value.Length, ToInt(length)));
+        return value.Substring(value.Length - count);
+    }
+
+    /// <summary>stringpart(text, start, length) with a 1-based start: stringpart("Football", 1, 1) = "F".</summary>
+    public static string StringPart(object text, object start, object length)
+    {
+        string value = ToStr(text);
+        int begin = Math.Max(0, ToInt(start) - 1);
+        if (begin >= value.Length)
+        {
+            return string.Empty;
+        }
+        return value.Substring(begin, Math.Max(0, Math.Min(value.Length - begin, ToInt(length))));
+    }
+
+    public static int StringIndexOf(object text, object part)
+    {
+        return ToStr(text).IndexOf(ToStr(part), StringComparison.Ordinal);
+    }
+
+    public static int StringLastIndexOf(object text, object part)
+    {
+        return ToStr(text).LastIndexOf(ToStr(part), StringComparison.Ordinal);
+    }
+
+    /// <summary>stringreplace replaces every occurrence (literal text).</summary>
+    public static string StringReplace(object text, object find, object replacement)
+    {
+        string search = ToStr(find);
+        return search.Length == 0 ? ToStr(text) : ToStr(text).Replace(search, ToStr(replacement));
+    }
+
+    /// <summary>stringreplaceall replaces every match of a regular expression.</summary>
+    public static string StringReplaceAll(object text, object pattern, object replacement)
+    {
+        return Regex.Replace(ToStr(text), ToStr(pattern), ToStr(replacement));
+    }
+
+    /// <summary>match(text, pattern) with more arguments than usual; case-sensitive like on the system.</summary>
+    public static bool Match(object text, object pattern, params object[] ignored)
+    {
+        return Regex.IsMatch(ToStr(text), ToStr(pattern));
+    }
+
+    /// <summary>match2(text, pattern, caseSensitive).</summary>
+    public static bool Match2(object text, object pattern, params object[] caseSensitive)
+    {
+        bool sensitive = caseSensitive.Length == 0 || ToBool(caseSensitive[0]);
+        return Regex.IsMatch(ToStr(text), ToStr(pattern), sensitive ? RegexOptions.None : RegexOptions.IgnoreCase);
+    }
+
+    public static string Quotes(object text)
+    {
+        return "\"" + ToStr(text) + "\"";
+    }
+
+    public static string Encode(object text)
+    {
+        return Uri.EscapeDataString(ToStr(text));
+    }
+
+    public static string Decode(object text)
+    {
+        return Uri.UnescapeDataString(ToStr(text));
+    }
+
+    public static string Base64Encode(object text)
+    {
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(ToStr(text)));
+    }
+
+    public static string Base64Decode(object text)
+    {
+        return Encoding.UTF8.GetString(Convert.FromBase64String(ToStr(text)));
+    }
+
+    public static string BooleanToString(object value)
+    {
+        return ToBool(value) ? "true" : "false";
+    }
+
+    public static string XmlEncode(object text)
+    {
+        return ToStr(text).Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;").Replace("'", "&apos;");
+    }
+
+    public static string XmlDecode(object text)
+    {
+        return ToStr(text).Replace("&lt;", "<").Replace("&gt;", ">").Replace("&quot;", "\"").Replace("&apos;", "'").Replace("&amp;", "&");
+    }
+
+    public static string Format(object number, object pattern)
+    {
+        return ToDouble(number).ToString(ToStr(pattern), Invariant);
+    }
+
+    // ------------------------------------------------------------------ dates (patterns are Java patterns as in MII)
+
+    public static string DateFormat(object value, object fromFormat, object toFormat)
+    {
+        DateTime date;
+        if (!(value is DateTime) && DateTime.TryParseExact(ToStr(value).Trim(), NetFormat(ToStr(fromFormat)), Invariant, DateTimeStyles.None, out date))
+        {
+            return date.ToString(NetFormat(ToStr(toFormat)), Invariant);
+        }
+        return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);
+    }
+
+    public static string FormatDateNow(object format)
+    {
+        return DateTime.Now.ToString(NetFormat(ToStr(format)), Invariant);
+    }
+
+    /// <summary>datediff returns seconds (second minus first).</summary>
+    public static long DateDiff(object first, object second)
+    {
+        return (long)(ToDateTime(second) - ToDateTime(first)).TotalSeconds;
+    }
+
+    public static long DateDiffDays(object first, object second)
+    {
+        return (long)(ToDateTime(second) - ToDateTime(first)).TotalDays;
+    }
+
+    public static long DateDiffHours(object first, object second)
+    {
+        return (long)(ToDateTime(second) - ToDateTime(first)).TotalHours;
+    }
+
+    public static long DateDiffMinutes(object first, object second)
+    {
+        return (long)(ToDateTime(second) - ToDateTime(first)).TotalMinutes;
+    }
+
+    public static int DateCompare(object first, object second)
+    {
+        return Math.Sign(ToDateTime(first).CompareTo(ToDateTime(second)));
+    }
+
+    public static bool DateBetween(object value, object start, object end)
+    {
+        DateTime date = ToDateTime(value);
+        return date >= ToDateTime(start) && date <= ToDateTime(end);
+    }
+
+    public static DateTime DateAddSeconds(object value, object amount)
+    {
+        return ToDateTime(value).AddSeconds(ToDouble(amount));
+    }
+
+    public static DateTime DateAddMinutes(object value, object amount)
+    {
+        return ToDateTime(value).AddMinutes(ToDouble(amount));
+    }
+
+    public static DateTime DateAddHours(object value, object amount)
+    {
+        return ToDateTime(value).AddHours(ToDouble(amount));
+    }
+
+    public static DateTime DateAddDays(object value, object amount)
+    {
+        return ToDateTime(value).AddDays(ToDouble(amount));
+    }
+
+    public static DateTime DateAddMonths(object value, object amount)
+    {
+        return ToDateTime(value).AddMonths(ToInt(amount));
+    }
+
+    public static DateTime DateAddYears(object value, object amount)
+    {
+        return ToDateTime(value).AddYears(ToInt(amount));
+    }
+
+    public static long DateToSeconds(object value)
+    {
+        return (long)(ToDateTime(value) - new DateTime(1970, 1, 1)).TotalSeconds;
+    }
+
+    public static DateTime DateFromSeconds(object seconds)
+    {
+        return new DateTime(1970, 1, 1).AddSeconds(ToDouble(seconds));
+    }
+
+    /// <summary>converttimezone(date, toZone) converts from the server's zone, converttimezone(date, fromZone, toZone)
+    /// between two zones. MII uses Java zone ids (Europe/Berlin), Windows knows other ids, so an unknown id leaves the
+    /// date unchanged.</summary>
+    public static DateTime ConvertTimeZone(object value, params object[] zones)
+    {
+        DateTime date = ToDateTime(value);
+        if (zones.Length == 0)
+        {
+            return date;
+        }
+        try
+        {
+            TimeZoneInfo source = zones.Length >= 2 ? TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[0])) : TimeZoneInfo.Local;
+            TimeZoneInfo target = TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[zones.Length >= 2 ? 1 : 0]));
+            return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(date, DateTimeKind.Unspecified), source, target);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return date;
+        }
+    }
+
+    public static DateTime ConvertTimeZone2(object value, params object[] zones)
+    {
+        return ConvertTimeZone(value, zones);
+    }
+
+    public static string CurrentTimeOffset()
+    {
+        TimeSpan offset = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now);
+        return (offset < TimeSpan.Zero ? "-" : "+") + offset.ToString("hhmm", Invariant);
+    }
+
+    public static long CurrentTimeMillis()
+    {
+        return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+    }
+
+    /// <summary>Java date pattern -> .NET: the common letters are the same; S (milliseconds), a (AM/PM), E (day name),
+    /// Z/X (offset) differ.</summary>
+    private static string NetFormat(string javaFormat)
+    {
+        return javaFormat.Replace("SSS", "fff").Replace("a", "tt").Replace("EEEE", "dddd").Replace("EEE", "ddd").Replace("Z", "zzz").Replace("XXX", "zzz");
+    }
+
+    // ------------------------------------------------------------------ numbers
+
+    public static double Round(object value, params object[] digits)
+    {
+        int places = digits.Length > 0 ? ToInt(digits[0]) : 0;
+        return Math.Round(ToDouble(value), Math.Max(0, Math.Min(15, places)), MidpointRounding.AwayFromZero);
+    }
+
+    public static double Min(params object[] values)
+    {
+        List<double> numbers = Numbers(values);
+        double result = numbers.Count > 0 ? numbers[0] : 0;
+        foreach (double number in numbers)
+        {
+            result = Math.Min(result, number);
+        }
+        return result;
+    }
+
+    public static double Max(params object[] values)
+    {
+        List<double> numbers = Numbers(values);
+        double result = numbers.Count > 0 ? numbers[0] : 0;
+        foreach (double number in numbers)
+        {
+            result = Math.Max(result, number);
+        }
+        return result;
+    }
+
+    public static double Sum(params object[] values)
+    {
+        double result = 0;
+        foreach (double number in Numbers(values))
+        {
+            result += number;
+        }
+        return result;
+    }
+
+    public static double Average(params object[] values)
+    {
+        List<double> numbers = Numbers(values);
+        return numbers.Count == 0 ? 0 : Sum(values) / numbers.Count;
+    }
+
+    private static readonly Random Randomizer = new Random();
+
+    public static double Random(params object[] ignored)
+    {
+        return Randomizer.NextDouble();
+    }
+
+    public static double Ceiling(object value)
+    {
+        return Math.Ceiling(ToDouble(value));
+    }
+
+    public static double Floor(object value)
+    {
+        return Math.Floor(ToDouble(value));
+    }
+
+    public static double Sqrt(object value)
+    {
+        return Math.Sqrt(ToDouble(value));
+    }
+
+    private static List<double> Numbers(object[] values)
+    {
+        List<double> result = new List<double>();
+        foreach (object value in values)
+        {
+            if (value is List<string>)
+            {
+                foreach (string item in (List<string>)value)
+                {
+                    result.Add(ToDouble(item));
+                }
+            }
+            else
+            {
+                result.Add(ToDouble(value));
+            }
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------------ Catch outputs
+
+    public static string ExceptionMessage(Exception exception)
+    {
+        return exception == null ? string.Empty : exception.Message;
+    }
+
+    public static string ExceptionType(Exception exception)
+    {
+        return exception == null ? string.Empty : exception.GetType().Name;
+    }
+
+    public static string ExceptionSource(Exception exception)
+    {
+        MiiException mii = exception as MiiException;
+        if (mii != null)
+        {
+            return mii.ActionName;
+        }
+        return exception == null ? string.Empty : exception.Source ?? string.Empty;
+    }
+
+    public static string ExceptionActionType(Exception exception)
+    {
+        MiiException mii = exception as MiiException;
+        return mii != null ? mii.ActionType : string.Empty;
+    }
+
+    /// <summary>True when the exception is the transaction's own Terminate Transaction (not to be caught there).</summary>
+    public static bool IsTerminationOf(Exception exception, string transactionPath)
+    {
+        TransactionTerminatedException termination = exception as TransactionTerminatedException;
+        return termination != null && termination.TransactionPath == transactionPath;
+    }
+
+    // ------------------------------------------------------------------ what X-Ray could not translate
+
+    /// <summary>A reference X-Ray could not map (see the notes in the file header); yields "".</summary>
+    public static object Unresolved(string reference)
+    {
+        return string.Empty;
+    }
+
+    /// <summary>An expression X-Ray could not parse (see the notes in the file header); yields "".</summary>
+    public static object Unparsed(string expression)
+    {
+        return string.Empty;
+    }
+
+    /// <summary>#expr#: MII evaluates the text as an expression at runtime; here the text itself is returned.</summary>
+    public static object Evaluate(string expression)
+    {
+        return expression;
+    }
+
+    /// <summary>getvalue(name): reads a property by a name built at runtime; not available outside MII.</summary>
+    public static string GetValue(object name)
+    {
+        return string.Empty;
+    }
+
+    public static object Function(string name, params object[] arguments)
+    {
+        throw new NotImplementedException("The MII function " + name + "() has no X-Ray equivalent.");
+    }
+}
+
+#endregion
