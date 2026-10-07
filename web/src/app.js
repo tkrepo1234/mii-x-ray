@@ -1,0 +1,198 @@
+// The page: choose the source, enter a transaction, X-Ray it, copy or download the C# file.
+import { CatalogSource, FolderSource, SourceError, ObjectPath } from './sources.js';
+import { DependencyResolver } from './resolver.js';
+import { generateCode } from './codefile.js';
+import { RUNTIME_SOURCE } from './runtime.js';
+
+const RECENT_KEY = 'mii-x-ray.recent';
+const $ = (id) => document.getElementById(id);
+
+const state = { source: null, folderSource: null, result: null, busy: false };
+
+function readRecent() {
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
+  } catch (error) {
+    return [];
+  }
+}
+
+function remember(path) {
+  const recent = [path, ...readRecent().filter((item) => item.toLowerCase() !== path.toLowerCase())].slice(0, 12);
+
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(recent));
+  } catch (error) {
+    // private mode or blocked storage: the list just stays empty
+  }
+
+  showRecent();
+}
+
+function showRecent() {
+  $('recent').replaceChildren(...readRecent().map((path) => Object.assign(document.createElement('option'), { value: path })));
+}
+
+function setStatus(text, kind) {
+  const status = $('status');
+  status.textContent = text;
+  status.className = 'status ' + (kind || '');
+}
+
+function onServer() {
+  return /^https?:$/.test(location.protocol);
+}
+
+function currentSource() {
+  if ($('source-folder').checked) {
+    return state.folderSource;
+  }
+
+  if (!state.source) {
+    state.source = new CatalogSource(location.origin);
+  }
+
+  return state.source;
+}
+
+function updateSourceControls() {
+  const folder = $('source-folder').checked;
+  $('folder-row').hidden = !folder;
+  $('source-server').disabled = !onServer();
+  $('server-hint').hidden = onServer();
+}
+
+async function chooseFolder(event) {
+  const files = [...event.target.files];
+
+  if (files.length === 0) {
+    return;
+  }
+
+  const name = files[0].webkitRelativePath.split('/')[0];
+  state.folderSource = new FolderSource(name, files.map((file) => ({ path: file.webkitRelativePath, read: () => file.text() })));
+  $('folder-name').textContent = name + ' (' + state.folderSource.transactions().length + ' transactions)';
+  setStatus('');
+}
+
+async function xray() {
+  if (state.busy) {
+    return;
+  }
+
+  const path = ObjectPath.normalize($('transaction').value);
+  const source = currentSource();
+  $('similar').replaceChildren();
+
+  if (path.length === 0) {
+    setStatus('Enter a transaction path, e.g. PROJECT/Folder/trxName.', 'warning');
+    return;
+  }
+
+  if (!source) {
+    setStatus('Choose an export folder first.', 'warning');
+    return;
+  }
+
+  state.busy = true;
+  $('run').disabled = true;
+  let loaded = 0;
+  setStatus('Loading ' + path + ' …');
+
+  try {
+    await source.checkConnection();
+    const resolver = new DependencyResolver(source, (message) => {
+      if (message.startsWith('loaded')) {
+        loaded++;
+        setStatus('Loading ' + path + ' … ' + loaded + ' object' + (loaded === 1 ? '' : 's'));
+      }
+    });
+    const graph = await resolver.resolve(path);
+
+    if (!graph) {
+      setStatus(path + ' was not found or is no transaction.', 'error');
+      const similar = await source.findSimilar(path, 8);
+      $('similar').replaceChildren(...similar.map((candidate) => {
+        const button = Object.assign(document.createElement('button'), { type: 'button', className: 'link', textContent: candidate });
+        button.addEventListener('click', () => {
+          $('transaction').value = candidate;
+          xray();
+        });
+        return button;
+      }));
+      return;
+    }
+
+    state.result = generateCode(graph, source.description, RUNTIME_SOURCE, new Date());
+    remember(path);
+    showResult();
+    setStatus('');
+  } catch (error) {
+    if (error instanceof SourceError) {
+      setStatus(error.message + ' ' + error.hint, 'error');
+    } else {
+      setStatus('Unexpected error: ' + error.message, 'error');
+      console.error(error);
+    }
+  } finally {
+    state.busy = false;
+    $('run').disabled = false;
+  }
+}
+
+function showResult() {
+  const result = state.result;
+  const parts = [result.transactionCount + ' transaction' + (result.transactionCount === 1 ? '' : 's'), result.queryCount + ' quer' + (result.queryCount === 1 ? 'y' : 'ies')];
+
+  if (result.missing.length > 0) {
+    parts.push(result.missing.length + ' not found');
+  }
+
+  if (result.notes.length > 0) {
+    parts.push(result.notes.length + ' note' + (result.notes.length === 1 ? '' : 's'));
+  }
+
+  $('result-name').textContent = result.rootName + '.xray.cs';
+  $('result-facts').textContent = parts.join(' · ') + ' · ' + Math.round(result.code.length / 1024) + ' KB';
+  $('code').textContent = result.code;
+  $('result').hidden = false;
+}
+
+async function copy() {
+  try {
+    await navigator.clipboard.writeText(state.result.code);
+    setStatus('Copied.', 'success');
+  } catch (error) {
+    setStatus('The browser did not allow copying; use Download.', 'warning');
+  }
+}
+
+function download() {
+  const blob = new Blob(['﻿' + state.result.code], { type: 'text/plain;charset=utf-8' });
+  const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: state.result.rootName + '.xray.cs' });
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+function start() {
+  $('source-server').checked = onServer();
+  $('source-folder').checked = !onServer();
+  $('source-server').addEventListener('change', updateSourceControls);
+  $('source-folder').addEventListener('change', updateSourceControls);
+  $('folder').addEventListener('change', chooseFolder);
+  $('run').addEventListener('click', xray);
+  $('transaction').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      xray();
+    }
+  });
+  $('copy').addEventListener('click', copy);
+  $('download').addEventListener('click', download);
+  showRecent();
+  updateSourceControls();
+  $('transaction').focus();
+}
+
+start();

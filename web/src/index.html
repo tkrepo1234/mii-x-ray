@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MII X-Ray</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232f5d8a'/%3E%3Cpath d='M9 9l14 14M23 9L9 23' stroke='white' stroke-width='3.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <!--STYLE-->
+</head>
+<body>
+  <header>
+    <h1>MII X-Ray</h1>
+    <span class="subtitle">SAP MII transactions as C#</span>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="row">
+        <span class="label">Source</span>
+        <label><input type="radio" name="source" id="source-server"> This MII server</label>
+        <label><input type="radio" name="source" id="source-folder"> Export folder</label>
+      </div>
+      <p class="hint" id="server-hint" hidden>Open this page from the MII server (…/XMII/CM/…) to read its transactions.</p>
+      <div class="row" id="folder-row" hidden>
+        <span class="label"></span>
+        <label class="button secondary">Choose folder<input type="file" id="folder" webkitdirectory multiple hidden></label>
+        <span id="folder-name" class="muted">No folder chosen</span>
+      </div>
+      <div class="row">
+        <label class="label" for="transaction">Transaction</label>
+        <input type="text" id="transaction" list="recent" placeholder="PROJECT/Folder/trxName" spellcheck="false" autocomplete="off">
+        <datalist id="recent"></datalist>
+        <button type="button" id="run" class="button">X-Ray</button>
+      </div>
+      <p id="status" class="status" role="status"></p>
+      <div id="similar" class="similar"></div>
+    </section>
+
+    <section class="panel result" id="result" hidden>
+      <div class="result-head">
+        <div>
+          <div id="result-name" class="result-name"></div>
+          <div id="result-facts" class="muted"></div>
+        </div>
+        <div class="actions">
+          <button type="button" id="copy" class="button secondary">Copy</button>
+          <button type="button" id="download" class="button">Download</button>
+        </div>
+      </div>
+      <pre id="code"></pre>
+    </section>
+  </main>
+
+  <!--SCRIPT-->
+</body>
+</html>

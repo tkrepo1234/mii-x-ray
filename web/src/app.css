@@ -1,0 +1,199 @@
+:root {
+  --background: #f5f7fa;
+  --panel: #ffffff;
+  --border: #d8dee6;
+  --text: #1f2933;
+  --muted: #66727f;
+  --accent: #2f5d8a;
+  --accent-text: #ffffff;
+  --code-background: #f0f3f7;
+  --error: #b42318;
+  --warning: #9a6700;
+  --success: #1a7f37;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #14181d;
+    --panel: #1c2128;
+    --border: #2f3842;
+    --text: #e6edf3;
+    --muted: #8b98a5;
+    --accent: #5b8fc7;
+    --accent-text: #0d1117;
+    --code-background: #161b22;
+    --error: #f47067;
+    --warning: #d4a72c;
+    --success: #57ab5a;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--text);
+  font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.subtitle,
+.muted {
+  color: var(--muted);
+}
+
+main {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 20px 24px;
+  display: grid;
+  gap: 16px;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.label {
+  width: 96px;
+  flex: none;
+  color: var(--muted);
+}
+
+input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--text);
+  font: 13px Consolas, "Cascadia Mono", monospace;
+}
+
+input[type="text"]:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.button {
+  padding: 7px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.button.secondary {
+  background: transparent;
+  color: var(--accent);
+}
+
+.button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.hint {
+  margin: 0 0 12px 110px;
+  color: var(--warning);
+}
+
+.status {
+  min-height: 1.45em;
+  margin: 0 0 0 110px;
+  color: var(--muted);
+}
+
+.status.error {
+  color: var(--error);
+}
+
+.status.warning {
+  color: var(--warning);
+}
+
+.status.success {
+  color: var(--success);
+}
+
+.similar {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  margin-left: 110px;
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: 13px Consolas, "Cascadia Mono", monospace;
+  cursor: pointer;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.result-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.result-name {
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+pre {
+  margin: 0;
+  max-height: calc(100vh - 330px);
+  min-height: 240px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: var(--code-background);
+  font: 12.5px/1.5 Consolas, "Cascadia Mono", monospace;
+  tab-size: 4;
+}

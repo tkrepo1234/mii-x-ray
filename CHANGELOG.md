@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.0 - 2026-10-07
+
+- MII X-Ray as a web page for the MII server (`web/dist/mii-x-ray.html`, one self-contained file): reads through the
+  Catalog service with the signed-in session or from an export folder chosen in the browser; copy and download of
+  the result, recent transactions, "did you mean" for unknown paths.
+- The JavaScript version is the leading one from now on. Proven against the C# console: 526 of 526 corpus
+  transactions give byte-identical output (`web/test/equivalence.mjs`); in the browser against the MUD mock catalog
+  the result equals the console's for the same transaction.
+- Plain ES modules without dependencies, an own XML parser, `web/build.mjs` bundles everything into the page.
+
 ## 2.0.0 - 2026-10-07
 
 The generated code is C# 12 (.NET 8) and written the way one writes C#; the tool itself stays C# 5 / .NET 4.8.

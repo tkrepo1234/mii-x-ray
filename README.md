@@ -10,7 +10,30 @@ runtime. Typical use: hand the file to an LLM or a colleague to understand, revi
 - The **generated code** is C# 12 (.NET 8): methods, records, LINQ, string interpolation, raw string literals.
   The classic C# 5 output of version 1.x is available as the git tag `v1.1.0`.
 
-## Build
+## Web tool (leading version)
+
+`web/dist/mii-x-ray.html` is MII X-Ray as one self-contained web page for the MII server itself. Since 2.1.0 the
+JavaScript version under `web/` is the leading one; the C# console stays as it is (its output is the reference the
+port was proven against: 526 of 526 corpus transactions give byte-identical files).
+
+Deploy: in the MII Workbench, open the **Web** tab of a project, import `mii-x-ray.html` into a folder and open
+`https://<mii-server>/XMII/CM/<Project>/<Folder>/mii-x-ray.html`. The page reads transactions through the Catalog
+service with the signed-in user's session (the user needs access to the Catalog service, e.g. SAP_XMII_Developer);
+nothing is installed and no password is stored. Instead of the server it can also read an export folder chosen in
+the browser. The last transactions are kept in the browser (local storage).
+
+```
+node web/build.mjs                                   builds web/dist/mii-x-ray.html from web/src
+node web/test/equivalence.mjs <export folder> <C# output of --all>    JS and C# output must be identical
+node web/test/serve.mjs 5300 http://localhost:50100 dev:dev           the page at /XMII/CM/XRay/ with a Catalog proxy
+```
+
+The sources in `web/src` are plain ES modules without dependencies (own XML parser, so the browser, Node and the
+.NET reference behave alike); `build.mjs` puts them, the stylesheet and the C# runtime (`src/Generate/RuntimeSource.txt`,
+the one source of it) into the single page. Not yet tried on a real MII server: whether it asks for a CSRF token on
+Catalog POSTs (the page fetches one when the server answers 403 with `X-CSRF-Token: Required`).
+
+## Build (console)
 
 ```
 build.cmd          bin\MiiXRay.exe, built with the C# compiler that ships with Windows (.NET Framework 4.x)

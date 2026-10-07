@@ -4,3 +4,4 @@ tests/bin/
 tests/obj/
 .vs/
 *.user
+web/src/runtime.js
