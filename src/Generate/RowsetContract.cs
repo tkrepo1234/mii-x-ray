@@ -14,6 +14,9 @@ namespace MiiXRay.Generate
         public CsType Type;
         /// <summary>A guess from the SQL text; the spelling of a later confirmed use wins.</summary>
         public bool Tentative;
+
+        /// <summary>True when the generated code reads the column by name.</summary>
+        public bool Read;
     }
 
     /// <summary>The typed form of an MII rowset document (Rowsets/Rowset/Row): a row class and a rowset class.
@@ -70,6 +73,10 @@ namespace MiiXRay.Generate
         {
             get { return _columns; }
         }
+
+        /// <summary>True when a whole document of this contract is passed on (to an output, a call, a log, a string),
+        /// so columns that are not read by name may still be used further on.</summary>
+        public bool PassedOnWhole { get; set; }
 
         /// <summary>"Sfc,Item,..." - used to share identical contracts.</summary>
         public string Signature

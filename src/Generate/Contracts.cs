@@ -30,6 +30,9 @@ namespace MiiXRay.Generate
         /// <summary>Names inside the transaction class (nested classes, constants, the Execute method).</summary>
         public UniqueNames NestedNames = new UniqueNames();
 
+        /// <summary>The calls, queries and plugin actions of the transaction in execution order (for the call tree).</summary>
+        public List<OutlineEntry> Outline = new List<OutlineEntry>();
+
         public PropertySpec FindInput(string miiName)
         {
             return Find(RequestProperties, miiName);
@@ -90,6 +93,18 @@ namespace MiiXRay.Generate
         }
     }
 
+    /// <summary>One line of the call tree: a transaction call, a query or a plugin action.</summary>
+    public sealed class OutlineEntry
+    {
+        /// <summary>call, query or plugin.</summary>
+        public string Kind;
+        public string Target;
+        public string ActionName;
+        /// <summary>The enclosing branches, loops and error handlers, outermost first: "if X > loop Y" ("" at top level).</summary>
+        public string Flow;
+        public TransactionContract Callee;
+    }
+
     public sealed class QueryParameterSpec
     {
         public int Slot;
@@ -108,6 +123,9 @@ namespace MiiXRay.Generate
         public RowsetContract Result;
         /// <summary>For an Xacute query: the transaction it forwards to (null when not loaded).</summary>
         public TransactionContract XacuteTarget;
+
+        /// <summary>"TrxName.ActionName in loop X" for every action that runs the query.</summary>
+        public List<string> Callers = new List<string>();
 
         public QueryParameterSpec FindParameter(int slot)
         {
@@ -269,7 +287,7 @@ namespace MiiXRay.Generate
             property.Name = names.Claim(local ? Naming.Camel(parameter.Name) : Naming.Pascal(parameter.Name));
             property.Description = parameter.Description;
             property.Type = TypeOf(contract, parameter);
-            property.Initializer = Initializer(property.Type, parameter.DefaultText);
+            property.Initializer = Initializer(property.Type, property.Type.Kind == TypeKind.Xml ? XmlSample.Shrink(parameter.DefaultText) : parameter.DefaultText);
             return property;
         }
 

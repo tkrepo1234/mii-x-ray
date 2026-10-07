@@ -62,6 +62,9 @@ namespace MiiXRay.Generate
         private readonly UniqueNames _names = new UniqueNames();
         private readonly Dictionary<string, ActionSymbol> _actions = new Dictionary<string, ActionSymbol>();
         private readonly List<LoopScope> _loops = new List<LoopScope>();
+
+        /// <summary>Where the emitter is in the flow ("if X", "else X", "loop X", "on error X"), outermost first.</summary>
+        private readonly List<string> _flow = new List<string>();
         private readonly List<string> _expressionTexts = new List<string>();
         private string _currentAction = string.Empty;
 

@@ -167,7 +167,9 @@ namespace MiiXRay.Generate
                 handler.AddRange(EmitOutgoing(catchStep.Action));
             }
 
+            _flow.Add("on error " + name);
             List<string> children = EmitSiblings(catchStep.Children, new List<string>());
+            _flow.RemoveAt(_flow.Count - 1);
             handler.AddRange(children);
 
             if (!HasCode(children) && (symbol == null || symbol.Variable == null))
@@ -243,8 +245,9 @@ namespace MiiXRay.Generate
             lines.Add("// " + use.Name);
             lines.AddRange(EmitOutgoing(use));
 
-            List<string> whenTrue = step.Children.Count > 0 ? EmitStep(step.Children[0]) : new List<string>();
-            List<string> whenFalse = step.Children.Count > 1 ? EmitStep(step.Children[1]) : new List<string>();
+            bool alwaysTrue = condition.Code == "true";
+            List<string> whenTrue = EmitBranch(step.Children, 0, alwaysTrue ? null : "if " + use.Name);
+            List<string> whenFalse = EmitBranch(step.Children, 1, "else " + use.Name);
 
             if (condition.Code == "true" && !HasCode(whenFalse))
             {
@@ -309,7 +312,7 @@ namespace MiiXRay.Generate
 
             for (int index = 0; index <= matchCount && index < step.Children.Count; index++)
             {
-                List<string> branch = EmitStep(step.Children[index]);
+                List<string> branch = EmitBranch(step.Children, index, index < matchCount ? "case " + (index + 1) + " of " + use.Name : "default of " + use.Name);
 
                 if (index < matchCount)
                 {
@@ -395,6 +398,7 @@ namespace MiiXRay.Generate
             }
 
             _loops.Add(loop);
+            _flow.Add("loop " + use.Name);
             List<string> body = new List<string>();
 
             if (loop.BreakVariable != null)
@@ -418,6 +422,7 @@ namespace MiiXRay.Generate
             }
 
             _loops.RemoveAt(_loops.Count - 1);
+            _flow.RemoveAt(_flow.Count - 1);
 
             lines.Add(header);
             lines.Add("{");
@@ -512,6 +517,29 @@ namespace MiiXRay.Generate
             {
                 return null;
             }
+        }
+
+        /// <summary>A branch step with its flow context for the call tree (null = no context, e.g. an always-true condition).</summary>
+        private List<string> EmitBranch(List<MiiStep> children, int index, string context)
+        {
+            if (index >= children.Count)
+            {
+                return new List<string>();
+            }
+
+            if (context != null)
+            {
+                _flow.Add(context);
+            }
+
+            List<string> lines = EmitStep(children[index]);
+
+            if (context != null)
+            {
+                _flow.RemoveAt(_flow.Count - 1);
+            }
+
+            return lines;
         }
 
         // ------------------------------------------------------------------ helpers

@@ -114,6 +114,8 @@ namespace MiiXRay.Generate
             lines.Add("//");
             lines.Add("// Entry point: " + root.ClassName + ".Execute(request, queryService, pluginService)");
             lines.Add("//");
+            lines.AddRange(ReadingRules());
+            lines.Add("//");
             lines.Add("// Transactions (" + context.Graph.Transactions.Count + "):");
 
             foreach (MiiTransaction transaction in context.Graph.Transactions)
@@ -121,19 +123,23 @@ namespace MiiXRay.Generate
                 lines.Add("//   " + context.Transactions[transaction].ClassName + " = " + transaction.Path);
             }
 
+            lines.Add("//");
+            lines.Add("// Call tree (execution order; [if X], [else X], [case n of X], [loop X] = once per item, [on error X] = in the handler of the catch X):");
+            lines.Add("//   " + root.ClassName);
+            CallTree(root, "//     ", new List<TransactionContract>(), lines);
+
             if (context.Graph.Queries.Count > 0)
             {
+                lines.Add("//");
                 lines.Add("// Queries (" + context.Graph.Queries.Count + "):");
 
                 foreach (MiiQuery query in context.Graph.Queries)
                 {
-                    QueryContract contract = context.Queries[query];
-                    string kind = query.Kind == MiiQueryKind.Xacute ? "Xacute query, runs its transaction"
-                        : query.Kind == MiiQueryKind.Xml ? "XML query, via IPluginService" : query.RootName + " " + query.Mode;
-                    lines.Add("//   " + contract.ClassName + " = " + query.Path + " (" + kind + ")");
+                    lines.AddRange(QueryOverview(context.Queries[query]));
                 }
             }
 
+            lines.Add("//");
             if (context.Graph.Missing.Count > 0)
             {
                 lines.Add("// Not found (called through IPluginService instead):");
@@ -156,6 +162,93 @@ namespace MiiXRay.Generate
 
             lines.Add(rule);
             lines.Add(string.Empty);
+            return lines;
+        }
+
+        private static List<string> ReadingRules()
+        {
+            List<string> lines = new List<string>();
+            lines.Add("// How to read this file:");
+            lines.Add("//   - Every MII transaction is a static class: Execute(request, ...) is its logic, Request and Response its");
+            lines.Add("//     interface (Request holds the MII default values). A transaction call is a plain static method call.");
+            lines.Add("//   - Queries run through IQueryService. MII replaces [Param.N] in the query text by the value as text, there");
+            lines.Add("//     are no bind variables; quoting and escaping are done by the callers (e.g. Mii.StringReplace(x, \"'\", \"''\")).");
+            lines.Add("//   - A catch handles every action before it in the same block (MII Catch). TransactionTerminatedException is");
+            lines.Add("//     MII's Terminate Transaction: it ends the transaction, its own catch blocks pass it on to the caller.");
+            lines.Add("//   - Text is true as a boolean for \"true\" or \"1\"; the Mii class at the end implements every MII function used.");
+            lines.Add("//   - Improvements must keep the interfaces and the behaviour (sorting, empty checks, returned values) unless a");
+            lines.Add("//     change is asked for; list every behaviour change separately.");
+            lines.Add("//   - The notes below are problems of the MII objects themselves (stale links, undeclared properties); the code");
+            lines.Add("//     keeps them as they are.");
+            return lines;
+        }
+
+        /// <summary>The calls of a transaction, recursively; a transaction already shown is not expanded again.</summary>
+        private static void CallTree(TransactionContract contract, string indent, List<TransactionContract> expanded, List<string> lines)
+        {
+            expanded.Add(contract);
+
+            foreach (OutlineEntry entry in contract.Outline)
+            {
+                string loops = entry.Flow.Length > 0 ? "  [" + entry.Flow + "]" : string.Empty;
+                string action = " (" + entry.ActionName + ")";
+
+                if (entry.Kind == "call" && entry.Callee != null && expanded.Contains(entry.Callee))
+                {
+                    lines.Add(indent + "call   " + entry.Target + action + loops + "  - shown above");
+                    continue;
+                }
+
+                lines.Add(indent + entry.Kind.PadRight(6) + " " + entry.Target + action + loops);
+
+                if (entry.Kind == "call" && entry.Callee != null)
+                {
+                    CallTree(entry.Callee, indent + "    ", expanded, lines);
+                }
+            }
+        }
+
+        private static List<string> QueryOverview(QueryContract contract)
+        {
+            MiiQuery query = contract.Query;
+            List<string> lines = new List<string>();
+            string kind = query.Kind == MiiQueryKind.Xacute ? "Xacute query, runs its transaction"
+                : query.Kind == MiiQueryKind.Xml ? "XML query, via IPluginService" : query.RootName + " " + query.Mode;
+            lines.Add("//   " + contract.ClassName + " = " + query.Path + " (" + kind + ")");
+
+            if (contract.Parameters.Count > 0)
+            {
+                List<string> parameters = new List<string>();
+
+                foreach (QueryParameterSpec parameter in contract.Parameters)
+                {
+                    parameters.Add("[Param." + parameter.Slot.ToString(CultureInfo.InvariantCulture) + "] " + parameter.PropertyName);
+                }
+
+                lines.Add("//     parameters: " + string.Join(", ", parameters.ToArray()));
+            }
+
+            lines.Add("//     run by: " + (contract.Callers.Count > 0 ? string.Join("; ", contract.Callers.ToArray()) : "(no action of these transactions)"));
+
+            if (contract.Result != null)
+            {
+                List<string> read = new List<string>();
+                List<string> unread = new List<string>();
+
+                foreach (RowsetColumn column in contract.Result.Columns)
+                {
+                    (column.Read ? read : unread).Add(column.Name);
+                }
+
+                lines.Add("//     columns read by name: " + (read.Count > 0 ? string.Join(", ", read.ToArray()) : "none"));
+
+                if (unread.Count > 0)
+                {
+                    lines.Add("//     columns not read by name: " + string.Join(", ", unread.ToArray())
+                        + (contract.Result.PassedOnWhole ? " (the result is also passed on as a whole, so they may be used further on)" : string.Empty));
+                }
+            }
+
             return lines;
         }
 

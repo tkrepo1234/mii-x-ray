@@ -223,6 +223,11 @@ namespace MiiXRay.Generate
 
             if (reference.Selector == null)
             {
+                if (baseCode.Type.Contract != null)
+                {
+                    baseCode.Type.Contract.PassedOnWhole = true;
+                }
+
                 return baseCode;
             }
 
@@ -328,6 +333,7 @@ namespace MiiXRay.Generate
             if (match.Success)
             {
                 RowsetColumn filter = contract.Ensure(match.Groups[1].Value);
+                filter.Read = true;
                 string row = target + ".FirstRowWhere(" + CsLiteral.String(filter.Name) + ", " + CsLiteral.String(match.Groups[2].Value) + ")";
                 return ColumnAccess(row, contract, match.Groups[3].Value, baseCode, pathLiteral);
             }
@@ -343,6 +349,7 @@ namespace MiiXRay.Generate
         private static TypedCode ColumnAccess(string row, RowsetContract contract, string columnName, TypedCode baseCode, string pathLiteral)
         {
             RowsetColumn column = contract.Ensure(columnName);
+            column.Read = true;
             TypedCode result = TypedCode.Primary(row + "." + column.PropertyName, column.Type);
             result.XmlCode = "Mii.SelectXml(" + baseCode.Code + ", " + pathLiteral + ")";
             return result;

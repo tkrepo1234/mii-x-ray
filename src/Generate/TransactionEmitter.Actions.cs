@@ -251,6 +251,8 @@ namespace MiiXRay.Generate
 
         private List<string> EmitCall(MiiActionUse use, ActionSymbol symbol)
         {
+            Record(use, symbol);
+
             switch (symbol.Kind)
             {
                 case ActionKind.TransactionCall:
@@ -263,6 +265,35 @@ namespace MiiXRay.Generate
                 default:
                     return EmitPluginCall(use, symbol);
             }
+        }
+
+        /// <summary>Notes the call for the call tree and the query overview of the file header.</summary>
+        private void Record(MiiActionUse use, ActionSymbol symbol)
+        {
+            OutlineEntry entry = new OutlineEntry();
+            entry.ActionName = use.Name;
+            entry.Flow = string.Join(" > ", _flow.ToArray());
+            entry.Callee = symbol.Callee;
+
+            if (symbol.Query != null)
+            {
+                entry.Kind = symbol.Callee != null ? "call" : "query";
+                entry.Target = symbol.Callee != null ? symbol.Callee.ClassName + " via Xacute query " + symbol.Query.ClassName : symbol.Query.ClassName;
+                symbol.Query.Callers.Add(_contract.ClassName + "." + use.Name + (entry.Flow.Length > 0 ? " [" + entry.Flow + "]" : string.Empty));
+            }
+            else if (symbol.Callee != null)
+            {
+                entry.Kind = "call";
+                entry.Target = symbol.Callee.ClassName;
+            }
+            else
+            {
+                entry.Kind = "plugin";
+                string transaction = use.Definition.Static("TransactionName");
+                entry.Target = use.Definition.ActionType + (transaction.Length > 0 ? " " + transaction : string.Empty);
+            }
+
+            _contract.Outline.Add(entry);
         }
 
         private List<string> EmitTransactionCall(MiiActionUse use, ActionSymbol symbol)
