@@ -77,7 +77,7 @@ A server profile without saved password reads it from the environment variable `
 | the transactions | one class `TrxNameLogic(IQueryService queries, IPluginService plugins)` with one method per transaction; the root is public, the transactions it calls are private |
 | inputs / outputs | method parameters (optional, without MII defaults) / the return value: the only output, or a record `TrxNameResult(...)` |
 | transaction call, dynamic call with a literal name | `var result = TrxCallee(input: value, ...)` with named arguments |
-| local variable | local variable; a local the flow never writes keeps its MII value (an XSLT, a map of options) |
+| local variable | local variable; a local the flow never replaces as a whole keeps its MII value (an XSLT, a map of options, a request template only edited at XPaths) |
 | SQL / MDO query template | a local `var sqlName = new Query("""...""")`, `sqlName.AddParameter("Site", value)` and `queries.Execute<SqlNameRow>(sqlName)`; a comment maps `[Param.N]` to the names, the text stays as in MII |
 | Xacute query | a call of the transaction it wraps (`Param.N` -> mapped input, `Results` -> selected output) |
 | rowset XML (`Rowsets/Rowset/Row`) | `List<XRow>` of row records; columns from reference documents, the cached results of query actions (with SQL types), the SQL select list and every column the transactions read |

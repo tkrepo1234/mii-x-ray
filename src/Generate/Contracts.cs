@@ -367,7 +367,7 @@ namespace MiiXRay.Generate
             {
                 PropertySpec local = Property(context, contract, parameter);
 
-                // a local the flow never writes is configuration (an XSLT, a map of options): it keeps its MII value
+                // a local the flow never replaces as a whole is configuration or a template: it keeps its MII value
                 bool configuration = !written.ContainsKey(parameter.Name) && local.Type.Kind != TypeKind.Rowset && parameter.DefaultText.Trim().Length > 0;
                 local.Initializer = configuration
                     ? Initializer(local.Type, local.Type.Kind == TypeKind.Xml ? XmlSample.Shrink(parameter.DefaultText) : parameter.DefaultText)
@@ -376,6 +376,8 @@ namespace MiiXRay.Generate
             }
         }
 
+        /// <summary>Locals the flow replaces as a whole. A local only edited at an XPath (SetXPathValue, AppendXml,
+        /// RemoveXml...) is a template: it keeps its MII value, otherwise the edits would work on an empty document.</summary>
         private static Dictionary<string, bool> WrittenLocals(MiiTransaction transaction)
         {
             Dictionary<string, bool> written = new Dictionary<string, bool>();
@@ -388,7 +390,12 @@ namespace MiiXRay.Generate
                     {
                         string name = link.To.Substring("Local.".Length);
                         int brace = name.IndexOf('{');
-                        written[brace >= 0 ? name.Substring(0, brace) : name] = true;
+                        string selector = brace >= 0 ? name.Substring(brace + 1, Math.Max(name.LastIndexOf('}') - brace - 1, 0)).Trim() : "";
+
+                        if (selector.Length == 0 && (link.Kind == "Assign" || link.Kind == "AssignXml" || link.Kind == "ReplaceXml"))
+                        {
+                            written[brace >= 0 ? name.Substring(0, brace) : name] = true;
+                        }
                     }
                 }
             }

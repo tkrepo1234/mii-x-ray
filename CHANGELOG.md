@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.1.2 - 2026-10-08
+
+- A local the flow only edits at an XPath (set a value, append, remove) keeps its MII value: request templates and
+  XSLTs whose `xsl:param`s the flow sets were shown as `new()`, so their content was missing. Only a write that
+  replaces the whole local (Assign / AssignXml / ReplaceXml without XPath) empties it, as before. Corpus: 42 locals in
+  39 of 526 transactions now show their template; everything else is unchanged.
+
 ## 2.1.1 - 2026-10-07
 
 - The web page reads only the MII server it comes from; the export folder source is test-only

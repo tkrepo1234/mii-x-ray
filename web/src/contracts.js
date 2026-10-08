@@ -258,7 +258,7 @@ function buildInterface(context, contract) {
 
   for (const parameter of transaction.locals) {
     const local = property(context, contract, parameter);
-    // a local the flow never writes is configuration (an XSLT, a map of options): it keeps its MII value
+    // a local the flow never replaces as a whole is configuration or a template: it keeps its MII value
     const configuration = !written.has(parameter.name) && local.type.kind !== TypeKind.Rowset && parameter.defaultText.trim().length > 0;
     local.initializer = configuration
       ? ContractBuilder.initializer(local.type, local.type.kind === TypeKind.Xml ? shrinkXmlSample(parameter.defaultText) : parameter.defaultText)
@@ -267,6 +267,8 @@ function buildInterface(context, contract) {
   }
 }
 
+/** Locals the flow replaces as a whole. A local only edited at an XPath (SetXPathValue, AppendXml, RemoveXml...) is a
+ * template: it keeps its MII value, otherwise the edits would work on an empty document. */
 function writtenLocals(transaction) {
   const written = new Set();
 
@@ -275,13 +277,19 @@ function writtenLocals(transaction) {
       if (link.to.startsWith('Local.')) {
         const name = link.to.substring('Local.'.length);
         const brace = name.indexOf('{');
-        written.add(brace >= 0 ? name.substring(0, brace) : name);
+        const selector = brace >= 0 ? name.substring(brace + 1, Math.max(name.lastIndexOf('}'), brace + 1)).trim() : '';
+
+        if (selector.length === 0 && WHOLE_WRITES.includes(link.kind)) {
+          written.add(brace >= 0 ? name.substring(0, brace) : name);
+        }
       }
     }
   }
 
   return written;
 }
+
+const WHOLE_WRITES = ['Assign', 'AssignXml', 'ReplaceXml'];
 
 function property(context, contract, parameter) {
   return new PropertySpec(parameter.name, contract.localNames.claim(Naming.camel(parameter.name)), typeOf(context, contract, parameter), parameter.description);
