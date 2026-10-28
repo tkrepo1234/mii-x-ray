@@ -8,6 +8,7 @@ export class FolderSource {
     this.description = 'export folder ' + name;
     this._bySuffix = new Map();
     this._allPaths = [];
+    this._everyFile = files;
     const sorted = files.filter((file) => ObjectPath.isKnownExtension(file.path)).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 
     for (const file of sorted) {
@@ -52,6 +53,13 @@ export class FolderSource {
     }
 
     return null;
+  }
+
+  /** A web or Meta-Inf file by its Catalog path (Project/WEB/...), found by its unique path suffix. */
+  async loadFile(filePath) {
+    const wanted = '/' + filePath.replace(/\\/g, '/').replace(/^\/+/, '').toLowerCase();
+    const hits = this._everyFile.filter((file) => ('/' + file.path.replace(/\\/g, '/').toLowerCase()).endsWith(wanted));
+    return hits.length === 1 ? hits[0].read() : null;
   }
 
   async findSimilar(objectPath, maximum) {

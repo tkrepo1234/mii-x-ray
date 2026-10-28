@@ -197,6 +197,39 @@ export class CatalogSource {
     return { canonicalPath: path, text };
   }
 
+  /** A web or Meta-Inf file (Project/WEB/..., Project/META-INF/...) as text exactly as the Catalog returns it; null
+   * when it does not exist (MII answers a FatalError; Exists is not documented for Meta-Inf files). */
+  async loadFile(filePath) {
+    const path = (filePath || '').trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+
+    if (path.length === 0) {
+      return null;
+    }
+
+    const text = await this._post({ Mode: 'Load', ObjectName: path, TemporaryFile: 'false', _: String(Date.now()) });
+    const answer = text.includes('FatalError') ? tryParseXml(text) : null;
+    return answer && answer.documentElement.localName === 'Rowsets' && descendants(answer, 'FatalError').length > 0 ? null : text;
+  }
+
+  /** The running values of a project's shared properties (Catalog GetRuntimePropertyList, unverified mode); null when
+   * the server gives no XML answer or reports an error. */
+  async loadRuntimeProperties(project) {
+    let text;
+
+    try {
+      text = await this._post({ Mode: 'GetRuntimePropertyList', Project: project, 'Content-Type': 'text/xml', _: String(Date.now()) });
+    } catch (error) {
+      if (error instanceof SourceError) {
+        return null;
+      }
+
+      throw error;
+    }
+
+    const answer = tryParseXml(text);
+    return answer && answer.documentElement && descendants(answer, 'FatalError').length === 0 ? text : null;
+  }
+
   async findSimilar(objectPath, maximum) {
     let folder = ObjectPath.folder(objectPath);
     let candidates = [];

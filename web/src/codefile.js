@@ -7,7 +7,7 @@ import { addBlankLines } from './placer.js';
 import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
 import { ObjectPath } from './sources.js';
 
-export const TOOL_VERSION = '2.2.1';
+export const TOOL_VERSION = '2.3.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 

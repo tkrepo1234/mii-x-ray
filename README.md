@@ -23,6 +23,15 @@ gives one file with everything below it, subfolders included: one public method 
 transactions they call outside the folder as private methods, query templates no transaction runs as public methods,
 and a call tree per entry point.
 
+**Raw ZIP.** Next to `<Name>.xray.cs`, **Raw ZIP** downloads `<Name>.xray.zip` with what the C# file cannot carry:
+every transaction and query template exactly as the Catalog returned it, by MII path with the extension of its class
+(`.trx`, `.tqsq`, `.tqxc`, ...), the web files the transactions name (stylesheet of an XSL transformation, document
+of an XML loader, schema of an XSD validation, URL of an XML query: `db://P/WEB/...`, `/XMII/CM/P/...`) under
+`<Project>/WEB/`, and per project `META-INF/SharedProperties.mem` (definitions and default values). Where the server
+answers Catalog `GetRuntimePropertyList` (unverified mode), the running values come as
+`META-INF/SharedProperties.runtime.xml`. `xray-manifest.txt` lists the files and what is missing or computed at
+runtime (`#...#` in a path).
+
 Deploy: in the MII Workbench, open the **Web** tab of a project, import `mii-x-ray.html` into a folder and open
 `https://<mii-server>/XMII/CM/<Project>/<Folder>/mii-x-ray.html`. The page reads transactions through the Catalog
 service with the signed-in user's session (the user needs access to the Catalog service, e.g. SAP_XMII_Developer);
@@ -34,6 +43,7 @@ file it does nothing. The last transactions are kept in the browser (local stora
 node web/build.mjs                                   builds web/dist/mii-x-ray.html from web/src
 node web/test/corpus.mjs <export folder> <work folder>  every transaction and every folder X-rayed and compiled as C# 12
 node web/test/equivalence.mjs <export folder> <C# output of --all>    JS against the C# console (2.1.x only)
+node web/test/rawzip.mjs <export folder> <work folder> <folder>...  raw ZIP unpacked with tar and compared
 node web/test/serve.mjs 5300 http://localhost:50100 dev:dev           the page at /XMII/CM/XRay/ with a Catalog proxy
 
 web/test/folder-source.js reads an export folder; it serves the tests only and is not part of the page.

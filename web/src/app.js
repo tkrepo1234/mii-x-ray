@@ -3,11 +3,12 @@ import { CatalogSource, SourceError, ObjectPath } from './sources.js';
 import { DependencyResolver } from './resolver.js';
 import { generateCode } from './codefile.js';
 import { RUNTIME_SOURCE } from './runtime.js';
+import { collectRawFiles, buildZip } from './rawexport.js';
 
 const RECENT_KEY = 'mii-x-ray.recent';
 const $ = (id) => document.getElementById(id);
 
-const state = { source: null, result: null, busy: false };
+const state = { source: null, result: null, raw: null, busy: false };
 
 function readRecent() {
   try {
@@ -101,6 +102,8 @@ async function xray() {
     }
 
     state.result = generateCode(graph, source.description, RUNTIME_SOURCE, new Date());
+    setStatus('Loading web files and shared properties …');
+    state.raw = await collectRawFiles(graph, source, () => {});
     remember(path);
     showResult();
     setStatus('');
@@ -150,7 +153,15 @@ async function copy() {
 
 function download() {
   const blob = new Blob(['﻿' + state.result.code], { type: 'text/plain;charset=utf-8' });
-  const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: state.result.rootName + '.xray.cs' });
+  save(blob, state.result.rootName + '.xray.cs');
+}
+
+function downloadRaw() {
+  save(new Blob([buildZip(state.raw, new Date())], { type: 'application/zip' }), state.result.rootName + '.xray.zip');
+}
+
+function save(blob, name) {
+  const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -166,6 +177,7 @@ function start() {
   });
   $('copy').addEventListener('click', copy);
   $('download').addEventListener('click', download);
+  $('download-raw').addEventListener('click', downloadRaw);
   showRecent();
 
   if (!onServer()) {

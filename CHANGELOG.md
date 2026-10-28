@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.3.0 - 2026-10-28
+
+- **Raw ZIP** next to the C# file (`<Name>.xray.zip`): the loaded transactions and query templates exactly as the
+  Catalog returned them (exact names, default values, XML documents, all action and template settings), the web
+  files they name (XSLT, XML, XSD) under `<Project>/WEB/`, `META-INF/SharedProperties.mem` per project and, where the
+  server answers `GetRuntimePropertyList`, the running values. `xray-manifest.txt` lists what is missing. Stored ZIP
+  written by the page itself, no library.
+- `web/test/rawzip.mjs`: X-Rays folders, unpacks the ZIP with tar and compares every entry; a fixture checks a
+  stylesheet named by a link and by `/XMII/CM/...`.
+
+## 2.2.1 - 2026-10-28
+
+- Transactions load in batches (Catalog `LoadMultipleObjects`); a batch with a missing object is halved until the
+  missing one is alone.
+
 ## 2.2.0 - 2026-10-28
 
 The web page (leading version) X-Rays whole folders and follows the verified runtime behaviour of the SAP

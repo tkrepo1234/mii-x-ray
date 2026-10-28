@@ -15,6 +15,7 @@ export class ObjectGraph {
     this.transactionsByReference = new Map(); // lower-case normalized reference -> transaction
     this.queriesByReference = new Map();
     this.missing = [];
+    this.rawObjects = []; // { path, rootName, text }: every object exactly as the source returned it
   }
 
   findTransaction(reference) {
@@ -271,6 +272,7 @@ export class DependencyResolver {
     }
 
     let result;
+    this._graph.rawObjects.push({ path: key, rootName: document.documentElement ? document.documentElement.localName : '', text: loaded.text });
 
     if (ObjectReader.isTransaction(document)) {
       const transaction = ObjectReader.readTransaction(key, document);
