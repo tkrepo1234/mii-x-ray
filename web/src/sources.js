@@ -148,7 +148,19 @@ export class CatalogSource {
 
   /** Object paths below a folder (recursive). */
   async listObjects(folder) {
-    const document = parseAnswer(await this._post({ Mode: 'LoadFilesInsideFolderAndSubfolders', Folder: folder, 'Content-Type': 'text/xml' }));
+    return (await this.folderObjects(folder)).map((entry) => entry.path);
+  }
+
+  /** Whether a path names a folder (Catalog Exists answers 1 for an object, 2 for a folder, 0 for nothing). */
+  async isFolder(objectPath) {
+    const path = ObjectPath.normalize(objectPath);
+    return path.length > 0 && (await this._existsCode(path)) === '2';
+  }
+
+  /** The transactions and query templates below a folder (recursive) as { path, type }; type is 'Transaction' or
+   * 'QueryTemplate' (Catalog LoadFilesInsideFolderAndSubfolders, which lists no web files). */
+  async folderObjects(folder) {
+    const document = parseAnswer(await this._post({ Mode: 'LoadFilesInsideFolderAndSubfolders', Folder: ObjectPath.normalize(folder), 'Content-Type': 'text/xml' }));
     const result = [];
 
     for (const row of descendants(document, 'Row')) {
@@ -156,7 +168,8 @@ export class CatalogSource {
       const objectName = MiiXml.childText(row, 'ObjectName').trim();
 
       if (objectName.length > 0) {
-        result.push(ObjectPath.normalize(filePath.length > 0 ? filePath + '/' + objectName : objectName));
+        const type = MiiXml.childText(row, 'Type').trim();
+        result.push({ path: ObjectPath.normalize(filePath.length > 0 ? filePath + '/' + objectName : objectName), type: type.length > 0 ? type : typeOfName(objectName) });
       }
     }
 
@@ -164,9 +177,13 @@ export class CatalogSource {
   }
 
   async _exists(path) {
+    return (await this._existsCode(path)) === '1';
+  }
+
+  async _existsCode(path) {
     const document = parseAnswer(await this._post({ Mode: 'Exists', ObjectName: path, 'Content-Type': 'text/xml', _: String(Date.now()) }));
     const messages = descendants(document, 'Message');
-    return messages.length > 0 && messages[0].innerText.trim() === '1';
+    return messages.length > 0 ? messages[0].innerText.trim() : '0';
   }
 
   async _post(form, retried) {
@@ -201,6 +218,11 @@ export class CatalogSource {
 
     return response.text();
   }
+}
+
+/** The object type by file extension, for answers without a Type column. */
+export function typeOfName(name) {
+  return name.toLowerCase().endsWith('.trx') ? 'Transaction' : ObjectPath.isKnownExtension(name) ? 'QueryTemplate' : '';
 }
 
 function parseAnswer(text) {

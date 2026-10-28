@@ -7,6 +7,9 @@ import { parseXml, XmlParseError } from './xml.js';
 export class ObjectGraph {
   constructor() {
     this.root = null;
+    this.roots = []; // the public methods: the root transaction, or every transaction of the folder
+    this.folder = null; // the folder of a folder X-Ray
+    this.folderQueries = []; // the query templates of that folder
     this.transactions = []; // discovery order, root first
     this.queries = [];
     this.transactionsByReference = new Map(); // lower-case normalized reference -> transaction
@@ -61,7 +64,47 @@ export class DependencyResolver {
     }
 
     this._graph.root = root;
+    this._graph.roots = [root];
+    await this._followPending();
+    return this._graph;
+  }
 
+  /** A whole folder: every transaction and query template below it (entries { path, type } of the folder listing),
+   * and everything they reach. Null when none of them can be read. */
+  async resolveFolder(folder, entries) {
+    const byPath = (a, b) => (a.path.toLowerCase() < b.path.toLowerCase() ? -1 : a.path.toLowerCase() > b.path.toLowerCase() ? 1 : 0);
+    const sorted = entries.slice().sort(byPath);
+    this._graph.folder = ObjectPath.normalize(folder);
+    this._graph.roots = [];
+    this._graph.folderQueries = [];
+
+    for (const entry of sorted.filter((item) => item.type === 'Transaction')) {
+      const transaction = await this._loadTransaction(entry.path);
+
+      if (transaction && !this._graph.roots.includes(transaction)) {
+        this._graph.roots.push(transaction);
+      }
+    }
+
+    for (const entry of sorted.filter((item) => item.type !== 'Transaction')) {
+      await this._loadQuery(entry.path);
+      const query = this._graph.findQuery(entry.path);
+
+      if (query && !this._graph.folderQueries.includes(query)) {
+        this._graph.folderQueries.push(query);
+      }
+    }
+
+    if (this._graph.roots.length === 0 && this._graph.folderQueries.length === 0) {
+      return null;
+    }
+
+    this._graph.root = this._graph.roots.length > 0 ? this._graph.roots[0] : null;
+    await this._followPending();
+    return this._graph;
+  }
+
+  async _followPending() {
     while (this._pending.length > 0) {
       const transaction = this._pending.shift();
 
@@ -69,8 +112,6 @@ export class DependencyResolver {
         await this._followAction(transaction, action);
       }
     }
-
-    return this._graph;
   }
 
   async _followAction(owner, action) {

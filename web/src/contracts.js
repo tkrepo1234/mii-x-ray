@@ -157,7 +157,8 @@ export class GenerationContext {
 
 export const ContractBuilder = {
   build(context) {
-    context.className = context.typeNames.claim(Naming.pascal(context.graph.root.shortName).replace(/^@/, '') + 'Logic');
+    const baseName = context.graph.folder !== null ? ObjectPath.leaf(context.graph.folder) : context.graph.root.shortName;
+    context.className = context.typeNames.claim(Naming.pascal(baseName).replace(/^@/, '') + 'Logic');
 
     for (const transaction of context.graph.transactions) {
       context.transactions.set(transaction, new TransactionContract(transaction, claimName(context.methodNames, transaction.path)));

@@ -61,7 +61,7 @@ async function xray() {
   $('similar').replaceChildren();
 
   if (path.length === 0) {
-    setStatus('Enter a transaction path, e.g. PROJECT/Folder/trxName.', 'warning');
+    setStatus('Enter a transaction or folder path, e.g. PROJECT/Folder/trxName or PROJECT/Folder.', 'warning');
     return;
   }
 
@@ -78,10 +78,16 @@ async function xray() {
         setStatus('Loading ' + path + ' … ' + loaded + ' object' + (loaded === 1 ? '' : 's'));
       }
     });
-    const graph = await resolver.resolve(path);
+    const folder = await source.isFolder(path);
+    const graph = folder ? await resolver.resolveFolder(path, await source.folderObjects(path)) : await resolver.resolve(path);
 
     if (!graph) {
-      setStatus(path + ' was not found or is no transaction.', 'error');
+      setStatus(folder ? 'The folder ' + path + ' contains no transaction or query template.' : path + ' was not found or is no transaction.', 'error');
+
+      if (folder) {
+        return;
+      }
+
       const similar = await source.findSimilar(path, 8);
       $('similar').replaceChildren(...similar.map((candidate) => {
         const button = Object.assign(document.createElement('button'), { type: 'button', className: 'link', textContent: candidate });
@@ -114,6 +120,10 @@ async function xray() {
 function showResult() {
   const result = state.result;
   const parts = [result.transactionCount + ' transaction' + (result.transactionCount === 1 ? '' : 's'), result.queryCount + ' quer' + (result.queryCount === 1 ? 'y' : 'ies')];
+
+  if (result.folder !== null) {
+    parts.unshift('folder ' + result.folder);
+  }
 
   if (result.missing.length > 0) {
     parts.push(result.missing.length + ' not found');

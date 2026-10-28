@@ -4,7 +4,8 @@ import { MiiQueryKind } from './model.js';
 import { GenerationContext, ContractBuilder } from './contracts.js';
 import { TransactionEmitter, indent } from './emitter.js';
 import { addBlankLines } from './placer.js';
-import { TypeKind } from './types.js';
+import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
+import { ObjectPath } from './sources.js';
 
 export const TOOL_VERSION = '2.1.2';
 
@@ -20,12 +21,30 @@ export function generateCode(graph, sourceDescription, runtimeText, now) {
 
   for (const transaction of graph.transactions) {
     const contract = context.transactions.get(transaction);
-    methods.push('', ...new TransactionEmitter(context, contract).emitMethod(transaction === graph.root));
+    methods.push('', ...new TransactionEmitter(context, contract).emitMethod(graph.roots.includes(transaction)));
   }
 
-  const root = context.transactions.get(graph.root);
+  const folderMode = graph.folder !== null;
+  const root = graph.root ? context.transactions.get(graph.root) : null;
+  const fileName = folderMode ? Naming.pascal(ObjectPath.leaf(graph.folder)).replace(/^@/, '') : root.methodName;
+  const queryMethods = [];
+
+  // query templates of the folder that no transaction runs: a public method each
+  for (const query of graph.folderQueries) {
+    const contract = context.queries.get(query);
+
+    if (contract.callers.length === 0 && (query.kind === MiiQueryKind.Sql || query.kind === MiiQueryKind.Mdo)) {
+      const methodName = context.methodNames.claim(Naming.pascal(query.shortName).replace(/^@/, ''));
+      queryMethods.push(methodName);
+      methods.push('', ...queryMethod(contract, methodName));
+    }
+  }
+
+  const summary = folderMode
+    ? 'The logic of the folder ' + xmlText(graph.folder) + ': its transactions and query templates (public) and every transaction they call, one method each.'
+    : 'The logic of ' + xmlText(root.transaction.path) + ' and of every transaction it calls, one method each.';
   const lines = [
-    ...header(context, root, sourceDescription, now),
+    ...(folderMode ? folderHeader(context, queryMethods, sourceDescription, now) : header(context, root, sourceDescription, now)),
     '#nullable disable',
     '',
     'using System;',
@@ -40,10 +59,10 @@ export function generateCode(graph, sourceDescription, runtimeText, now) {
     'using System.Xml;',
     'using System.Xml.Xsl;',
     '',
-    'namespace XRay.' + root.methodName + ';',
+    'namespace XRay.' + fileName + ';',
     '',
     '/// <summary>',
-    '/// The logic of ' + xmlText(root.transaction.path) + ' and of every transaction it calls, one method each.',
+    '/// ' + summary,
     '/// </summary>',
     'public sealed class ' + context.className + '(IQueryService queries, IPluginService plugins)',
     '{',
@@ -57,7 +76,8 @@ export function generateCode(graph, sourceDescription, runtimeText, now) {
   const code = addBlankLines(lines).join('\n').replace(/\r\n/g, '\n');
   return {
     code: code.replace(/\n/g, '\r\n') + '\r\n',
-    rootName: root.methodName,
+    rootName: fileName,
+    folder: graph.folder,
     transactionCount: graph.transactions.length,
     queryCount: graph.queries.length,
     missing: graph.missing.slice(),
@@ -91,10 +111,72 @@ function header(context, root, sourceDescription, now) {
   }
 
   lines.push('//');
-  lines.push('// Call tree (execution order; [if X], [else X], [case n of X], [loop X] = once per item, [on error X] = in the handler of the catch X):');
+  lines.push(CALL_TREE_TITLE);
   lines.push('//   ' + root.methodName);
   callTree(root, '//     ', [], lines);
+  return headerTail(context, lines, rule);
+}
 
+const CALL_TREE_TITLE = '// Call tree (execution order; [if X], [else X], [case n of X], [loop X] = once per item, [on error X] = in the handler of the catch X):';
+
+/** The header of a folder X-Ray: every transaction of the folder is an entry point. */
+function folderHeader(context, queryMethods, sourceDescription, now) {
+  const graph = context.graph;
+  const rule = '// ' + '='.repeat(110);
+  const pad = (value) => String(value).padStart(2, '0');
+  const stamp = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate()) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
+  const roots = graph.roots.map((transaction) => context.transactions.get(transaction));
+  const lines = [
+    rule,
+    '// MII X-Ray of the folder ' + graph.folder + ' (with its subfolders)',
+    '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
+    '//',
+    '// The logic of every transaction and query template in the folder and of every transaction and query they use, as',
+    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII runtime settings and default values are left',
+    '// out, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
+    '// through IPluginService. The Mii class at the end implements the MII expression functions and the XML handling.',
+    '//',
+    '// Entry points: new ' + context.className + '(queries, plugins).<Method>(...), one public method per transaction of the',
+    '// folder (' + roots.length + ')' + (queryMethods.length > 0 ? ' and per query template of the folder that no transaction runs (' + queryMethods.length + ')' : '')
+      + '; the other methods are transactions outside the folder that these call.',
+    '//',
+    ...readingRules(),
+    '//',
+    '// Transactions (' + graph.transactions.length + ', ' + roots.length + ' in the folder):',
+  ];
+
+  for (const transaction of graph.transactions) {
+    lines.push('//   ' + context.transactions.get(transaction).methodName + ' = ' + transaction.path + (graph.roots.includes(transaction) ? '' : '  (outside the folder)'));
+  }
+
+  if (queryMethods.length > 0) {
+    lines.push('//', '// Query templates of the folder that no transaction runs (a public method each): ' + queryMethods.join(', '));
+  }
+
+  if (roots.length > 0) {
+    // one tree per transaction no other transaction calls; a transaction already shown is not expanded again
+    const called = new Set();
+    context.transactions.forEach((contract) => contract.outline.forEach((entry) => {
+      if (entry.callee && entry.callee !== contract) {
+        called.add(entry.callee);
+      }
+    }));
+    const expanded = [];
+    lines.push('//', CALL_TREE_TITLE);
+
+    for (const contract of roots.filter((candidate) => !called.has(candidate)).concat(roots.filter((candidate) => called.has(candidate)))) {
+      if (!expanded.includes(contract)) {
+        lines.push('//   ' + contract.methodName);
+        callTree(contract, '//     ', expanded, lines);
+      }
+    }
+  }
+
+  return headerTail(context, lines, rule);
+}
+
+/** Queries, objects not found and notes: the end of both headers. */
+function headerTail(context, lines, rule) {
   if (context.graph.queries.length > 0) {
     lines.push('//', '// Queries (' + context.graph.queries.length + '):');
 
@@ -114,6 +196,37 @@ function header(context, root, sourceDescription, now) {
   }
 
   lines.push(rule, '');
+  return lines;
+}
+
+/** A query template no transaction runs, as a method: its parameters are the query parameters. */
+function queryMethod(contract, methodName) {
+  const query = contract.query;
+  const names = new UniqueNames();
+  ['queries', 'plugins'].forEach((name) => names.reserve(name));
+  const parameters = contract.parameters.map((parameter) => ({ parameter, name: names.claim(Naming.camel(parameter.name)) }));
+  const variable = names.claim(contract.variableName);
+  const command = query.mode.toLowerCase() === 'command';
+  const head = 'public ' + (command ? 'void' : contract.result.rowsetTypeName) + ' ' + methodName + '(';
+  const declarations = parameters.map((item) => 'string ' + item.name + ' = default');
+  const lines = ['/// <summary>', '/// ' + xmlText(query.path) + ' (query template, no transaction runs it)', '/// </summary>'];
+
+  if (declarations.length <= 3) {
+    lines.push(head + declarations.join(', ') + ')');
+  } else {
+    lines.push(head, ...declarations.map((declaration, index) => '    ' + declaration + (index < declarations.length - 1 ? ',' : ')')));
+  }
+
+  const body = [];
+
+  if (parameters.length > 0) {
+    body.push('// ' + parameters.map((item) => '[Param.' + item.parameter.slot + '] = ' + item.parameter.name).join(', '));
+  }
+
+  body.push('var ' + variable + ' = new Query(' + CsLiteral.string(query.text) + ');');
+  parameters.forEach((item) => body.push(variable + '.AddParameter(' + CsLiteral.string(item.parameter.name) + ', ' + item.name + ');'));
+  body.push(command ? 'queries.ExecuteCommand(' + variable + ');' : 'return queries.Execute<' + contract.result.rowTypeName + '>(' + variable + ');');
+  lines.push('{', ...indent(body), '}');
   return lines;
 }
 

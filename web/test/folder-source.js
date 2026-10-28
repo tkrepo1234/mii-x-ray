@@ -1,5 +1,5 @@
 // An export folder as source - for tests and the equivalence check only, not part of the page.
-import { ObjectPath, SourceError, findSimilar } from '../src/sources.js';
+import { ObjectPath, SourceError, findSimilar, typeOfName } from '../src/sources.js';
 
 /** An export folder: a list of { path, read() } with the paths relative to the chosen folder. A logical path is
  * resolved by its longest unique suffix (export folders carry the project name, references the internal one). */
@@ -56,6 +56,20 @@ export class FolderSource {
 
   async findSimilar(objectPath, maximum) {
     return findSimilar(this._allPaths, objectPath, maximum);
+  }
+
+  async isFolder(objectPath) {
+    const prefix = ObjectPath.normalize(objectPath).toLowerCase() + '/';
+    return prefix.length > 1 && this._allPaths.some((path) => path.toLowerCase().startsWith(prefix));
+  }
+
+  /** Like the Catalog's LoadFilesInsideFolderAndSubfolders: { path, type } of every object below the folder. */
+  async folderObjects(folder) {
+    const prefix = ObjectPath.normalize(folder).toLowerCase() + '/';
+    return this._allPaths.filter((path) => path.toLowerCase().startsWith(prefix)).map((path) => ({
+      path,
+      type: typeOfName(this._bySuffix.get(path.toLowerCase())[0].file.path),
+    }));
   }
 
   /** Every transaction of the folder (relative paths). */
