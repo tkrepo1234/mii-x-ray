@@ -13,8 +13,15 @@ runtime. Typical use: hand the file to an LLM or a colleague to understand, revi
 ## Web tool (leading version)
 
 `web/dist/mii-x-ray.html` is MII X-Ray as one self-contained web page for the MII server itself. Since 2.1.0 the
-JavaScript version under `web/` is the leading one; the C# console stays as it is (its output is the reference the
-port was proven against: 526 of 526 corpus transactions give byte-identical files).
+JavaScript version under `web/` is the leading one; the C# console stays at the 2.1 output (it was the reference the
+port was proven against: 526 of 526 corpus transactions gave byte-identical files) and only shares the runtime.
+Since 2.2.0 the page follows the SAP Manufacturing Suite Definitive Guide's verified runtime behaviour (see
+CHANGELOG), which the console does not.
+
+**Transaction or folder.** Enter a transaction (`PROJECT/Folder/trxName`) or a folder (`PROJECT/Folder`). A folder
+gives one file with everything below it, subfolders included: one public method per transaction of the folder, the
+transactions they call outside the folder as private methods, query templates no transaction runs as public methods,
+and a call tree per entry point.
 
 Deploy: in the MII Workbench, open the **Web** tab of a project, import `mii-x-ray.html` into a folder and open
 `https://<mii-server>/XMII/CM/<Project>/<Folder>/mii-x-ray.html`. The page reads transactions through the Catalog
@@ -24,7 +31,8 @@ file it does nothing. The last transactions are kept in the browser (local stora
 
 ```
 node web/build.mjs                                   builds web/dist/mii-x-ray.html from web/src
-node web/test/equivalence.mjs <export folder> <C# output of --all>    JS and C# output must be identical
+node web/test/corpus.mjs <export folder> <work folder>  every transaction and every folder X-rayed and compiled as C# 12
+node web/test/equivalence.mjs <export folder> <C# output of --all>    JS against the C# console (2.1.x only)
 node web/test/serve.mjs 5300 http://localhost:50100 dev:dev           the page at /XMII/CM/XRay/ with a Catalog proxy
 
 web/test/folder-source.js reads an export folder; it serves the tests only and is not part of the page.
@@ -104,6 +112,17 @@ MII rules the helpers keep: booleans are true for `true` or `1`; `match()` is ca
 starts with `(?i)`; `datediff()` returns seconds; `stringpart()` counts from 1; `append()` changes the list it gets;
 `==` binds weaker than `&&` and `&` binds tighter than comparisons (SAP's operator precedence).
 
+Since 2.2.0 also (verified behaviour from the Definitive Guide and Tim's projects): `&&`, `||` and the inputs of a
+Conditional evaluate every part (C# `&` / `|`); `if()` returns a number, also for text branches (`Mii.If`, with a
+note); `number("")` and `number` of other text fail (`Mii.Number`); a missing map key reads as the text `null`;
+`list(list, x)` adds the elements of a list argument; `first()`/`last()` of an empty list fail; `liststomap` sorts its
+keys; `stringreplaceall` drops the blanks of its replacement; `encode`/`decode` are form encoding;
+`currenttimezoneoffset` is in milliseconds; an Iterator over a map gives its keys and has no `Item`; Assign XML at an
+XPath fills the selected node with the source's content; Assign XML of a text has no effect; a query's `RowCount`
+becomes `Query.RowCount`; a `TransactionName` set by an expression is a call chosen at runtime; only the first child
+of a Catch is its handler. Calls inside loops with ResetState false, asynchronous calls and transactions with
+ThrowOnLinkError off are marked.
+
 ## Limits
 
 - **A faulty transaction gives faulty C#, as is.** Links to inputs or actions that no longer exist, references to
@@ -114,7 +133,10 @@ starts with `(?i)`; `datediff()` returns seconds; `stringpart()` counts from 1; 
 - A Catch handles what precedes it **in its parent** (a lexical `try`). In MII it also catches exceptions from
   earlier sibling branches of an ancestor; such rare layouts differ.
 - Only rowset XML is typed; other XML documents (PAPI requests, web service payloads) stay `XmlDocument`.
-- Java date patterns, Java regular expressions and Java time zone ids are mapped to .NET as far as they match.
+- Java date patterns, Java regular expressions and Java time zone ids are mapped to .NET as far as they match
+  (.NET `\w` and `\d` also match non-ASCII letters and digits, Java's do not).
+- A call with ResetState false keeps the callee's state between calls in MII; the C# marks such calls in loops but
+  runs each call fresh. An asynchronous call is marked, the C# still runs it in line.
 
 ## Development
 

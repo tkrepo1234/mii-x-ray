@@ -7,7 +7,7 @@ import { addBlankLines } from './placer.js';
 import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
 import { ObjectPath } from './sources.js';
 
-export const TOOL_VERSION = '2.1.2';
+export const TOOL_VERSION = '2.2.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -225,6 +225,10 @@ function queryMethod(contract, methodName) {
 
   body.push('var ' + variable + ' = new Query(' + CsLiteral.string(query.text) + ');');
   parameters.forEach((item) => body.push(variable + '.AddParameter(' + CsLiteral.string(item.parameter.name) + ', ' + item.name + ');'));
+
+  if (!command && /^\s*[1-9]\d*\s*$/.test(query.rowCount)) {
+    body.push(variable + '.RowCount = ' + query.rowCount.trim() + ';');
+  }
   body.push(command ? 'queries.ExecuteCommand(' + variable + ');' : 'return queries.Execute<' + contract.result.rowTypeName + '>(' + variable + ');');
   lines.push('{', ...indent(body), '}');
   return lines;
@@ -238,7 +242,10 @@ function readingRules() {
     '//   - A query is a local Query variable: its text is the MII template text, AddParameter(name, value) sets a parameter;',
     '//     the comment above it maps [Param.N] to the names. MII replaces [Param.N] by the value as text, there are no',
     '//     bind variables; quoting and escaping are done by the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
+    '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
     '//   - MII rowset documents are lists of row records; FirstOrEmpty() and RowAt(n) give an empty row instead of null.',
+    '//   - Conditions combine with & and |, not && and ||: MII evaluates every part (a later part is no guard).',
+    '//   - Mii.If is MII\'s if(): it returns a number, also for text branches (stringif returns text).',
     '//   - A catch handles every action before it in the same block (MII Catch). TransactionTerminatedException is',
     "//     MII's Terminate Transaction: it ends the transaction, its own catch blocks pass it on to the caller.",
     '//   - Mii.IsEmpty(x) is MII\'s empty check (blank, "null" or "---"), Mii.IsTrue(x) its boolean check ("true" or "1").',

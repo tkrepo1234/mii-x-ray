@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.2.0 - 2026-10-28
+
+The web page (leading version) X-Rays whole folders and follows the verified runtime behaviour of the SAP
+Manufacturing Suite Definitive Guide and of the recent projects. The C# console keeps its 2.1 output; it shares the
+runtime and was only aligned so its files still compile (`currenttimezoneoffset`).
+
+Folders:
+
+- A folder path X-Rays everything below it into one file (`<Folder>.xray.cs`): one public method per transaction,
+  the transactions they call outside the folder as private methods, query templates no transaction runs as public
+  methods, a call tree per entry point. The page stays as it was; it recognises a folder by the Catalog's
+  `Exists` answer 2 and lists it with `LoadFilesInsideFolderAndSubfolders`.
+- `web/test/corpus.mjs`: every transaction and every folder of an export X-rayed and compiled as C# 12.
+
+Fixes, where the C# showed something other than what MII does:
+
+- `&&`, `||`, `and()`, `or()` and the inputs of a Conditional evaluate every part: C# `&` / `|` instead of the
+  short-circuit operators, which suggested a guard that MII does not have.
+- `if()` with a text branch returns a number in MII (0, or a type cast error in a string function): `Mii.If` and a
+  note instead of a C# conditional on strings.
+- `number()` fails on empty and other text (`Mii.Number`); a missing map key reads as the text `null`;
+  `Map{"Key"}` with quotes is the key; `list(list, x)` adds the elements of a list argument; `first()`/`last()` of an
+  empty list fail; `liststomap` sorts its keys; `remove(map, key)` removes the key; `stringreplaceall` drops the
+  blanks of its replacement; `encode`/`decode` are form encoding; `random(low, high)` keeps its bounds;
+  `datefromxmlformat(date, format)` returns text; `currenttimezoneoffset` is a number of milliseconds and
+  `currenttimeoffset`, which MII does not know, is a note.
+- A string literal with an escape other than `\\`, `\"`, `\r`, `\n`, `\t` is a note (it does not compile in MII).
+- An Iterator over a map goes through its keys; `<Iterator>.Item` does not exist in MII (note).
+- Assign XML at an XPath fills the selected node with the source's children and text instead of replacing the node;
+  Assign XML of a text into an XML target has no effect in MII (comment and note instead of an assignment).
+- A Transaction Call whose `TransactionName` is set by an expression is a call chosen at runtime (plugin call and
+  note) instead of a call of the configured interface transaction; a literal link wins over the configured name.
+- A query's `RowCount` (linked, configured on the action or in the template) becomes `Query.RowCount`: MII drops
+  further rows without a message.
+- Only the first child of a Catch is its handler.
+- Marked: calls inside loops with ResetState false (the callee keeps its state), asynchronous calls (also when Async is
+  linked), transactions with ThrowOnLinkError off, links into a Conditional other than its inputs.
+
+New MII functions: `year`, `month`, `day`, `hour`, `minute`, `second`, `dayofweek`, `dayofyear`, `daysinmonth`,
+`monthstart`, `monthend`, `yearstart`, `yearend`, `datetoxmlformat`, `getsessionvariable`, `exp`, `ln`, `log`,
+`logn` and the trigonometric functions.
+
 ## 2.1.2 - 2026-10-08
 
 - A local the flow only edits at an XPath (set a value, append, remove) keeps its MII value: request templates and

@@ -5,7 +5,7 @@
 // children afterwards. Loops: child 0 is the body, further children run once after the loop. Catch: handles whatever
 // ran before it in the same parent (and the parent's own action) - a try block around those statements.
 import { MiiXml, MiiQueryKind } from './model.js';
-import { literalLinkedValue } from './resolver.js';
+import { literalLinkedValue, linkedExpression } from './resolver.js';
 import { parseExpression, ExpressionError, referenceScope, referenceMember } from './expressions.js';
 import { ContractFactory } from './rowset.js';
 import { ContractBuilder } from './contracts.js';
@@ -218,9 +218,22 @@ export class TransactionEmitter {
       case 'IlluminatorDocument':
         symbol.document = this._documentContract(definition);
         return ActionKind.Document;
-      case 'TransactionCall':
-        symbol.callee = this._context.findTransaction(definition.static('TransactionName'));
+      case 'TransactionCall': {
+        // a link to TransactionName decides the callee at runtime; the configured one is then only its interface
+        const linked = linkedExpression(this._transaction, definition.name, 'TransactionName');
+        const literal = linked === null ? null : literalLinkedValue(this._transaction, definition.name, 'TransactionName');
+
+        if (linked !== null && literal === null) {
+          this._currentAction = definition.name;
+          this.note('the called transaction is chosen at runtime (TransactionName = ' + oneLine(linked) + '); '
+            + definition.static('TransactionName') + ' is only its interface');
+          this._currentAction = '';
+          return ActionKind.Plugin;
+        }
+
+        symbol.callee = this._context.findTransaction(literal !== null ? literal : definition.static('TransactionName'));
         return symbol.callee ? ActionKind.TransactionCall : ActionKind.Plugin;
+      }
       case 'DynamicTransactionCall': {
         const literal = literalLinkedValue(this._transaction, definition.name, 'TransactionName');
         symbol.callee = literal === null ? null : this._context.findTransaction(literal);
@@ -313,6 +326,11 @@ export class TransactionEmitter {
     const loop = this._findLoop(scope);
 
     if (loop) {
+      if (loop.actionType === 'IteratorAction' && member === 'Item') {
+        this.note(reference.path + ': an Iterator has no Item in MII ("Invalid variable"); its element is CurrentItem');
+        return this._translator.unresolved(reference.path);
+      }
+
       return resolveLoopMember(loop, member);
     }
 
@@ -351,6 +369,10 @@ export class TransactionEmitter {
 
   /** The lines of the transaction's method: inputs are parameters, outputs the return value. */
   emitMethod(isPublic) {
+    if (/^\s*(false|0)\s*$/i.test(this._transaction.throwOnLinkError)) {
+      this._context.note(this._transaction.shortName, 'ThrowOnLinkError is off: in MII a link that fails leaves its target unchanged and the run goes on (the C# throws)');
+    }
+
     const flow = this._emitSiblings(this._transaction.steps, []);
     const lines = ['/// <summary>', '/// ' + xmlText(this._transaction.path)];
 
@@ -491,8 +513,9 @@ export class TransactionEmitter {
       handler.push(...this._emitOutgoing(catchStep.action));
     }
 
+    // only the first child of a Catch is its handler; further children do not belong to it
     this._flow.push('on error ' + name);
-    const children = this._emitSiblings(catchStep.children, []);
+    const children = this._emitSiblings(catchStep.children.slice(0, 1), []);
     this._flow.pop();
     handler.push(...children);
 
@@ -500,7 +523,15 @@ export class TransactionEmitter {
       handler.push('// the exception is swallowed');
     }
 
-    return ['try', '{', ...indent(guarded), '}', 'catch (Exception ' + error + ')', '{', ...indent(handler), '}'];
+    const result = ['try', '{', ...indent(guarded), '}', 'catch (Exception ' + error + ')', '{', ...indent(handler), '}'];
+
+    if (catchStep.children.length > 1) {
+      this.note('the Catch ' + name + ' has ' + catchStep.children.length + ' children: only the first is its handler, the others are not (when they run is not documented)');
+      result.push('// further children of the Catch ' + name + ': not part of its handler (when MII runs them is not documented)');
+      result.push(...this._emitSiblings(catchStep.children.slice(1), []));
+    }
+
+    return result;
   }
 
   // ---------------------------------------------------------------------------------------------- branches
@@ -525,6 +556,16 @@ export class TransactionEmitter {
 
     const condition = combine(terms, logicalAnd);
     lines.push('// ' + use.name);
+
+    for (const link of use.incoming) {
+      const property = linkTarget(link.to).property;
+
+      if (!/^Input\d+$/.test(property) && property !== 'InputCount' && property !== 'LogicalAnd') {
+        // e.g. a link into Output: what MII does with it is not documented, the condition only reads the inputs
+        this.note('link into ' + link.to + ' (the condition reads only the inputs Input1..' + count + '): ' + oneLine(link.from));
+        lines.push('// X-Ray: not part of the condition: ' + oneLine(link.to) + ' = ' + oneLine(link.from));
+      }
+    }
     lines.push(...this._emitOutgoing(use));
     const alwaysTrue = condition.code === 'true';
     const whenTrue = this._emitBranch(step.children, 0, alwaysTrue ? null : 'if ' + use.name);
@@ -833,6 +874,13 @@ export class TransactionEmitter {
     }
 
     const value = this._linkValue(link, target.type);
+    const xmlTarget = target.type.kind === TypeKind.Xml || target.type.kind === TypeKind.Rowset || target.type.kind === TypeKind.Row;
+
+    if (kind === 'AssignXml' && xmlTarget && value.type.kind === TypeKind.String && value.xmlCode === null) {
+      // text reaches an XML target only through Assign (Assign Value); Assign XML of text delivers nothing
+      this.note('Assign XML of a text into ' + link.to + ' has no effect in MII (text needs Assign Value): ' + oneLine(link.from));
+      return ['// X-Ray: no effect in MII (Assign XML of a text; the target keeps its value): ' + oneLine(link.to) + ' = ' + oneLine(link.from)];
+    }
 
     if (selector === null && (kind === 'Assign' || kind === 'AssignXml')) {
       return [target.code + ' = ' + convertTo(value, target.type).code + ';'];
@@ -1058,6 +1106,10 @@ export class TransactionEmitter {
       entry.kind = 'plugin';
       const transaction = use.definition.static('TransactionName');
       entry.target = use.definition.actionType + (transaction.length > 0 ? ' ' + transaction : '');
+
+      if (use.definition.actionType === 'TransactionCall' && linkedExpression(this._transaction, use.name, 'TransactionName') !== null) {
+        entry.target = 'TransactionCall chosen at runtime' + (transaction.length > 0 ? ' (interface ' + transaction + ')' : '');
+      }
     }
 
     this._contract.outline.push(entry);
@@ -1067,8 +1119,20 @@ export class TransactionEmitter {
     const lines = [];
     const callee = symbol.callee;
 
-    if (CsLiteral.isTrue(use.definition.static('Async'))) {
-      lines.push('// MII runs this call asynchronously');
+    const asyncLink = plainIncoming(use, 'Async');
+
+    if (asyncLink) {
+      lines.push('// MII runs this call asynchronously when ' + oneLine(asyncLink.from) + ' is true: then without outputs, and a failure does not reach this transaction');
+    } else if (CsLiteral.isTrue(use.definition.static('Async'))) {
+      lines.push('// MII runs this call asynchronously: without outputs, and a failure does not reach this transaction');
+    }
+
+    const resetLink = plainIncoming(use, 'ResetState');
+    const resets = resetLink ? CsLiteral.isTrue(resetLink.from.trim().replace(/^"|"$/g, '')) : CsLiteral.isTrue(use.definition.static('ResetState'));
+
+    if (this._loops.length > 0 && !resets) {
+      // verified: with ResetState false the callee keeps its locals and outputs between the calls of one run
+      lines.push('// ResetState is false: on each pass the called transaction starts with the locals and outputs of its previous call');
     }
 
     const inputs = [];
@@ -1223,6 +1287,18 @@ export class TransactionEmitter {
       lines.push(variable + '.AddParameter(' + CsLiteral.string(parameter.name) + ', ' + args.get(number) + ');');
     }
 
+    if (symbol.kind !== ActionKind.QueryCommand) {
+      // RowCount: linked on the action, else configured on the action, else the template's
+      const rowCountLink = plainIncoming(use, 'RowCount');
+      const configured = [use.definition.static('RowCount'), query.query.rowCount].find((value) => /^\s*[1-9]\d*\s*$/.test(value || ''));
+
+      if (rowCountLink) {
+        lines.push(variable + '.RowCount = ' + convertTo(this._linkValue(rowCountLink, CsType.Int), CsType.Int).code + ';');
+      } else if (configured !== undefined) {
+        lines.push(variable + '.RowCount = ' + configured.trim() + ';');
+      }
+    }
+
     if (symbol.kind === ActionKind.QueryCommand) {
       lines.push('queries.ExecuteCommand(' + variable + ');');
     } else {
@@ -1236,6 +1312,10 @@ export class TransactionEmitter {
   _emitPluginCall(use, symbol) {
     const lines = [];
     const definition = use.definition;
+
+    if (definition.actionType === 'TransactionCall' && linkedExpression(this._transaction, use.name, 'TransactionName') !== null) {
+      lines.push('// the called transaction is chosen at runtime (TransactionName); ' + definition.static('TransactionName') + ' is only its interface');
+    }
     const settings = [];
     const linked = new Set();
     const selectorLinks = new Map();
@@ -1473,8 +1553,9 @@ function combine(terms, logicalAnd) {
     return terms[0];
   }
 
-  const precedence = logicalAnd ? Precedence.LogicalAnd : Precedence.LogicalOr;
-  return new TypedCode(terms.map((term) => term.at(precedence + 1)).join(logicalAnd ? ' && ' : ' || '), CsType.Bool, precedence);
+  // a Conditional evaluates every input: & and | instead of the short-circuit && and ||
+  const precedence = logicalAnd ? Precedence.BitwiseAnd : Precedence.BitwiseOr;
+  return new TypedCode(terms.map((term) => term.at(precedence + 1)).join(logicalAnd ? ' & ' : ' | '), CsType.Bool, precedence);
 }
 
 /** "x = value;" when something reads the action's result, else the call as a statement. */

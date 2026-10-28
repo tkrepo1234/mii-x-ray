@@ -103,6 +103,7 @@ export class MiiTransaction {
   constructor(path) {
     this.path = path;
     this.description = '';
+    this.throwOnLinkError = ''; // the transaction attribute; false or 0: a failing link does not stop the run
     this.inputs = [];
     this.outputs = [];
     this.locals = [];
@@ -139,6 +140,7 @@ export class MiiQuery {
     this.rootName = '';
     this.mode = '';
     this.text = '';
+    this.rowCount = ''; // RowCount of the template: MII returns at most this many rows
     this.url = '';
     this.parameters = []; // { slot, description, type, defaultValue }
     this.xacuteTransaction = '';
@@ -167,6 +169,7 @@ export const ObjectReader = {
     const root = document.documentElement;
     const transaction = new MiiTransaction(path);
     transaction.description = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'Description');
+    transaction.throwOnLinkError = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'ThrowOnLinkError').trim();
 
     for (const item of MiiXml.children(MiiXml.child(root, 'Context'), 'ContextItem')) {
       const parameter = readParameter(item);
@@ -199,6 +202,7 @@ export const ObjectReader = {
     const query = new MiiQuery(path);
     query.rootName = root.localName;
     query.mode = root.getAttribute('Mode');
+    query.rowCount = root.getAttribute('RowCount').trim();
 
     switch (root.localName) {
       case 'SQLQuery':

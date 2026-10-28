@@ -146,7 +146,16 @@ helpers(CsType.DateTime,
   'dateaddseconds', 'DateAddSeconds', 'dateaddminutes', 'DateAddMinutes', 'dateaddhours', 'DateAddHours',
   'dateadddays', 'DateAddDays', 'dateaddmonths', 'DateAddMonths', 'dateaddyears', 'DateAddYears',
   'converttimezone', 'ConvertTimeZone', 'converttimezone2', 'ConvertTimeZone2',
-  'datefromxmlformat', 'ToDateTime', 'datefromseconds', 'DateFromSeconds');
+  'datefromxmlformat', 'ToDateTime', 'datefromseconds', 'DateFromSeconds',
+  'monthstart', 'MonthStart', 'monthend', 'MonthEnd', 'yearstart', 'YearStart', 'yearend', 'YearEnd');
+helpers(CsType.Int,
+  'year', 'Year', 'month', 'Month', 'day', 'Day', 'hour', 'Hour', 'minute', 'Minute', 'second', 'Second',
+  'dayofweek', 'DayOfWeek', 'dayofyear', 'DayOfYear', 'daysinmonth', 'DaysInMonth');
+helpers(CsType.Double,
+  'exp', 'Exp', 'ln', 'Ln', 'log', 'Log', 'logn', 'LogN', 'sin', 'Sin', 'cos', 'Cos', 'tan', 'Tan',
+  'asin', 'Asin', 'acos', 'Acos', 'atan', 'Atan', 'sinh', 'Sinh', 'cosh', 'Cosh', 'tanh', 'Tanh');
+helpers(CsType.String,
+  'getsessionvariable', 'GetSessionVariable', 'datetoxmlformat', 'DateToXmlFormat');
 
 /** symbols: { resolve(reference) -> TypedCode | null, note(message), transactionPath, newName(wanted) } */
 export class ExpressionTranslator {
@@ -171,6 +180,16 @@ export class ExpressionTranslator {
 
       this._symbols.note('expression not understood (' + error.message + '): ' + oneLine(expression));
       return TypedCode.primary('Mii.Unparsed(' + CsLiteral.string(expression) + ')', CsType.Object);
+    }
+
+    // MII documents only the escapes \\ and \" (\r, \n and \t run); another one such as \[ makes the expression fail
+    for (const text of (expression || '').match(/"(?:[^"\\]|\\.)*"/g) || []) {
+      const escape = (text.match(/\\./g) || []).find((pair) => !['\\\\', '\\"', '\\r', '\\n', '\\t'].includes(pair));
+
+      if (escape) {
+        this._symbols.note('string literal with the escape ' + escape + ' (MII knows \\\\ and \\"; the expression does not compile in MII): ' + oneLine(expression));
+        break;
+      }
     }
 
     return this.translateNode(node);
@@ -215,7 +234,9 @@ export class ExpressionTranslator {
       case 'dateoffsetformat': return literal('"yyyy-MM-dd\'T\'HH:mm:ssZ"', CsType.String, "yyyy-MM-dd'T'HH:mm:ssZ");
       case 'datetimezoneformat': return literal('"yyyy-MM-dd\'T\'HH:mm:ssz"', CsType.String, "yyyy-MM-dd'T'HH:mm:ssz");
       case 'currenttimezone': return TypedCode.primary('TimeZoneInfo.Local.Id', CsType.String);
-      case 'currenttimeoffset': return TypedCode.primary('Mii.CurrentTimeOffset()', CsType.String);
+      case 'currenttimeoffset':
+        this._symbols.note('currenttimeoffset does not exist in MII (currenttimezoneoffset is the offset in milliseconds)');
+        return this.unresolved(name);
       case 'timezoneids': return TypedCode.primary('Mii.TimeZoneIds()', CsType.List);
       case 'emptylist': return TypedCode.primary('new List<string>()', CsType.List);
       case 'emptymap': return TypedCode.primary('new Dictionary<string, string>()', CsType.Map);
@@ -230,7 +251,7 @@ export class ExpressionTranslator {
       case 'transactionpath': return literal(CsLiteral.string(this._symbols.transactionPath), CsType.String, this._symbols.transactionPath);
       case 'currenttimemillis': return TypedCode.primary('Mii.CurrentTimeMillis()', CsType.Long);
       case 'userlocale': return TypedCode.primary('Mii.UserLocale', CsType.String);
-      case 'currenttimezoneoffset': return TypedCode.primary('Mii.CurrentTimeOffset()', CsType.String);
+      case 'currenttimezoneoffset': return TypedCode.primary('Mii.CurrentTimeZoneOffset()', CsType.Long);
       default: return this.unresolved(name);
     }
   }
@@ -258,7 +279,12 @@ export class ExpressionTranslator {
 
   /** {xpath} on XML, {key} on a map, {index} on a list. Rowset XPaths of the usual forms become typed access. */
   applySelector(baseCode, selector) {
-    const trimmed = selector.trim();
+    let trimmed = selector.trim();
+
+    // Map{"Key"} is the documented form of a map key; the quotes are not part of the key
+    if (/^"[^"]*"$/.test(trimmed) && baseCode.type.kind !== TypeKind.Xml && baseCode.type.kind !== TypeKind.Rowset && baseCode.type.kind !== TypeKind.Row) {
+      trimmed = trimmed.substring(1, trimmed.length - 1);
+    }
 
     if (trimmed.includes('#')) {
       return xpathCall(baseCode, this._interpolatedText(trimmed).code);
@@ -415,10 +441,11 @@ export class ExpressionTranslator {
       case '==':
       case '!=':
         return equality(binary.operator, left, right);
+      // MII evaluates both sides of && and ||: C#'s & and | on bools do the same, && and || would not
       case '&&':
-        return new TypedCode(toBoolCode(left).at(Precedence.LogicalAnd) + ' && ' + toBoolCode(right).at(Precedence.LogicalAnd + 1), CsType.Bool, Precedence.LogicalAnd);
+        return new TypedCode(toBoolCode(left).at(Precedence.BitwiseAnd) + ' & ' + toBoolCode(right).at(Precedence.BitwiseAnd + 1), CsType.Bool, Precedence.BitwiseAnd);
       case '||':
-        return new TypedCode(toBoolCode(left).at(Precedence.LogicalOr) + ' || ' + toBoolCode(right).at(Precedence.LogicalOr + 1), CsType.Bool, Precedence.LogicalOr);
+        return new TypedCode(toBoolCode(left).at(Precedence.BitwiseOr) + ' | ' + toBoolCode(right).at(Precedence.BitwiseOr + 1), CsType.Bool, Precedence.BitwiseOr);
       default:
         throw new Error('unknown operator ' + binary.operator);
     }
@@ -504,7 +531,7 @@ export class ExpressionTranslator {
       case 'if':
       case 'objectif':
         if (args.length === 3) {
-          return this._conditional(args);
+          return fn.name === 'if' ? this._numericConditional(args) : this._conditional(args);
         }
 
         break;
@@ -517,8 +544,8 @@ export class ExpressionTranslator {
       case 'and':
       case 'or':
         if (args.length >= 2) {
-          const op = fn.name === 'and' ? ' && ' : ' || ';
-          const precedence = fn.name === 'and' ? Precedence.LogicalAnd : Precedence.LogicalOr;
+          const op = fn.name === 'and' ? ' & ' : ' | ';
+          const precedence = fn.name === 'and' ? Precedence.BitwiseAnd : Precedence.BitwiseOr;
           const parts = args.map((argument) => toBoolCode(this.translateNode(argument)).at(precedence + 1));
           return new TypedCode(parts.join(op), CsType.Bool, precedence);
         }
@@ -532,7 +559,25 @@ export class ExpressionTranslator {
             return count;
           }
 
-          return convertTo(this.translateNode(args[0]), CsType.Double);
+          // number() converts strictly: empty or other text fails in MII
+          const value = this.translateNode(args[0]);
+          return value.type.isNumeric ? toDoubleCode(value) : call('Mii.Number', value, CsType.Double);
+        }
+
+        break;
+      case 'datefromxmlformat':
+        if (args.length === 2) {
+          return TypedCode.primary('Mii.DateFromXmlFormat(' + this.translateNode(args[0]).code + ', ' + this.translateNode(args[1]).code + ')', CsType.String);
+        }
+
+        break;
+      case 'remove':
+        if (args.length === 2) {
+          const collection = this.translateNode(args[0]);
+
+          if (collection.type.kind === TypeKind.Map) {
+            return TypedCode.primary('Mii.RemoveKey(' + collection.code + ', ' + this.translateNode(args[1]).code + ')', CsType.Map);
+          }
         }
 
         break;
@@ -618,6 +663,20 @@ export class ExpressionTranslator {
     }
 
     return new TypedCode(condition.at(Precedence.Conditional + 1) + ' ? ' + whenTrue.at(Precedence.Conditional + 1) + ' : ' + whenFalse.at(Precedence.Conditional), type, Precedence.Conditional);
+  }
+
+  /** if() returns a number in MII, also for text branches: text gives 0 when assigned to a string and a type cast error
+   * inside a string function. Number branches stay a C# conditional; text branches become Mii.If (a double). */
+  _numericConditional(args) {
+    const whenTrue = this.translateNode(args[1]);
+    const whenFalse = this.translateNode(args[2]);
+
+    if (whenTrue.type.kind !== TypeKind.String && whenFalse.type.kind !== TypeKind.String) {
+      return this._conditional(args);
+    }
+
+    this._symbols.note('if() with a text branch returns a number in MII (0 for text, a type cast error inside a string function); stringif() returns text');
+    return TypedCode.primary('Mii.If(' + toBoolCode(this.translateNode(args[0])).code + ', ' + whenTrue.code + ', ' + whenFalse.code + ')', CsType.Double);
   }
 
   /** getvalue(CatchX.Source & ".Message"): the caught exception's message. */

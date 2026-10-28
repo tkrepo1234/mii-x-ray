@@ -64,7 +64,7 @@ CsType.Object = new CsType(TypeKind.Object, 'object');
 
 /** C# operator precedence levels (higher binds tighter). */
 export const Precedence = {
-  Conditional: 3, LogicalOr: 5, LogicalAnd: 6, Equality: 10, Relational: 11, Additive: 13, Multiplicative: 14, Unary: 15, Primary: 16,
+  Conditional: 3, LogicalOr: 5, LogicalAnd: 6, BitwiseOr: 7, BitwiseAnd: 9, Equality: 10, Relational: 11, Additive: 13, Multiplicative: 14, Unary: 15, Primary: 16,
 };
 
 /** A translated C# expression with its type. */

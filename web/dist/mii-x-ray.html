@@ -223,7 +223,7 @@ pre {
       <p class="hint" id="server-hint" hidden>Open this page from the MII server (…/XMII/CM/…) to read its transactions.</p>
       <div class="row">
         <label class="label" for="transaction">Transaction</label>
-        <input type="text" id="transaction" list="recent" placeholder="PROJECT/Folder/trxName" spellcheck="false" autocomplete="off">
+        <input type="text" id="transaction" list="recent" placeholder="PROJECT/Folder/trxName or PROJECT/Folder" spellcheck="false" autocomplete="off">
         <datalist id="recent"></datalist>
         <button type="button" id="run" class="button">X-Ray</button>
       </div>
@@ -317,7 +317,7 @@ async function xray() {
   $('similar').replaceChildren();
 
   if (path.length === 0) {
-    setStatus('Enter a transaction path, e.g. PROJECT/Folder/trxName.', 'warning');
+    setStatus('Enter a transaction or folder path, e.g. PROJECT/Folder/trxName or PROJECT/Folder.', 'warning');
     return;
   }
 
@@ -334,10 +334,16 @@ async function xray() {
         setStatus('Loading ' + path + ' … ' + loaded + ' object' + (loaded === 1 ? '' : 's'));
       }
     });
-    const graph = await resolver.resolve(path);
+    const folder = await source.isFolder(path);
+    const graph = folder ? await resolver.resolveFolder(path, await source.folderObjects(path)) : await resolver.resolve(path);
 
     if (!graph) {
-      setStatus(path + ' was not found or is no transaction.', 'error');
+      setStatus(folder ? 'The folder ' + path + ' contains no transaction or query template.' : path + ' was not found or is no transaction.', 'error');
+
+      if (folder) {
+        return;
+      }
+
       const similar = await source.findSimilar(path, 8);
       $('similar').replaceChildren(...similar.map((candidate) => {
         const button = Object.assign(document.createElement('button'), { type: 'button', className: 'link', textContent: candidate });
@@ -370,6 +376,10 @@ async function xray() {
 function showResult() {
   const result = state.result;
   const parts = [result.transactionCount + ' transaction' + (result.transactionCount === 1 ? '' : 's'), result.queryCount + ' quer' + (result.queryCount === 1 ? 'y' : 'ies')];
+
+  if (result.folder !== null) {
+    parts.unshift('folder ' + result.folder);
+  }
 
   if (result.missing.length > 0) {
     parts.push(result.missing.length + ' not found');
@@ -436,9 +446,10 @@ const { MiiQueryKind } = __require('model.js');
 const { GenerationContext, ContractBuilder } = __require('contracts.js');
 const { TransactionEmitter, indent } = __require('emitter.js');
 const { addBlankLines } = __require('placer.js');
-const { TypeKind } = __require('types.js');
+const { TypeKind, Naming, UniqueNames, CsLiteral } = __require('types.js');
+const { ObjectPath } = __require('sources.js');
 
-const TOOL_VERSION = '2.1.2';
+const TOOL_VERSION = '2.2.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -452,12 +463,30 @@ function generateCode(graph, sourceDescription, runtimeText, now) {
 
   for (const transaction of graph.transactions) {
     const contract = context.transactions.get(transaction);
-    methods.push('', ...new TransactionEmitter(context, contract).emitMethod(transaction === graph.root));
+    methods.push('', ...new TransactionEmitter(context, contract).emitMethod(graph.roots.includes(transaction)));
   }
 
-  const root = context.transactions.get(graph.root);
+  const folderMode = graph.folder !== null;
+  const root = graph.root ? context.transactions.get(graph.root) : null;
+  const fileName = folderMode ? Naming.pascal(ObjectPath.leaf(graph.folder)).replace(/^@/, '') : root.methodName;
+  const queryMethods = [];
+
+  // query templates of the folder that no transaction runs: a public method each
+  for (const query of graph.folderQueries) {
+    const contract = context.queries.get(query);
+
+    if (contract.callers.length === 0 && (query.kind === MiiQueryKind.Sql || query.kind === MiiQueryKind.Mdo)) {
+      const methodName = context.methodNames.claim(Naming.pascal(query.shortName).replace(/^@/, ''));
+      queryMethods.push(methodName);
+      methods.push('', ...queryMethod(contract, methodName));
+    }
+  }
+
+  const summary = folderMode
+    ? 'The logic of the folder ' + xmlText(graph.folder) + ': its transactions and query templates (public) and every transaction they call, one method each.'
+    : 'The logic of ' + xmlText(root.transaction.path) + ' and of every transaction it calls, one method each.';
   const lines = [
-    ...header(context, root, sourceDescription, now),
+    ...(folderMode ? folderHeader(context, queryMethods, sourceDescription, now) : header(context, root, sourceDescription, now)),
     '#nullable disable',
     '',
     'using System;',
@@ -472,10 +501,10 @@ function generateCode(graph, sourceDescription, runtimeText, now) {
     'using System.Xml;',
     'using System.Xml.Xsl;',
     '',
-    'namespace XRay.' + root.methodName + ';',
+    'namespace XRay.' + fileName + ';',
     '',
     '/// <summary>',
-    '/// The logic of ' + xmlText(root.transaction.path) + ' and of every transaction it calls, one method each.',
+    '/// ' + summary,
     '/// </summary>',
     'public sealed class ' + context.className + '(IQueryService queries, IPluginService plugins)',
     '{',
@@ -489,7 +518,8 @@ function generateCode(graph, sourceDescription, runtimeText, now) {
   const code = addBlankLines(lines).join('\n').replace(/\r\n/g, '\n');
   return {
     code: code.replace(/\n/g, '\r\n') + '\r\n',
-    rootName: root.methodName,
+    rootName: fileName,
+    folder: graph.folder,
     transactionCount: graph.transactions.length,
     queryCount: graph.queries.length,
     missing: graph.missing.slice(),
@@ -523,10 +553,72 @@ function header(context, root, sourceDescription, now) {
   }
 
   lines.push('//');
-  lines.push('// Call tree (execution order; [if X], [else X], [case n of X], [loop X] = once per item, [on error X] = in the handler of the catch X):');
+  lines.push(CALL_TREE_TITLE);
   lines.push('//   ' + root.methodName);
   callTree(root, '//     ', [], lines);
+  return headerTail(context, lines, rule);
+}
 
+const CALL_TREE_TITLE = '// Call tree (execution order; [if X], [else X], [case n of X], [loop X] = once per item, [on error X] = in the handler of the catch X):';
+
+/** The header of a folder X-Ray: every transaction of the folder is an entry point. */
+function folderHeader(context, queryMethods, sourceDescription, now) {
+  const graph = context.graph;
+  const rule = '// ' + '='.repeat(110);
+  const pad = (value) => String(value).padStart(2, '0');
+  const stamp = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate()) + ' ' + pad(now.getHours()) + ':' + pad(now.getMinutes());
+  const roots = graph.roots.map((transaction) => context.transactions.get(transaction));
+  const lines = [
+    rule,
+    '// MII X-Ray of the folder ' + graph.folder + ' (with its subfolders)',
+    '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
+    '//',
+    '// The logic of every transaction and query template in the folder and of every transaction and query they use, as',
+    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII runtime settings and default values are left',
+    '// out, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
+    '// through IPluginService. The Mii class at the end implements the MII expression functions and the XML handling.',
+    '//',
+    '// Entry points: new ' + context.className + '(queries, plugins).<Method>(...), one public method per transaction of the',
+    '// folder (' + roots.length + ')' + (queryMethods.length > 0 ? ' and per query template of the folder that no transaction runs (' + queryMethods.length + ')' : '')
+      + '; the other methods are transactions outside the folder that these call.',
+    '//',
+    ...readingRules(),
+    '//',
+    '// Transactions (' + graph.transactions.length + ', ' + roots.length + ' in the folder):',
+  ];
+
+  for (const transaction of graph.transactions) {
+    lines.push('//   ' + context.transactions.get(transaction).methodName + ' = ' + transaction.path + (graph.roots.includes(transaction) ? '' : '  (outside the folder)'));
+  }
+
+  if (queryMethods.length > 0) {
+    lines.push('//', '// Query templates of the folder that no transaction runs (a public method each): ' + queryMethods.join(', '));
+  }
+
+  if (roots.length > 0) {
+    // one tree per transaction no other transaction calls; a transaction already shown is not expanded again
+    const called = new Set();
+    context.transactions.forEach((contract) => contract.outline.forEach((entry) => {
+      if (entry.callee && entry.callee !== contract) {
+        called.add(entry.callee);
+      }
+    }));
+    const expanded = [];
+    lines.push('//', CALL_TREE_TITLE);
+
+    for (const contract of roots.filter((candidate) => !called.has(candidate)).concat(roots.filter((candidate) => called.has(candidate)))) {
+      if (!expanded.includes(contract)) {
+        lines.push('//   ' + contract.methodName);
+        callTree(contract, '//     ', expanded, lines);
+      }
+    }
+  }
+
+  return headerTail(context, lines, rule);
+}
+
+/** Queries, objects not found and notes: the end of both headers. */
+function headerTail(context, lines, rule) {
   if (context.graph.queries.length > 0) {
     lines.push('//', '// Queries (' + context.graph.queries.length + '):');
 
@@ -549,6 +641,41 @@ function header(context, root, sourceDescription, now) {
   return lines;
 }
 
+/** A query template no transaction runs, as a method: its parameters are the query parameters. */
+function queryMethod(contract, methodName) {
+  const query = contract.query;
+  const names = new UniqueNames();
+  ['queries', 'plugins'].forEach((name) => names.reserve(name));
+  const parameters = contract.parameters.map((parameter) => ({ parameter, name: names.claim(Naming.camel(parameter.name)) }));
+  const variable = names.claim(contract.variableName);
+  const command = query.mode.toLowerCase() === 'command';
+  const head = 'public ' + (command ? 'void' : contract.result.rowsetTypeName) + ' ' + methodName + '(';
+  const declarations = parameters.map((item) => 'string ' + item.name + ' = default');
+  const lines = ['/// <summary>', '/// ' + xmlText(query.path) + ' (query template, no transaction runs it)', '/// </summary>'];
+
+  if (declarations.length <= 3) {
+    lines.push(head + declarations.join(', ') + ')');
+  } else {
+    lines.push(head, ...declarations.map((declaration, index) => '    ' + declaration + (index < declarations.length - 1 ? ',' : ')')));
+  }
+
+  const body = [];
+
+  if (parameters.length > 0) {
+    body.push('// ' + parameters.map((item) => '[Param.' + item.parameter.slot + '] = ' + item.parameter.name).join(', '));
+  }
+
+  body.push('var ' + variable + ' = new Query(' + CsLiteral.string(query.text) + ');');
+  parameters.forEach((item) => body.push(variable + '.AddParameter(' + CsLiteral.string(item.parameter.name) + ', ' + item.name + ');'));
+
+  if (!command && /^\s*[1-9]\d*\s*$/.test(query.rowCount)) {
+    body.push(variable + '.RowCount = ' + query.rowCount.trim() + ';');
+  }
+  body.push(command ? 'queries.ExecuteCommand(' + variable + ');' : 'return queries.Execute<' + contract.result.rowTypeName + '>(' + variable + ');');
+  lines.push('{', ...indent(body), '}');
+  return lines;
+}
+
 function readingRules() {
   return [
     '// How to read this file:',
@@ -557,7 +684,10 @@ function readingRules() {
     '//   - A query is a local Query variable: its text is the MII template text, AddParameter(name, value) sets a parameter;',
     '//     the comment above it maps [Param.N] to the names. MII replaces [Param.N] by the value as text, there are no',
     '//     bind variables; quoting and escaping are done by the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
+    '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
     '//   - MII rowset documents are lists of row records; FirstOrEmpty() and RowAt(n) give an empty row instead of null.',
+    '//   - Conditions combine with & and |, not && and ||: MII evaluates every part (a later part is no guard).',
+    '//   - Mii.If is MII\'s if(): it returns a number, also for text branches (stringif returns text).',
     '//   - A catch handles every action before it in the same block (MII Catch). TransactionTerminatedException is',
     "//     MII's Terminate Transaction: it ends the transaction, its own catch blocks pass it on to the caller.",
     '//   - Mii.IsEmpty(x) is MII\'s empty check (blank, "null" or "---"), Mii.IsTrue(x) its boolean check ("true" or "1").',
@@ -810,7 +940,8 @@ class GenerationContext {
 
 const ContractBuilder = {
   build(context) {
-    context.className = context.typeNames.claim(Naming.pascal(context.graph.root.shortName).replace(/^@/, '') + 'Logic');
+    const baseName = context.graph.folder !== null ? ObjectPath.leaf(context.graph.folder) : context.graph.root.shortName;
+    context.className = context.typeNames.claim(Naming.pascal(baseName).replace(/^@/, '') + 'Logic');
 
     for (const transaction of context.graph.transactions) {
       context.transactions.set(transaction, new TransactionContract(transaction, claimName(context.methodNames, transaction.path)));
@@ -1056,7 +1187,7 @@ __define('emitter.js', () => {
 // children afterwards. Loops: child 0 is the body, further children run once after the loop. Catch: handles whatever
 // ran before it in the same parent (and the parent's own action) - a try block around those statements.
 const { MiiXml, MiiQueryKind } = __require('model.js');
-const { literalLinkedValue } = __require('resolver.js');
+const { literalLinkedValue, linkedExpression } = __require('resolver.js');
 const { parseExpression, ExpressionError, referenceScope, referenceMember } = __require('expressions.js');
 const { ContractFactory } = __require('rowset.js');
 const { ContractBuilder } = __require('contracts.js');
@@ -1269,9 +1400,22 @@ class TransactionEmitter {
       case 'IlluminatorDocument':
         symbol.document = this._documentContract(definition);
         return ActionKind.Document;
-      case 'TransactionCall':
-        symbol.callee = this._context.findTransaction(definition.static('TransactionName'));
+      case 'TransactionCall': {
+        // a link to TransactionName decides the callee at runtime; the configured one is then only its interface
+        const linked = linkedExpression(this._transaction, definition.name, 'TransactionName');
+        const literal = linked === null ? null : literalLinkedValue(this._transaction, definition.name, 'TransactionName');
+
+        if (linked !== null && literal === null) {
+          this._currentAction = definition.name;
+          this.note('the called transaction is chosen at runtime (TransactionName = ' + oneLine(linked) + '); '
+            + definition.static('TransactionName') + ' is only its interface');
+          this._currentAction = '';
+          return ActionKind.Plugin;
+        }
+
+        symbol.callee = this._context.findTransaction(literal !== null ? literal : definition.static('TransactionName'));
         return symbol.callee ? ActionKind.TransactionCall : ActionKind.Plugin;
+      }
       case 'DynamicTransactionCall': {
         const literal = literalLinkedValue(this._transaction, definition.name, 'TransactionName');
         symbol.callee = literal === null ? null : this._context.findTransaction(literal);
@@ -1364,6 +1508,11 @@ class TransactionEmitter {
     const loop = this._findLoop(scope);
 
     if (loop) {
+      if (loop.actionType === 'IteratorAction' && member === 'Item') {
+        this.note(reference.path + ': an Iterator has no Item in MII ("Invalid variable"); its element is CurrentItem');
+        return this._translator.unresolved(reference.path);
+      }
+
       return resolveLoopMember(loop, member);
     }
 
@@ -1402,6 +1551,10 @@ class TransactionEmitter {
 
   /** The lines of the transaction's method: inputs are parameters, outputs the return value. */
   emitMethod(isPublic) {
+    if (/^\s*(false|0)\s*$/i.test(this._transaction.throwOnLinkError)) {
+      this._context.note(this._transaction.shortName, 'ThrowOnLinkError is off: in MII a link that fails leaves its target unchanged and the run goes on (the C# throws)');
+    }
+
     const flow = this._emitSiblings(this._transaction.steps, []);
     const lines = ['/// <summary>', '/// ' + xmlText(this._transaction.path)];
 
@@ -1542,8 +1695,9 @@ class TransactionEmitter {
       handler.push(...this._emitOutgoing(catchStep.action));
     }
 
+    // only the first child of a Catch is its handler; further children do not belong to it
     this._flow.push('on error ' + name);
-    const children = this._emitSiblings(catchStep.children, []);
+    const children = this._emitSiblings(catchStep.children.slice(0, 1), []);
     this._flow.pop();
     handler.push(...children);
 
@@ -1551,7 +1705,15 @@ class TransactionEmitter {
       handler.push('// the exception is swallowed');
     }
 
-    return ['try', '{', ...indent(guarded), '}', 'catch (Exception ' + error + ')', '{', ...indent(handler), '}'];
+    const result = ['try', '{', ...indent(guarded), '}', 'catch (Exception ' + error + ')', '{', ...indent(handler), '}'];
+
+    if (catchStep.children.length > 1) {
+      this.note('the Catch ' + name + ' has ' + catchStep.children.length + ' children: only the first is its handler, the others are not (when they run is not documented)');
+      result.push('// further children of the Catch ' + name + ': not part of its handler (when MII runs them is not documented)');
+      result.push(...this._emitSiblings(catchStep.children.slice(1), []));
+    }
+
+    return result;
   }
 
   // ---------------------------------------------------------------------------------------------- branches
@@ -1576,6 +1738,16 @@ class TransactionEmitter {
 
     const condition = combine(terms, logicalAnd);
     lines.push('// ' + use.name);
+
+    for (const link of use.incoming) {
+      const property = linkTarget(link.to).property;
+
+      if (!/^Input\d+$/.test(property) && property !== 'InputCount' && property !== 'LogicalAnd') {
+        // e.g. a link into Output: what MII does with it is not documented, the condition only reads the inputs
+        this.note('link into ' + link.to + ' (the condition reads only the inputs Input1..' + count + '): ' + oneLine(link.from));
+        lines.push('// X-Ray: not part of the condition: ' + oneLine(link.to) + ' = ' + oneLine(link.from));
+      }
+    }
     lines.push(...this._emitOutgoing(use));
     const alwaysTrue = condition.code === 'true';
     const whenTrue = this._emitBranch(step.children, 0, alwaysTrue ? null : 'if ' + use.name);
@@ -1884,6 +2056,13 @@ class TransactionEmitter {
     }
 
     const value = this._linkValue(link, target.type);
+    const xmlTarget = target.type.kind === TypeKind.Xml || target.type.kind === TypeKind.Rowset || target.type.kind === TypeKind.Row;
+
+    if (kind === 'AssignXml' && xmlTarget && value.type.kind === TypeKind.String && value.xmlCode === null) {
+      // text reaches an XML target only through Assign (Assign Value); Assign XML of text delivers nothing
+      this.note('Assign XML of a text into ' + link.to + ' has no effect in MII (text needs Assign Value): ' + oneLine(link.from));
+      return ['// X-Ray: no effect in MII (Assign XML of a text; the target keeps its value): ' + oneLine(link.to) + ' = ' + oneLine(link.from)];
+    }
 
     if (selector === null && (kind === 'Assign' || kind === 'AssignXml')) {
       return [target.code + ' = ' + convertTo(value, target.type).code + ';'];
@@ -2109,6 +2288,10 @@ class TransactionEmitter {
       entry.kind = 'plugin';
       const transaction = use.definition.static('TransactionName');
       entry.target = use.definition.actionType + (transaction.length > 0 ? ' ' + transaction : '');
+
+      if (use.definition.actionType === 'TransactionCall' && linkedExpression(this._transaction, use.name, 'TransactionName') !== null) {
+        entry.target = 'TransactionCall chosen at runtime' + (transaction.length > 0 ? ' (interface ' + transaction + ')' : '');
+      }
     }
 
     this._contract.outline.push(entry);
@@ -2118,8 +2301,20 @@ class TransactionEmitter {
     const lines = [];
     const callee = symbol.callee;
 
-    if (CsLiteral.isTrue(use.definition.static('Async'))) {
-      lines.push('// MII runs this call asynchronously');
+    const asyncLink = plainIncoming(use, 'Async');
+
+    if (asyncLink) {
+      lines.push('// MII runs this call asynchronously when ' + oneLine(asyncLink.from) + ' is true: then without outputs, and a failure does not reach this transaction');
+    } else if (CsLiteral.isTrue(use.definition.static('Async'))) {
+      lines.push('// MII runs this call asynchronously: without outputs, and a failure does not reach this transaction');
+    }
+
+    const resetLink = plainIncoming(use, 'ResetState');
+    const resets = resetLink ? CsLiteral.isTrue(resetLink.from.trim().replace(/^"|"$/g, '')) : CsLiteral.isTrue(use.definition.static('ResetState'));
+
+    if (this._loops.length > 0 && !resets) {
+      // verified: with ResetState false the callee keeps its locals and outputs between the calls of one run
+      lines.push('// ResetState is false: on each pass the called transaction starts with the locals and outputs of its previous call');
     }
 
     const inputs = [];
@@ -2274,6 +2469,18 @@ class TransactionEmitter {
       lines.push(variable + '.AddParameter(' + CsLiteral.string(parameter.name) + ', ' + args.get(number) + ');');
     }
 
+    if (symbol.kind !== ActionKind.QueryCommand) {
+      // RowCount: linked on the action, else configured on the action, else the template's
+      const rowCountLink = plainIncoming(use, 'RowCount');
+      const configured = [use.definition.static('RowCount'), query.query.rowCount].find((value) => /^\s*[1-9]\d*\s*$/.test(value || ''));
+
+      if (rowCountLink) {
+        lines.push(variable + '.RowCount = ' + convertTo(this._linkValue(rowCountLink, CsType.Int), CsType.Int).code + ';');
+      } else if (configured !== undefined) {
+        lines.push(variable + '.RowCount = ' + configured.trim() + ';');
+      }
+    }
+
     if (symbol.kind === ActionKind.QueryCommand) {
       lines.push('queries.ExecuteCommand(' + variable + ');');
     } else {
@@ -2287,6 +2494,10 @@ class TransactionEmitter {
   _emitPluginCall(use, symbol) {
     const lines = [];
     const definition = use.definition;
+
+    if (definition.actionType === 'TransactionCall' && linkedExpression(this._transaction, use.name, 'TransactionName') !== null) {
+      lines.push('// the called transaction is chosen at runtime (TransactionName); ' + definition.static('TransactionName') + ' is only its interface');
+    }
     const settings = [];
     const linked = new Set();
     const selectorLinks = new Map();
@@ -2524,8 +2735,9 @@ function combine(terms, logicalAnd) {
     return terms[0];
   }
 
-  const precedence = logicalAnd ? Precedence.LogicalAnd : Precedence.LogicalOr;
-  return new TypedCode(terms.map((term) => term.at(precedence + 1)).join(logicalAnd ? ' && ' : ' || '), CsType.Bool, precedence);
+  // a Conditional evaluates every input: & and | instead of the short-circuit && and ||
+  const precedence = logicalAnd ? Precedence.BitwiseAnd : Precedence.BitwiseOr;
+  return new TypedCode(terms.map((term) => term.at(precedence + 1)).join(logicalAnd ? ' & ' : ' | '), CsType.Bool, precedence);
 }
 
 /** "x = value;" when something reads the action's result, else the call as a statement. */
@@ -3115,6 +3327,7 @@ class MiiTransaction {
   constructor(path) {
     this.path = path;
     this.description = '';
+    this.throwOnLinkError = ''; // the transaction attribute; false or 0: a failing link does not stop the run
     this.inputs = [];
     this.outputs = [];
     this.locals = [];
@@ -3151,6 +3364,7 @@ class MiiQuery {
     this.rootName = '';
     this.mode = '';
     this.text = '';
+    this.rowCount = ''; // RowCount of the template: MII returns at most this many rows
     this.url = '';
     this.parameters = []; // { slot, description, type, defaultValue }
     this.xacuteTransaction = '';
@@ -3179,6 +3393,7 @@ const ObjectReader = {
     const root = document.documentElement;
     const transaction = new MiiTransaction(path);
     transaction.description = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'Description');
+    transaction.throwOnLinkError = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'ThrowOnLinkError').trim();
 
     for (const item of MiiXml.children(MiiXml.child(root, 'Context'), 'ContextItem')) {
       const parameter = readParameter(item);
@@ -3211,6 +3426,7 @@ const ObjectReader = {
     const query = new MiiQuery(path);
     query.rootName = root.localName;
     query.mode = root.getAttribute('Mode');
+    query.rowCount = root.getAttribute('RowCount').trim();
 
     switch (root.localName) {
       case 'SQLQuery':
@@ -3550,6 +3766,9 @@ const { parseXml, XmlParseError } = __require('xml.js');
 class ObjectGraph {
   constructor() {
     this.root = null;
+    this.roots = []; // the public methods: the root transaction, or every transaction of the folder
+    this.folder = null; // the folder of a folder X-Ray
+    this.folderQueries = []; // the query templates of that folder
     this.transactions = []; // discovery order, root first
     this.queries = [];
     this.transactionsByReference = new Map(); // lower-case normalized reference -> transaction
@@ -3567,6 +3786,23 @@ class ObjectGraph {
 }
 
 const STRING_LITERAL = /^\s*"([^"\\]*)"\s*$/;
+
+/** The expression of an incoming link to Action.Property; null when there is none. */
+function linkedExpression(owner, actionName, property) {
+  for (const use of owner.allActionUses()) {
+    if (use.name !== actionName) {
+      continue;
+    }
+
+    for (const link of use.incoming) {
+      if (link.to === actionName + '.' + property) {
+        return link.from;
+      }
+    }
+  }
+
+  return null;
+}
 
 /** The value of an incoming link to Action.Property when it is a plain string literal; null otherwise. */
 function literalLinkedValue(owner, actionName, property) {
@@ -3604,7 +3840,47 @@ class DependencyResolver {
     }
 
     this._graph.root = root;
+    this._graph.roots = [root];
+    await this._followPending();
+    return this._graph;
+  }
 
+  /** A whole folder: every transaction and query template below it (entries { path, type } of the folder listing),
+   * and everything they reach. Null when none of them can be read. */
+  async resolveFolder(folder, entries) {
+    const byPath = (a, b) => (a.path.toLowerCase() < b.path.toLowerCase() ? -1 : a.path.toLowerCase() > b.path.toLowerCase() ? 1 : 0);
+    const sorted = entries.slice().sort(byPath);
+    this._graph.folder = ObjectPath.normalize(folder);
+    this._graph.roots = [];
+    this._graph.folderQueries = [];
+
+    for (const entry of sorted.filter((item) => item.type === 'Transaction')) {
+      const transaction = await this._loadTransaction(entry.path);
+
+      if (transaction && !this._graph.roots.includes(transaction)) {
+        this._graph.roots.push(transaction);
+      }
+    }
+
+    for (const entry of sorted.filter((item) => item.type !== 'Transaction')) {
+      await this._loadQuery(entry.path);
+      const query = this._graph.findQuery(entry.path);
+
+      if (query && !this._graph.folderQueries.includes(query)) {
+        this._graph.folderQueries.push(query);
+      }
+    }
+
+    if (this._graph.roots.length === 0 && this._graph.folderQueries.length === 0) {
+      return null;
+    }
+
+    this._graph.root = this._graph.roots.length > 0 ? this._graph.roots[0] : null;
+    await this._followPending();
+    return this._graph;
+  }
+
+  async _followPending() {
     while (this._pending.length > 0) {
       const transaction = this._pending.shift();
 
@@ -3612,13 +3888,13 @@ class DependencyResolver {
         await this._followAction(transaction, action);
       }
     }
-
-    return this._graph;
   }
 
   async _followAction(owner, action) {
     if (action.actionType === 'TransactionCall') {
-      const name = action.static('TransactionName');
+      // a literal link to TransactionName wins over the configured name; an expression leaves the callee open
+      const linked = linkedExpression(owner, action.name, 'TransactionName');
+      const name = linked === null ? action.static('TransactionName') : literalLinkedValue(owner, action.name, 'TransactionName') || '';
 
       if (name.length > 0) {
         await this._loadTransaction(name);
@@ -3753,7 +4029,7 @@ class DependencyResolver {
   }
 }
 
-return { ObjectGraph, literalLinkedValue, DependencyResolver };
+return { ObjectGraph, linkedExpression, literalLinkedValue, DependencyResolver };
 });
 __define('rowset.js', () => {
 // Row records of MII rowset documents (Rowsets/Rowset/Row), the result columns of SQL statements and the structure
@@ -4285,7 +4561,7 @@ return { RowsetColumn, RowsetContract, ContractFactory, extractSqlColumns, shrin
 });
 __define('runtime.js', () => {
 // Generated by web/build.mjs from src/Generate/RuntimeSource.txt - do not edit.
-const RUNTIME_SOURCE = "#region Services (implement these to run the code)\r\n\r\n/// <summary>Runs queries. MII replaces every [Param.N] in the text by the parameter's value as text (no bind\r\n/// variables), so values that go into quotes are escaped by the callers (stringreplace \"'\" -> \"''\").</summary>\r\npublic interface IQueryService\r\n{\r\n    /// <summary>Runs a statement that returns rows and maps the columns to the properties of T by name.</summary>\r\n    List<T> Execute<T>(Query query) where T : MiiRow, new();\r\n\r\n    /// <summary>Runs a statement without result rows (query mode Command).</summary>\r\n    void ExecuteCommand(Query query);\r\n}\r\n\r\n/// <summary>A query template: the statement text and the parameter values by name (the comment at the call maps\r\n/// [Param.N] to the names).</summary>\r\npublic sealed class Query(string text)\r\n{\r\n    public string Text { get; } = text;\r\n\r\n    public List<KeyValuePair<string, object>> Parameters { get; } = [];\r\n\r\n    public void AddParameter(string name, object value) => Parameters.Add(new(name, value));\r\n}\r\n\r\n/// <summary>Everything MII does that has no plain C# equivalent: SAP ME PAPI calls, web services, HTTP, mail, files,\r\n/// sort/filter actions, logging, shared properties.</summary>\r\npublic interface IPluginService\r\n{\r\n    /// <summary>Runs an MII action: actionType is the MII action class (e.g. SAPMEPAPIInterface), actionName the action\r\n    /// in the transaction, settings its configuration and inputs by MII property name.</summary>\r\n    PluginResult Invoke(string actionType, string actionName, Dictionary<string, object> settings);\r\n\r\n    /// <summary>Tracer and Event Logger.</summary>\r\n    void Log(string level, string message);\r\n\r\n    /// <summary>Loads a web resource of the MII server (e.g. an XSLT stylesheet) as text.</summary>\r\n    string LoadResource(string path);\r\n\r\n    /// <summary>Reads a shared or global property of the MII server (Inline.X, Persistent.X, Global.X).</summary>\r\n    object GetProperty(string name);\r\n\r\n    /// <summary>Writes a shared property of the MII server.</summary>\r\n    void SetProperty(string name, object value);\r\n}\r\n\r\n/// <summary>The outputs of a plugin call by MII property name (\"\" for an output that is not set).</summary>\r\npublic sealed class PluginResult\r\n{\r\n    public Dictionary<string, object> Values { get; } = [];\r\n\r\n    public object Get(string name) => Values.TryGetValue(name, out var value) ? value : string.Empty;\r\n}\r\n\r\n#endregion\r\n\r\n#region X-Ray runtime (MII expression functions and XML handling)\r\n\r\n/// <summary>An exception raised by a Throw action (or by an action that failed).</summary>\r\npublic class MiiException(string message, string actionName, string actionType = \"Throw\") : Exception(message)\r\n{\r\n    /// <summary>The MII action that raised the exception (Catch output Source).</summary>\r\n    public string ActionName { get; } = actionName;\r\n\r\n    /// <summary>The MII action class (Catch output ActionType).</summary>\r\n    public string ActionType { get; } = actionType;\r\n}\r\n\r\n/// <summary>Terminate Transaction with error: ends the transaction; a Catch of the same transaction does not stop it,\r\n/// the calling transaction sees it as a failed call.</summary>\r\npublic sealed class TransactionTerminatedException(string transactionPath, string message)\r\n    : MiiException(message, transactionPath, \"TerminateTransaction\")\r\n{\r\n    public string TransactionPath { get; } = transactionPath;\r\n}\r\n\r\n/// <summary>Base of the row records: one property per column of an MII rowset document.</summary>\r\npublic abstract record MiiRow\r\n{\r\n    public sealed override string ToString() => Mii.ToStr(this);\r\n}\r\n\r\n/// <summary>Row access as MII's XPath does it: a missing row reads as an empty row (\"\" for every column).</summary>\r\npublic static class MiiRows\r\n{\r\n    /// <summary>Rowsets/Rowset/Row/Column: the first row, or an empty row.</summary>\r\n    public static T FirstOrEmpty<T>(this List<T> rows) where T : MiiRow, new() => rows.Count > 0 ? rows[0] : new T();\r\n\r\n    /// <summary>Rowsets/Rowset/Row[Column = 'value']/...: the first matching row, or an empty row.</summary>\r\n    public static T FirstOrEmpty<T>(this List<T> rows, Func<T, bool> match) where T : MiiRow, new() => rows.FirstOrDefault(match) ?? new T();\r\n\r\n    /// <summary>Rowsets/Rowset/Row[n]/...: the row at a 1-based position, or an empty row.</summary>\r\n    public static T RowAt<T>(this List<T> rows, int position) where T : MiiRow, new() =>\r\n        position >= 1 && position <= rows.Count ? rows[position - 1] : new T();\r\n}\r\n\r\n/// <summary>Stand-ins for the MII expression language and XML handling. MII rules kept: booleans are true for\r\n/// \"true\" or \"1\" (any case, blanks around); match() is case-sensitive unless the pattern starts with (?i);\r\n/// datediff() returns seconds; append() changes the list it gets.</summary>\r\npublic static class Mii\r\n{\r\n    private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;\r\n    private static readonly Regex TrueValue = new Regex(@\"^\\s*(true|1)\\s*$\", RegexOptions.IgnoreCase);\r\n    private static readonly Regex EmptyValue = new Regex(@\"^\\s*(null|---)?\\s*$\", RegexOptions.IgnoreCase);\r\n    private static readonly string[] DateFormats =\r\n    {\r\n        \"yyyy-MM-dd'T'HH:mm:ss\", \"yyyy-MM-dd'T'HH:mm:ss.fff\", \"yyyy-MM-dd'T'HH:mm:sszzz\", \"yyyy-MM-dd'T'HH:mm:ss.fffzzz\",\r\n        \"yyyy-MM-dd'T'HH:mm:sszz\", \"yyyy-MM-dd'T'HH:mm:ssK\", \"yyyy-MM-dd HH:mm:ss\", \"yyyy-MM-dd\", \"MM/dd/yyyy HH:mm:ss\"\r\n    };\r\n\r\n    private static readonly string RunId = Guid.NewGuid().ToString();\r\n\r\n    public static string UserName\r\n    {\r\n        get { return Environment.UserName; }\r\n    }\r\n\r\n    public static string TransactionId\r\n    {\r\n        get { return RunId; }\r\n    }\r\n\r\n    public static string UserLocale\r\n    {\r\n        get { return CultureInfo.CurrentCulture.Name; }\r\n    }\r\n\r\n    // ------------------------------------------------------------------ conversions\r\n\r\n    public static string ToStr(object value)\r\n    {\r\n        if (value == null)\r\n        {\r\n            return string.Empty;\r\n        }\r\n\r\n        string text = value as string;\r\n\r\n        if (text != null)\r\n        {\r\n            return text;\r\n        }\r\n\r\n        if (value is bool)\r\n        {\r\n            return (bool)value ? \"true\" : \"false\";\r\n        }\r\n\r\n        if (value is DateTime)\r\n        {\r\n            return ((DateTime)value).ToString(\"yyyy-MM-dd'T'HH:mm:ss\", Invariant);\r\n        }\r\n\r\n        if (value is double)\r\n        {\r\n            return ((double)value).ToString(\"R\", Invariant);\r\n        }\r\n\r\n        if (value is XmlDocument)\r\n        {\r\n            XmlDocument document = (XmlDocument)value;\r\n            return document.DocumentElement == null ? string.Empty : document.DocumentElement.OuterXml;\r\n        }\r\n\r\n        if (value is XmlNode)\r\n        {\r\n            return ((XmlNode)value).OuterXml;\r\n        }\r\n\r\n        if (value is IEnumerable<MiiRow> rows)\r\n        {\r\n            return RowsetDocument(rows, value.GetType()).DocumentElement.OuterXml;\r\n        }\r\n\r\n        if (value is MiiRow)\r\n        {\r\n            return RowElement(new XmlDocument(), value).OuterXml;\r\n        }\r\n\r\n        if (value is Exception)\r\n        {\r\n            return ((Exception)value).Message;\r\n        }\r\n\r\n        IDictionary<string, string> map = value as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            List<string> pairs = new List<string>();\r\n\r\n            foreach (KeyValuePair<string, string> pair in map)\r\n            {\r\n                pairs.Add(pair.Key + \"=\" + pair.Value);\r\n            }\r\n\r\n            return \"{\" + string.Join(\", \", pairs.ToArray()) + \"}\";\r\n        }\r\n\r\n        List<string> list = value as List<string>;\r\n\r\n        if (list != null)\r\n        {\r\n            return ListToString(list);\r\n        }\r\n\r\n        IFormattable formattable = value as IFormattable;\r\n\r\n        if (formattable != null)\r\n        {\r\n            return formattable.ToString(null, Invariant);\r\n        }\r\n\r\n        return value.ToString();\r\n    }\r\n\r\n    public static bool ToBool(object value)\r\n    {\r\n        if (value is bool)\r\n        {\r\n            return (bool)value;\r\n        }\r\n\r\n        if (value is int || value is long || value is double || value is decimal)\r\n        {\r\n            return Convert.ToDouble(value, Invariant) != 0;\r\n        }\r\n\r\n        return TrueValue.IsMatch(ToStr(value));\r\n    }\r\n\r\n    public static double ToDouble(object value)\r\n    {\r\n        if (value is double)\r\n        {\r\n            return (double)value;\r\n        }\r\n\r\n        if (value is int || value is long || value is decimal || value is float)\r\n        {\r\n            return Convert.ToDouble(value, Invariant);\r\n        }\r\n\r\n        if (value is bool)\r\n        {\r\n            return (bool)value ? 1 : 0;\r\n        }\r\n\r\n        double result;\r\n        return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result) ? result : 0;\r\n    }\r\n\r\n    public static int ToInt(object value)\r\n    {\r\n        double number = ToDouble(value);\r\n        return number > int.MaxValue ? int.MaxValue : number < int.MinValue ? int.MinValue : (int)number;\r\n    }\r\n\r\n    public static long ToLong(object value)\r\n    {\r\n        if (value is long)\r\n        {\r\n            return (long)value;\r\n        }\r\n\r\n        long result;\r\n\r\n        if (long.TryParse(ToStr(value).Trim(), NumberStyles.Integer, Invariant, out result))\r\n        {\r\n            return result;\r\n        }\r\n\r\n        return (long)ToDouble(value);\r\n    }\r\n\r\n    public static decimal ToDecimal(object value)\r\n    {\r\n        if (value is decimal)\r\n        {\r\n            return (decimal)value;\r\n        }\r\n\r\n        decimal result;\r\n\r\n        if (decimal.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result))\r\n        {\r\n            return result;\r\n        }\r\n\r\n        double number = ToDouble(value);\r\n        return number > (double)decimal.MaxValue || number < (double)decimal.MinValue ? 0m : (decimal)number;\r\n    }\r\n\r\n    public static DateTime ToDateTime(object value)\r\n    {\r\n        if (value is DateTime)\r\n        {\r\n            return (DateTime)value;\r\n        }\r\n\r\n        DateTime result;\r\n\r\n        if (DateTime.TryParseExact(ToStr(value).Trim(), DateFormats, Invariant, DateTimeStyles.None, out result))\r\n        {\r\n            return result;\r\n        }\r\n\r\n        return DateTime.MinValue;\r\n    }\r\n\r\n    public static XmlDocument ToXml(object value)\r\n    {\r\n        XmlDocument document = value as XmlDocument;\r\n\r\n        if (document != null)\r\n        {\r\n            return document;\r\n        }\r\n\r\n        if (value is IEnumerable<MiiRow> rows)\r\n        {\r\n            return RowsetDocument(rows, value.GetType());\r\n        }\r\n\r\n        if (value is MiiRow)\r\n        {\r\n            XmlDocument rowDocument = new XmlDocument();\r\n            rowDocument.AppendChild(RowElement(rowDocument, value));\r\n            return rowDocument;\r\n        }\r\n\r\n        XmlNode node = value as XmlNode;\r\n\r\n        if (node != null)\r\n        {\r\n            return NodeAsDocument(node);\r\n        }\r\n\r\n        string text = ToStr(value).Trim();\r\n        return text.StartsWith(\"<\") ? ParseXml(text) : new XmlDocument();\r\n    }\r\n\r\n    public static List<string> ToList(object value)\r\n    {\r\n        List<string> list = value as List<string>;\r\n\r\n        if (list != null)\r\n        {\r\n            return list;\r\n        }\r\n\r\n        List<string> result = new List<string>();\r\n\r\n        if (value == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        IDictionary<string, string> map = value as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            result.AddRange(map.Values);\r\n            return result;\r\n        }\r\n\r\n        System.Collections.IEnumerable items = value as System.Collections.IEnumerable;\r\n\r\n        if (items != null && !(value is string) && !(value is XmlNode))\r\n        {\r\n            foreach (object item in items)\r\n            {\r\n                result.Add(ToStr(item));\r\n            }\r\n\r\n            return result;\r\n        }\r\n\r\n        string text = ToStr(value).Trim();\r\n\r\n        if (text.StartsWith(\"[\") && text.EndsWith(\"]\"))\r\n        {\r\n            foreach (Match match in Regex.Matches(text, @\"\\[(?:[A-Za-z]+:)?([^\\[\\]]*)\\]\"))\r\n            {\r\n                result.Add(match.Groups[1].Value);\r\n            }\r\n\r\n            return result;\r\n        }\r\n\r\n        if (text.Length > 0)\r\n        {\r\n            result.Add(text);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static Dictionary<string, string> ToMap(object value)\r\n    {\r\n        Dictionary<string, string> map = value as Dictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            return map;\r\n        }\r\n\r\n        Dictionary<string, string> result = new Dictionary<string, string>();\r\n        IDictionary<string, string> other = value as IDictionary<string, string>;\r\n\r\n        if (other != null)\r\n        {\r\n            foreach (KeyValuePair<string, string> pair in other)\r\n            {\r\n                result[pair.Key] = pair.Value;\r\n            }\r\n\r\n            return result;\r\n        }\r\n\r\n        foreach (Match match in Regex.Matches(ToStr(value), @\"([^{},=\\s][^{},=]*)=\\[(?:[A-Za-z]+:)?([^\\[\\]]*)\\]\"))\r\n        {\r\n            result[match.Groups[1].Value.Trim()] = match.Groups[2].Value;\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    /// <summary>An MII rowset document (or anything that converts to one) as row records, columns matched by name.</summary>\r\n    public static List<T> ToRows<T>(object value) where T : MiiRow, new()\r\n    {\r\n        if (value is List<T> list)\r\n        {\r\n            return list;\r\n        }\r\n\r\n        List<T> rows = [];\r\n        XmlDocument document = ToXml(value);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return rows;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(\"/Rowsets/Rowset/Row\"))\r\n        {\r\n            T row = new T();\r\n            FillRow(row, node);\r\n            rows.Add(row);\r\n        }\r\n\r\n        return rows;\r\n    }\r\n\r\n    /// <summary>Row records as an MII rowset document (Rowsets/Rowset with Columns and Row elements).</summary>\r\n    private static XmlDocument RowsetDocument(IEnumerable<MiiRow> rows, Type listType)\r\n    {\r\n        XmlDocument document = new XmlDocument();\r\n        XmlElement rowset = document.CreateElement(\"Rowset\");\r\n        document.AppendChild(document.CreateElement(\"Rowsets\")).AppendChild(rowset);\r\n        XmlElement columns = document.CreateElement(\"Columns\");\r\n        rowset.AppendChild(columns);\r\n        Type rowType = listType.IsGenericType ? listType.GetGenericArguments()[0] : typeof(MiiRow);\r\n\r\n        foreach (PropertyInfo property in ColumnsOf(rowType))\r\n        {\r\n            XmlElement column = document.CreateElement(\"Column\");\r\n            column.SetAttribute(\"Name\", property.Name);\r\n            columns.AppendChild(column);\r\n        }\r\n\r\n        foreach (MiiRow row in rows)\r\n        {\r\n            rowset.AppendChild(RowElement(document, row));\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    public static T ToRow<T>(object value) where T : MiiRow, new()\r\n    {\r\n        if (value is T)\r\n        {\r\n            return (T)value;\r\n        }\r\n\r\n        T row = new T();\r\n        XmlDocument document = ToXml(value);\r\n        XmlNode node = document.SelectSingleNode(\"//Row\") ?? document.DocumentElement;\r\n\r\n        if (node != null)\r\n        {\r\n            FillRow(row, node);\r\n        }\r\n\r\n        return row;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ comparisons\r\n\r\n    /// <summary>== in MII: numbers compare as numbers, everything else as text.</summary>\r\n    public static bool AreEqual(object left, object right)\r\n    {\r\n        if (IsNumber(left) || IsNumber(right))\r\n        {\r\n            double a;\r\n            double b;\r\n\r\n            if (TryNumber(left, out a) && TryNumber(right, out b))\r\n            {\r\n                return a == b;\r\n            }\r\n        }\r\n\r\n        if (left is bool || right is bool)\r\n        {\r\n            return ToBool(left) == ToBool(right);\r\n        }\r\n\r\n        return ToStr(left) == ToStr(right);\r\n    }\r\n\r\n    /// <summary>&lt; &gt; in MII: as numbers when both are numbers, else as text.</summary>\r\n    public static int Compare(object left, object right)\r\n    {\r\n        double a;\r\n        double b;\r\n\r\n        if (TryNumber(left, out a) && TryNumber(right, out b))\r\n        {\r\n            return a.CompareTo(b);\r\n        }\r\n\r\n        if (left is DateTime || right is DateTime)\r\n        {\r\n            return ToDateTime(left).CompareTo(ToDateTime(right));\r\n        }\r\n\r\n        return string.CompareOrdinal(ToStr(left), ToStr(right));\r\n    }\r\n\r\n    private static bool IsNumber(object value)\r\n    {\r\n        return value is int || value is long || value is double || value is decimal || value is float;\r\n    }\r\n\r\n    private static bool TryNumber(object value, out double number)\r\n    {\r\n        if (IsNumber(value))\r\n        {\r\n            number = Convert.ToDouble(value, Invariant);\r\n            return true;\r\n        }\r\n\r\n        return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out number);\r\n    }\r\n\r\n    // ------------------------------------------------------------------ XML\r\n\r\n    public static XmlDocument ParseXml(string text)\r\n    {\r\n        XmlDocument document = new XmlDocument();\r\n\r\n        if (text != null && text.Trim().Length > 0)\r\n        {\r\n            document.LoadXml(text.Trim());\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Doc{xpath}: the text of the first matching node, or the value of an XPath expression such as count(...).</summary>\r\n    public static string XPath(object source, string xpath)\r\n    {\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return string.Empty;\r\n        }\r\n\r\n        object result = document.CreateNavigator().Evaluate(xpath, Namespaces(document));\r\n        System.Xml.XPath.XPathNodeIterator nodes = result as System.Xml.XPath.XPathNodeIterator;\r\n\r\n        if (nodes != null)\r\n        {\r\n            return nodes.MoveNext() ? nodes.Current.Value : string.Empty;\r\n        }\r\n\r\n        if (result is double)\r\n        {\r\n            double number = (double)result;\r\n            return number == Math.Floor(number) && Math.Abs(number) < 1e15 ? ((long)number).ToString(Invariant) : number.ToString(\"R\", Invariant);\r\n        }\r\n\r\n        return ToStr(result);\r\n    }\r\n\r\n    /// <summary>Doc{xpath} used as XML: the first matching node as a document of its own.</summary>\r\n    public static XmlDocument SelectXml(object source, string xpath)\r\n    {\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return new XmlDocument();\r\n        }\r\n\r\n        XmlNode node = document.SelectSingleNode(xpath, Namespaces(document));\r\n        return node == null ? new XmlDocument() : NodeAsDocument(node);\r\n    }\r\n\r\n    /// <summary>The nodes a repeater runs over, each as a document of its own.</summary>\r\n    public static List<XmlDocument> SelectNodes(object source, string xpath)\r\n    {\r\n        List<XmlDocument> result = new List<XmlDocument>();\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))\r\n        {\r\n            result.Add(NodeAsDocument(node));\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    /// <summary>X{key} on a value of unknown type: a map lookup, else an XPath.</summary>\r\n    public static string Select(object source, string key)\r\n    {\r\n        IDictionary<string, string> map = source as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            return MapGet(map, key);\r\n        }\r\n\r\n        return XPath(source, key);\r\n    }\r\n\r\n    /// <summary>Assign link with XPath: sets the text of the node (created when the path is a plain element path).</summary>\r\n    public static XmlDocument SetXPathValue(XmlDocument document, string xpath, object value)\r\n    {\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null)\r\n        {\r\n            node.InnerText = ToStr(value);\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Assign XML link: replaces the selected node by the source document's root element.</summary>\r\n    public static XmlDocument AssignXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n\r\n        if (sourceDocument.DocumentElement == null)\r\n        {\r\n            return document;\r\n        }\r\n\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node == null || node == document.DocumentElement || node == document)\r\n        {\r\n            document.RemoveAll();\r\n            document.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));\r\n            return document;\r\n        }\r\n\r\n        node.ParentNode.ReplaceChild(document.ImportNode(sourceDocument.DocumentElement, true), node);\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Append XML link: the source root element becomes the last child of the selected node.</summary>\r\n    public static XmlDocument AppendXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null && sourceDocument.DocumentElement != null)\r\n        {\r\n            node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Append After XML link: the source root element is inserted after the selected node.</summary>\r\n    public static XmlDocument AppendAfterXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null && node.ParentNode != null && sourceDocument.DocumentElement != null)\r\n        {\r\n            node.ParentNode.InsertAfter(document.ImportNode(sourceDocument.DocumentElement, true), node);\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Replace XML link: the children of the selected node are replaced by the source root element.</summary>\r\n    public static XmlDocument ReplaceXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null && sourceDocument.DocumentElement != null)\r\n        {\r\n            while (node.FirstChild != null)\r\n            {\r\n                node.RemoveChild(node.FirstChild);\r\n            }\r\n\r\n            node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Remove XML link: removes every node the XPath selects.</summary>\r\n    public static XmlDocument RemoveXml(XmlDocument document, string xpath)\r\n    {\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return document;\r\n        }\r\n\r\n        List<XmlNode> nodes = new List<XmlNode>();\r\n\r\n        foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))\r\n        {\r\n            nodes.Add(node);\r\n        }\r\n\r\n        foreach (XmlNode node in nodes)\r\n        {\r\n            if (node.ParentNode != null)\r\n            {\r\n                node.ParentNode.RemoveChild(node);\r\n            }\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>XSLT action.</summary>\r\n    public static XmlDocument XslTransform(object input, object stylesheet)\r\n    {\r\n        XslCompiledTransform transform = new XslCompiledTransform();\r\n\r\n        using (XmlReader reader = new XmlNodeReader(ToXml(stylesheet)))\r\n        {\r\n            transform.Load(reader);\r\n        }\r\n\r\n        StringBuilder output = new StringBuilder();\r\n\r\n        using (StringWriter writer = new StringWriter(output, Invariant))\r\n        {\r\n            transform.Transform(ToXml(input), null, writer);\r\n        }\r\n\r\n        string text = output.ToString().Trim();\r\n        return text.StartsWith(\"<\") ? ParseXml(text) : new XmlDocument();\r\n    }\r\n\r\n    /// <summary>A row for a rowset document that is not typed: column name, value, column name, value, ...</summary>\r\n    public static void AddRow(object document, params object[] columnsAndValues)\r\n    {\r\n        XmlDocument xml = ToXml(document);\r\n        XmlNode rowset = xml.SelectSingleNode(\"/Rowsets/Rowset\");\r\n\r\n        if (rowset == null)\r\n        {\r\n            return;\r\n        }\r\n\r\n        XmlElement row = xml.CreateElement(\"Row\");\r\n\r\n        for (int index = 0; index + 1 < columnsAndValues.Length; index += 2)\r\n        {\r\n            XmlElement cell = xml.CreateElement(ToStr(columnsAndValues[index]));\r\n            cell.InnerText = ToStr(columnsAndValues[index + 1]);\r\n            row.AppendChild(cell);\r\n        }\r\n\r\n        rowset.AppendChild(row);\r\n    }\r\n\r\n    public static List<string> GetListFromXPath(object source, object xpath)\r\n    {\r\n        List<string> result = new List<string>();\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))\r\n        {\r\n            result.Add(node.InnerText);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static Dictionary<string, string> GetMapFromXPath(object source, object xpath)\r\n    {\r\n        Dictionary<string, string> result = new Dictionary<string, string>();\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))\r\n        {\r\n            result[node.Name] = node.InnerText;\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static string Name(object source)\r\n    {\r\n        XmlDocument document = ToXml(source);\r\n        return document.DocumentElement == null ? string.Empty : document.DocumentElement.Name;\r\n    }\r\n\r\n    private static XmlNamespaceManager Namespaces(XmlDocument document)\r\n    {\r\n        XmlNamespaceManager manager = new XmlNamespaceManager(document.NameTable);\r\n\r\n        foreach (XmlNode node in document.SelectNodes(\"//namespace::*\"))\r\n        {\r\n            string prefix = node.LocalName == \"xmlns\" ? string.Empty : node.LocalName;\r\n\r\n            if (prefix.Length > 0 && prefix != \"xml\" && manager.LookupNamespace(prefix) == null)\r\n            {\r\n                manager.AddNamespace(prefix, node.Value);\r\n            }\r\n        }\r\n\r\n        return manager;\r\n    }\r\n\r\n    private static XmlDocument NodeAsDocument(XmlNode node)\r\n    {\r\n        XmlDocument document = new XmlDocument();\r\n\r\n        if (node is XmlDocument)\r\n        {\r\n            XmlNode root = ((XmlDocument)node).DocumentElement;\r\n\r\n            if (root != null)\r\n            {\r\n                document.AppendChild(document.ImportNode(root, true));\r\n            }\r\n\r\n            return document;\r\n        }\r\n\r\n        if (node is XmlElement)\r\n        {\r\n            document.AppendChild(document.ImportNode(node, true));\r\n            return document;\r\n        }\r\n\r\n        XmlElement value = document.CreateElement(\"Value\");\r\n        value.InnerText = node.Value ?? node.InnerText;\r\n        document.AppendChild(value);\r\n        return document;\r\n    }\r\n\r\n    /// <summary>The node of an XPath; a missing plain element path (/a/b/c) is created.</summary>\r\n    private static XmlNode FindOrCreate(XmlDocument document, string xpath)\r\n    {\r\n        if (document.DocumentElement != null)\r\n        {\r\n            XmlNode found = document.SelectSingleNode(xpath, Namespaces(document));\r\n\r\n            if (found != null)\r\n            {\r\n                return found;\r\n            }\r\n        }\r\n\r\n        if (!Regex.IsMatch(xpath, @\"^(/[A-Za-z_][\\w.\\-]*)+$\"))\r\n        {\r\n            return null;\r\n        }\r\n\r\n        XmlNode current = document;\r\n\r\n        foreach (string name in xpath.Trim('/').Split('/'))\r\n        {\r\n            XmlNode next = null;\r\n\r\n            foreach (XmlNode child in current.ChildNodes)\r\n            {\r\n                if (child.NodeType == XmlNodeType.Element && child.Name == name)\r\n                {\r\n                    next = child;\r\n                    break;\r\n                }\r\n            }\r\n\r\n            if (next == null)\r\n            {\r\n                if (current == document && document.DocumentElement != null)\r\n                {\r\n                    return null;\r\n                }\r\n\r\n                next = document.CreateElement(name);\r\n                current.AppendChild(next);\r\n            }\r\n\r\n            current = next;\r\n        }\r\n\r\n        return current;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ rows (reflection over the generated row classes)\r\n\r\n    public static List<PropertyInfo> ColumnsOf(Type rowType)\r\n    {\r\n        List<PropertyInfo> result = new List<PropertyInfo>();\r\n\r\n        foreach (PropertyInfo property in rowType.GetProperties(BindingFlags.Public | BindingFlags.Instance))\r\n        {\r\n            if (property.CanRead && property.CanWrite && property.GetIndexParameters().Length == 0)\r\n            {\r\n                result.Add(property);\r\n            }\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static object RowValue(object row, string column)\r\n    {\r\n        PropertyInfo property = FindColumn(row.GetType(), column);\r\n        return property == null ? null : property.GetValue(row, null);\r\n    }\r\n\r\n    public static XmlElement RowElement(XmlDocument document, object row)\r\n    {\r\n        XmlElement element = document.CreateElement(\"Row\");\r\n\r\n        foreach (PropertyInfo property in ColumnsOf(row.GetType()))\r\n        {\r\n            XmlElement cell = document.CreateElement(property.Name);\r\n            cell.InnerText = ToStr(property.GetValue(row, null));\r\n            element.AppendChild(cell);\r\n        }\r\n\r\n        return element;\r\n    }\r\n\r\n    public static void FillRow(object row, XmlNode node)\r\n    {\r\n        foreach (XmlNode cell in node.ChildNodes)\r\n        {\r\n            if (cell.NodeType != XmlNodeType.Element)\r\n            {\r\n                continue;\r\n            }\r\n\r\n            PropertyInfo property = FindColumn(row.GetType(), cell.LocalName);\r\n\r\n            if (property != null)\r\n            {\r\n                property.SetValue(row, ConvertTo(cell.InnerText, property.PropertyType), null);\r\n            }\r\n        }\r\n    }\r\n\r\n    private static PropertyInfo FindColumn(Type rowType, string column)\r\n    {\r\n        string wanted = Simplify(column);\r\n        PropertyInfo loose = null;\r\n\r\n        foreach (PropertyInfo property in ColumnsOf(rowType))\r\n        {\r\n            if (property.Name == column)\r\n            {\r\n                return property;\r\n            }\r\n\r\n            if (loose == null && Simplify(property.Name) == wanted)\r\n            {\r\n                loose = property;\r\n            }\r\n        }\r\n\r\n        return loose;\r\n    }\r\n\r\n    private static string Simplify(string name)\r\n    {\r\n        StringBuilder result = new StringBuilder();\r\n\r\n        foreach (char c in name)\r\n        {\r\n            if (char.IsLetterOrDigit(c))\r\n            {\r\n                result.Append(char.ToLowerInvariant(c));\r\n            }\r\n        }\r\n\r\n        return result.ToString();\r\n    }\r\n\r\n    private static object ConvertTo(string text, Type type)\r\n    {\r\n        if (type == typeof(string)) return text;\r\n\r\n        if (type == typeof(bool)) return ToBool(text);\r\n\r\n        if (type == typeof(int)) return ToInt(text);\r\n\r\n        if (type == typeof(long)) return ToLong(text);\r\n\r\n        if (type == typeof(double)) return ToDouble(text);\r\n\r\n        if (type == typeof(decimal)) return ToDecimal(text);\r\n\r\n        if (type == typeof(DateTime)) return ToDateTime(text);\r\n        return text;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ lists and maps\r\n\r\n    public static List<string> List(params object[] values)\r\n    {\r\n        List<string> result = new List<string>();\r\n\r\n        foreach (object value in values)\r\n        {\r\n            result.Add(ToStr(value));\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static Dictionary<string, string> Map(params object[] keysAndValues)\r\n    {\r\n        Dictionary<string, string> result = new Dictionary<string, string>();\r\n\r\n        for (int index = 0; index + 1 < keysAndValues.Length; index += 2)\r\n        {\r\n            result[ToStr(keysAndValues[index])] = ToStr(keysAndValues[index + 1]);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static string MapGet(object map, string key)\r\n    {\r\n        string value;\r\n        return ToMap(map).TryGetValue(key, out value) ? value : string.Empty;\r\n    }\r\n\r\n    public static string GetValueFromMap(object map, object key)\r\n    {\r\n        return MapGet(map, ToStr(key));\r\n    }\r\n\r\n    public static string ListGet(object list, int index)\r\n    {\r\n        List<string> items = ToList(list);\r\n        return index >= 0 && index < items.Count ? items[index] : string.Empty;\r\n    }\r\n\r\n    public static int Size(object value)\r\n    {\r\n        IDictionary<string, string> map = value as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            return map.Count;\r\n        }\r\n\r\n        return ToList(value).Count;\r\n    }\r\n\r\n    /// <summary>append() works by reference in MII: the list itself gets the value.</summary>\r\n    public static List<string> Append(object list, object value)\r\n    {\r\n        List<string> items = ToList(list);\r\n        items.Add(ToStr(value));\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Insert(object list, object index, object value)\r\n    {\r\n        List<string> items = ToList(list);\r\n        items.Insert(Math.Max(0, Math.Min(items.Count, ToInt(index))), ToStr(value));\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Set(object list, object index, object value)\r\n    {\r\n        List<string> items = ToList(list);\r\n        int position = ToInt(index);\r\n\r\n        if (position >= 0 && position < items.Count)\r\n        {\r\n            items[position] = ToStr(value);\r\n        }\r\n\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Remove(object list, object index)\r\n    {\r\n        List<string> items = ToList(list);\r\n        int position = ToInt(index);\r\n\r\n        if (position >= 0 && position < items.Count)\r\n        {\r\n            items.RemoveAt(position);\r\n        }\r\n\r\n        return items;\r\n    }\r\n\r\n    public static int Find(object list, object value)\r\n    {\r\n        return ToList(list).IndexOf(ToStr(value));\r\n    }\r\n\r\n    public static string First(object list)\r\n    {\r\n        List<string> items = ToList(list);\r\n        return items.Count > 0 ? items[0] : string.Empty;\r\n    }\r\n\r\n    public static string Last(object list)\r\n    {\r\n        List<string> items = ToList(list);\r\n        return items.Count > 0 ? items[items.Count - 1] : string.Empty;\r\n    }\r\n\r\n    public static List<string> Sort(object list)\r\n    {\r\n        List<string> items = new List<string>(ToList(list));\r\n        items.Sort(StringComparer.Ordinal);\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Keys(object map)\r\n    {\r\n        return new List<string>(ToMap(map).Keys);\r\n    }\r\n\r\n    public static List<string> Values(object map)\r\n    {\r\n        return new List<string>(ToMap(map).Values);\r\n    }\r\n\r\n    public static Dictionary<string, string> Put(object map, object key, object value)\r\n    {\r\n        Dictionary<string, string> items = ToMap(map);\r\n        items[ToStr(key)] = ToStr(value);\r\n        return items;\r\n    }\r\n\r\n    public static bool ContainsKey(object map, object key)\r\n    {\r\n        return ToMap(map).ContainsKey(ToStr(key));\r\n    }\r\n\r\n    public static bool ContainsValue(object map, object value)\r\n    {\r\n        return ToMap(map).ContainsValue(ToStr(value));\r\n    }\r\n\r\n    public static Dictionary<string, string> ListsToMap(object keys, object values)\r\n    {\r\n        List<string> keyList = ToList(keys);\r\n        List<string> valueList = ToList(values);\r\n        Dictionary<string, string> result = new Dictionary<string, string>();\r\n\r\n        for (int index = 0; index < keyList.Count; index++)\r\n        {\r\n            result[keyList[index]] = index < valueList.Count ? valueList[index] : string.Empty;\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    /// <summary>Splits on a regular expression (default \",\"); further MII arguments are ignored.</summary>\r\n    public static List<string> StringToList(object text, params object[] options)\r\n    {\r\n        string delimiter = options.Length > 0 ? ToStr(options[0]) : \",\";\r\n        return new List<string>(Regex.Split(ToStr(text), delimiter));\r\n    }\r\n\r\n    public static List<string> StringToListWithLimit(object text, object delimiter, object limit)\r\n    {\r\n        return new List<string>(new Regex(ToStr(delimiter)).Split(ToStr(text), Math.Max(1, ToInt(limit))));\r\n    }\r\n\r\n    public static string ListToString(object list, params object[] delimiter)\r\n    {\r\n        string separator = delimiter.Length > 0 ? ToStr(delimiter[0]) : \",\";\r\n        return string.Join(separator, ToList(list).ToArray());\r\n    }\r\n\r\n    public static List<string> TimeZoneIds()\r\n    {\r\n        List<string> result = new List<string>();\r\n\r\n        foreach (TimeZoneInfo zone in TimeZoneInfo.GetSystemTimeZones())\r\n        {\r\n            result.Add(zone.Id);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ strings\r\n\r\n    public static string StringLeft(object text, object length)\r\n    {\r\n        string value = ToStr(text);\r\n        return value.Substring(0, Math.Max(0, Math.Min(value.Length, ToInt(length))));\r\n    }\r\n\r\n    public static string StringRight(object text, object length)\r\n    {\r\n        string value = ToStr(text);\r\n        int count = Math.Max(0, Math.Min(value.Length, ToInt(length)));\r\n        return value.Substring(value.Length - count);\r\n    }\r\n\r\n    /// <summary>stringpart(text, start, length) with a 1-based start: stringpart(\"Football\", 1, 1) = \"F\".</summary>\r\n    public static string StringPart(object text, object start, object length)\r\n    {\r\n        string value = ToStr(text);\r\n        int begin = Math.Max(0, ToInt(start) - 1);\r\n\r\n        if (begin >= value.Length)\r\n        {\r\n            return string.Empty;\r\n        }\r\n\r\n        return value.Substring(begin, Math.Max(0, Math.Min(value.Length - begin, ToInt(length))));\r\n    }\r\n\r\n    public static int StringIndexOf(object text, object part)\r\n    {\r\n        return ToStr(text).IndexOf(ToStr(part), StringComparison.Ordinal);\r\n    }\r\n\r\n    public static int StringLastIndexOf(object text, object part)\r\n    {\r\n        return ToStr(text).LastIndexOf(ToStr(part), StringComparison.Ordinal);\r\n    }\r\n\r\n    /// <summary>stringreplace replaces every occurrence (literal text).</summary>\r\n    public static string StringReplace(object text, object find, object replacement)\r\n    {\r\n        string search = ToStr(find);\r\n        return search.Length == 0 ? ToStr(text) : ToStr(text).Replace(search, ToStr(replacement));\r\n    }\r\n\r\n    /// <summary>stringreplaceall replaces every match of a regular expression.</summary>\r\n    public static string StringReplaceAll(object text, object pattern, object replacement)\r\n    {\r\n        return Regex.Replace(ToStr(text), ToStr(pattern), ToStr(replacement));\r\n    }\r\n\r\n    /// <summary>MII's empty check: null, \"\", blanks, the text \"null\" or \"---\" (any case), as match(x, \"(?i)^\\s*(null|---)?\\s*$\").</summary>\r\n    public static bool IsEmpty(object value)\r\n    {\r\n        return EmptyValue.IsMatch(ToStr(value));\r\n    }\r\n\r\n    /// <summary>MII's boolean check on text: \"true\" or \"1\" (any case, blanks around), as match(x, \"(?i)^\\s*(true|1)\\s*$\").</summary>\r\n    public static bool IsTrue(object value)\r\n    {\r\n        return TrueValue.IsMatch(ToStr(value));\r\n    }\r\n\r\n    /// <summary>match(text, pattern) with more arguments than usual; case-sensitive like on the system.</summary>\r\n    public static bool Match(object text, object pattern, params object[] ignored)\r\n    {\r\n        return Regex.IsMatch(ToStr(text), ToStr(pattern));\r\n    }\r\n\r\n    /// <summary>match2(text, pattern, caseSensitive).</summary>\r\n    public static bool Match2(object text, object pattern, params object[] caseSensitive)\r\n    {\r\n        bool sensitive = caseSensitive.Length == 0 || ToBool(caseSensitive[0]);\r\n        return Regex.IsMatch(ToStr(text), ToStr(pattern), sensitive ? RegexOptions.None : RegexOptions.IgnoreCase);\r\n    }\r\n\r\n    public static string Quotes(object text)\r\n    {\r\n        return \"\\\"\" + ToStr(text) + \"\\\"\";\r\n    }\r\n\r\n    public static string Encode(object text)\r\n    {\r\n        return Uri.EscapeDataString(ToStr(text));\r\n    }\r\n\r\n    public static string Decode(object text)\r\n    {\r\n        return Uri.UnescapeDataString(ToStr(text));\r\n    }\r\n\r\n    public static string Base64Encode(object text)\r\n    {\r\n        return Convert.ToBase64String(Encoding.UTF8.GetBytes(ToStr(text)));\r\n    }\r\n\r\n    public static string Base64Decode(object text)\r\n    {\r\n        return Encoding.UTF8.GetString(Convert.FromBase64String(ToStr(text)));\r\n    }\r\n\r\n    public static string BooleanToString(object value)\r\n    {\r\n        return ToBool(value) ? \"true\" : \"false\";\r\n    }\r\n\r\n    public static string XmlEncode(object text)\r\n    {\r\n        return ToStr(text).Replace(\"&\", \"&amp;\").Replace(\"<\", \"&lt;\").Replace(\">\", \"&gt;\").Replace(\"\\\"\", \"&quot;\").Replace(\"'\", \"&apos;\");\r\n    }\r\n\r\n    public static string XmlDecode(object text)\r\n    {\r\n        return ToStr(text).Replace(\"&lt;\", \"<\").Replace(\"&gt;\", \">\").Replace(\"&quot;\", \"\\\"\").Replace(\"&apos;\", \"'\").Replace(\"&amp;\", \"&\");\r\n    }\r\n\r\n    public static string Format(object number, object pattern)\r\n    {\r\n        return ToDouble(number).ToString(ToStr(pattern), Invariant);\r\n    }\r\n\r\n    // ------------------------------------------------------------------ dates (patterns are Java patterns as in MII)\r\n\r\n    public static string DateFormat(object value, object fromFormat, object toFormat)\r\n    {\r\n        DateTime date;\r\n\r\n        if (!(value is DateTime) && DateTime.TryParseExact(ToStr(value).Trim(), NetFormat(ToStr(fromFormat)), Invariant, DateTimeStyles.None, out date))\r\n        {\r\n            return date.ToString(NetFormat(ToStr(toFormat)), Invariant);\r\n        }\r\n\r\n        return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);\r\n    }\r\n\r\n    public static string FormatDateNow(object format)\r\n    {\r\n        return DateTime.Now.ToString(NetFormat(ToStr(format)), Invariant);\r\n    }\r\n\r\n    /// <summary>datediff returns seconds (second minus first).</summary>\r\n    public static long DateDiff(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalSeconds;\r\n    }\r\n\r\n    public static long DateDiffDays(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalDays;\r\n    }\r\n\r\n    public static long DateDiffHours(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalHours;\r\n    }\r\n\r\n    public static long DateDiffMinutes(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalMinutes;\r\n    }\r\n\r\n    public static int DateCompare(object first, object second)\r\n    {\r\n        return Math.Sign(ToDateTime(first).CompareTo(ToDateTime(second)));\r\n    }\r\n\r\n    public static bool DateBetween(object value, object start, object end)\r\n    {\r\n        DateTime date = ToDateTime(value);\r\n        return date >= ToDateTime(start) && date <= ToDateTime(end);\r\n    }\r\n\r\n    public static DateTime DateAddSeconds(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddSeconds(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddMinutes(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddMinutes(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddHours(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddHours(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddDays(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddDays(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddMonths(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddMonths(ToInt(amount));\r\n    }\r\n\r\n    public static DateTime DateAddYears(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddYears(ToInt(amount));\r\n    }\r\n\r\n    public static long DateToSeconds(object value)\r\n    {\r\n        return (long)(ToDateTime(value) - new DateTime(1970, 1, 1)).TotalSeconds;\r\n    }\r\n\r\n    public static DateTime DateFromSeconds(object seconds)\r\n    {\r\n        return new DateTime(1970, 1, 1).AddSeconds(ToDouble(seconds));\r\n    }\r\n\r\n    /// <summary>converttimezone(date, toZone) converts from the server's zone, converttimezone(date, fromZone, toZone)\r\n    /// between two zones. MII uses Java zone ids (Europe/Berlin), Windows knows other ids, so an unknown id leaves the\r\n    /// date unchanged.</summary>\r\n    public static DateTime ConvertTimeZone(object value, params object[] zones)\r\n    {\r\n        DateTime date = ToDateTime(value);\r\n\r\n        if (zones.Length == 0)\r\n        {\r\n            return date;\r\n        }\r\n\r\n        try\r\n        {\r\n            TimeZoneInfo source = zones.Length >= 2 ? TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[0])) : TimeZoneInfo.Local;\r\n            TimeZoneInfo target = TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[zones.Length >= 2 ? 1 : 0]));\r\n            return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(date, DateTimeKind.Unspecified), source, target);\r\n        }\r\n        catch (TimeZoneNotFoundException)\r\n        {\r\n            return date;\r\n        }\r\n    }\r\n\r\n    public static DateTime ConvertTimeZone2(object value, params object[] zones)\r\n    {\r\n        return ConvertTimeZone(value, zones);\r\n    }\r\n\r\n    public static string CurrentTimeOffset()\r\n    {\r\n        TimeSpan offset = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now);\r\n        return (offset < TimeSpan.Zero ? \"-\" : \"+\") + offset.ToString(\"hhmm\", Invariant);\r\n    }\r\n\r\n    public static long CurrentTimeMillis()\r\n    {\r\n        return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;\r\n    }\r\n\r\n    /// <summary>Java date pattern -> .NET: the common letters are the same; S (milliseconds), a (AM/PM), E (day name),\r\n    /// Z/X (offset) differ.</summary>\r\n    private static string NetFormat(string javaFormat)\r\n    {\r\n        return javaFormat.Replace(\"SSS\", \"fff\").Replace(\"a\", \"tt\").Replace(\"EEEE\", \"dddd\").Replace(\"EEE\", \"ddd\").Replace(\"Z\", \"zzz\").Replace(\"XXX\", \"zzz\");\r\n    }\r\n\r\n    // ------------------------------------------------------------------ numbers\r\n\r\n    public static double Round(object value, params object[] digits)\r\n    {\r\n        int places = digits.Length > 0 ? ToInt(digits[0]) : 0;\r\n        return Math.Round(ToDouble(value), Math.Max(0, Math.Min(15, places)), MidpointRounding.AwayFromZero);\r\n    }\r\n\r\n    public static double Min(params object[] values)\r\n    {\r\n        List<double> numbers = Numbers(values);\r\n        double result = numbers.Count > 0 ? numbers[0] : 0;\r\n\r\n        foreach (double number in numbers)\r\n        {\r\n            result = Math.Min(result, number);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static double Max(params object[] values)\r\n    {\r\n        List<double> numbers = Numbers(values);\r\n        double result = numbers.Count > 0 ? numbers[0] : 0;\r\n\r\n        foreach (double number in numbers)\r\n        {\r\n            result = Math.Max(result, number);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static double Sum(params object[] values)\r\n    {\r\n        double result = 0;\r\n\r\n        foreach (double number in Numbers(values))\r\n        {\r\n            result += number;\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static double Average(params object[] values)\r\n    {\r\n        List<double> numbers = Numbers(values);\r\n        return numbers.Count == 0 ? 0 : Sum(values) / numbers.Count;\r\n    }\r\n\r\n    private static readonly Random Randomizer = new Random();\r\n\r\n    public static double Random(params object[] ignored)\r\n    {\r\n        return Randomizer.NextDouble();\r\n    }\r\n\r\n    public static double Ceiling(object value)\r\n    {\r\n        return Math.Ceiling(ToDouble(value));\r\n    }\r\n\r\n    public static double Floor(object value)\r\n    {\r\n        return Math.Floor(ToDouble(value));\r\n    }\r\n\r\n    public static double Sqrt(object value)\r\n    {\r\n        return Math.Sqrt(ToDouble(value));\r\n    }\r\n\r\n    private static List<double> Numbers(object[] values)\r\n    {\r\n        List<double> result = new List<double>();\r\n\r\n        foreach (object value in values)\r\n        {\r\n            if (value is List<string>)\r\n            {\r\n                foreach (string item in (List<string>)value)\r\n                {\r\n                    result.Add(ToDouble(item));\r\n                }\r\n            }\r\n            else\r\n            {\r\n                result.Add(ToDouble(value));\r\n            }\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ Catch outputs\r\n\r\n    public static string ExceptionMessage(Exception exception)\r\n    {\r\n        return exception == null ? string.Empty : exception.Message;\r\n    }\r\n\r\n    public static string ExceptionType(Exception exception)\r\n    {\r\n        return exception == null ? string.Empty : exception.GetType().Name;\r\n    }\r\n\r\n    public static string ExceptionSource(Exception exception)\r\n    {\r\n        MiiException mii = exception as MiiException;\r\n\r\n        if (mii != null)\r\n        {\r\n            return mii.ActionName;\r\n        }\r\n\r\n        return exception == null ? string.Empty : exception.Source ?? string.Empty;\r\n    }\r\n\r\n    public static string ExceptionActionType(Exception exception)\r\n    {\r\n        MiiException mii = exception as MiiException;\r\n        return mii != null ? mii.ActionType : string.Empty;\r\n    }\r\n\r\n    /// <summary>True when the exception is the transaction's own Terminate Transaction (not to be caught there).</summary>\r\n    public static bool IsTerminationOf(Exception exception, string transactionPath)\r\n    {\r\n        TransactionTerminatedException termination = exception as TransactionTerminatedException;\r\n        return termination != null && termination.TransactionPath == transactionPath;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ what X-Ray could not translate\r\n\r\n    /// <summary>A reference X-Ray could not map (see the notes in the file header); yields \"\".</summary>\r\n    public static object Unresolved(string reference)\r\n    {\r\n        return string.Empty;\r\n    }\r\n\r\n    /// <summary>An expression X-Ray could not parse (see the notes in the file header); yields \"\".</summary>\r\n    public static object Unparsed(string expression)\r\n    {\r\n        return string.Empty;\r\n    }\r\n\r\n    /// <summary>#expr#: MII evaluates the text as an expression at runtime; here the text itself is returned.</summary>\r\n    public static object Evaluate(string expression)\r\n    {\r\n        return expression;\r\n    }\r\n\r\n    /// <summary>getvalue(name): reads a property by a name built at runtime; not available outside MII.</summary>\r\n    public static string GetValue(object name)\r\n    {\r\n        return string.Empty;\r\n    }\r\n\r\n    public static object Function(string name, params object[] arguments)\r\n    {\r\n        throw new NotImplementedException(\"The MII function \" + name + \"() has no X-Ray equivalent.\");\r\n    }\r\n}\r\n\r\n#endregion\r\n";
+const RUNTIME_SOURCE = "#region Services (implement these to run the code)\r\n\r\n/// <summary>Runs queries. MII replaces every [Param.N] in the text by the parameter's value as text (no bind\r\n/// variables), so values that go into quotes are escaped by the callers (stringreplace \"'\" -> \"''\").</summary>\r\npublic interface IQueryService\r\n{\r\n    /// <summary>Runs a statement that returns rows and maps the columns to the properties of T by name.</summary>\r\n    List<T> Execute<T>(Query query) where T : MiiRow, new();\r\n\r\n    /// <summary>Runs a statement without result rows (query mode Command).</summary>\r\n    void ExecuteCommand(Query query);\r\n}\r\n\r\n/// <summary>A query template: the statement text and the parameter values by name (the comment at the call maps\r\n/// [Param.N] to the names).</summary>\r\npublic sealed class Query(string text)\r\n{\r\n    public string Text { get; } = text;\r\n\r\n    public List<KeyValuePair<string, object>> Parameters { get; } = [];\r\n\r\n    /// <summary>MII's RowCount: the query returns at most this many rows and drops the others without a message\r\n    /// (0: not set).</summary>\r\n    public int RowCount { get; set; }\r\n\r\n    public void AddParameter(string name, object value) => Parameters.Add(new(name, value));\r\n}\r\n\r\n/// <summary>Everything MII does that has no plain C# equivalent: SAP ME PAPI calls, web services, HTTP, mail, files,\r\n/// sort/filter actions, logging, shared properties.</summary>\r\npublic interface IPluginService\r\n{\r\n    /// <summary>Runs an MII action: actionType is the MII action class (e.g. SAPMEPAPIInterface), actionName the action\r\n    /// in the transaction, settings its configuration and inputs by MII property name.</summary>\r\n    PluginResult Invoke(string actionType, string actionName, Dictionary<string, object> settings);\r\n\r\n    /// <summary>Tracer and Event Logger.</summary>\r\n    void Log(string level, string message);\r\n\r\n    /// <summary>Loads a web resource of the MII server (e.g. an XSLT stylesheet) as text.</summary>\r\n    string LoadResource(string path);\r\n\r\n    /// <summary>Reads a shared or global property of the MII server (Inline.X, Persistent.X, Global.X).</summary>\r\n    object GetProperty(string name);\r\n\r\n    /// <summary>Writes a shared property of the MII server.</summary>\r\n    void SetProperty(string name, object value);\r\n}\r\n\r\n/// <summary>The outputs of a plugin call by MII property name (\"\" for an output that is not set).</summary>\r\npublic sealed class PluginResult\r\n{\r\n    public Dictionary<string, object> Values { get; } = [];\r\n\r\n    public object Get(string name) => Values.TryGetValue(name, out var value) ? value : string.Empty;\r\n}\r\n\r\n#endregion\r\n\r\n#region X-Ray runtime (MII expression functions and XML handling)\r\n\r\n/// <summary>An exception raised by a Throw action (or by an action that failed).</summary>\r\npublic class MiiException(string message, string actionName, string actionType = \"Throw\") : Exception(message)\r\n{\r\n    /// <summary>The MII action that raised the exception (Catch output Source).</summary>\r\n    public string ActionName { get; } = actionName;\r\n\r\n    /// <summary>The MII action class (Catch output ActionType).</summary>\r\n    public string ActionType { get; } = actionType;\r\n}\r\n\r\n/// <summary>Terminate Transaction with error: ends the transaction; a Catch of the same transaction does not stop it,\r\n/// the calling transaction sees it as a failed call.</summary>\r\npublic sealed class TransactionTerminatedException(string transactionPath, string message)\r\n    : MiiException(message, transactionPath, \"TerminateTransaction\")\r\n{\r\n    public string TransactionPath { get; } = transactionPath;\r\n}\r\n\r\n/// <summary>Base of the row records: one property per column of an MII rowset document.</summary>\r\npublic abstract record MiiRow\r\n{\r\n    public sealed override string ToString() => Mii.ToStr(this);\r\n}\r\n\r\n/// <summary>Row access as MII's XPath does it: a missing row reads as an empty row (\"\" for every column).</summary>\r\npublic static class MiiRows\r\n{\r\n    /// <summary>Rowsets/Rowset/Row/Column: the first row, or an empty row.</summary>\r\n    public static T FirstOrEmpty<T>(this List<T> rows) where T : MiiRow, new() => rows.Count > 0 ? rows[0] : new T();\r\n\r\n    /// <summary>Rowsets/Rowset/Row[Column = 'value']/...: the first matching row, or an empty row.</summary>\r\n    public static T FirstOrEmpty<T>(this List<T> rows, Func<T, bool> match) where T : MiiRow, new() => rows.FirstOrDefault(match) ?? new T();\r\n\r\n    /// <summary>Rowsets/Rowset/Row[n]/...: the row at a 1-based position, or an empty row.</summary>\r\n    public static T RowAt<T>(this List<T> rows, int position) where T : MiiRow, new() =>\r\n        position >= 1 && position <= rows.Count ? rows[position - 1] : new T();\r\n}\r\n\r\n/// <summary>Stand-ins for the MII expression language and XML handling. MII rules kept: booleans are true for\r\n/// \"true\" or \"1\" (any case, blanks around); match() is case-sensitive unless the pattern starts with (?i);\r\n/// datediff() returns seconds; append() changes the list it gets.</summary>\r\npublic static class Mii\r\n{\r\n    private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;\r\n    private static readonly Regex TrueValue = new Regex(@\"^\\s*(true|1)\\s*$\", RegexOptions.IgnoreCase);\r\n    private static readonly Regex EmptyValue = new Regex(@\"^\\s*(null|---)?\\s*$\", RegexOptions.IgnoreCase);\r\n    private static readonly string[] DateFormats =\r\n    {\r\n        \"yyyy-MM-dd'T'HH:mm:ss\", \"yyyy-MM-dd'T'HH:mm:ss.fff\", \"yyyy-MM-dd'T'HH:mm:sszzz\", \"yyyy-MM-dd'T'HH:mm:ss.fffzzz\",\r\n        \"yyyy-MM-dd'T'HH:mm:sszz\", \"yyyy-MM-dd'T'HH:mm:ssK\", \"yyyy-MM-dd HH:mm:ss\", \"yyyy-MM-dd\", \"MM/dd/yyyy HH:mm:ss\"\r\n    };\r\n\r\n    private static readonly string RunId = Guid.NewGuid().ToString();\r\n\r\n    public static string UserName\r\n    {\r\n        get { return Environment.UserName; }\r\n    }\r\n\r\n    public static string TransactionId\r\n    {\r\n        get { return RunId; }\r\n    }\r\n\r\n    public static string UserLocale\r\n    {\r\n        get { return CultureInfo.CurrentCulture.Name; }\r\n    }\r\n\r\n    // ------------------------------------------------------------------ conversions\r\n\r\n    public static string ToStr(object value)\r\n    {\r\n        if (value == null)\r\n        {\r\n            return string.Empty;\r\n        }\r\n\r\n        string text = value as string;\r\n\r\n        if (text != null)\r\n        {\r\n            return text;\r\n        }\r\n\r\n        if (value is bool)\r\n        {\r\n            return (bool)value ? \"true\" : \"false\";\r\n        }\r\n\r\n        if (value is DateTime)\r\n        {\r\n            return ((DateTime)value).ToString(\"yyyy-MM-dd'T'HH:mm:ss\", Invariant);\r\n        }\r\n\r\n        if (value is double)\r\n        {\r\n            return ((double)value).ToString(\"R\", Invariant);\r\n        }\r\n\r\n        if (value is XmlDocument)\r\n        {\r\n            XmlDocument document = (XmlDocument)value;\r\n            return document.DocumentElement == null ? string.Empty : document.DocumentElement.OuterXml;\r\n        }\r\n\r\n        if (value is XmlNode)\r\n        {\r\n            return ((XmlNode)value).OuterXml;\r\n        }\r\n\r\n        if (value is IEnumerable<MiiRow> rows)\r\n        {\r\n            return RowsetDocument(rows, value.GetType()).DocumentElement.OuterXml;\r\n        }\r\n\r\n        if (value is MiiRow)\r\n        {\r\n            return RowElement(new XmlDocument(), value).OuterXml;\r\n        }\r\n\r\n        if (value is Exception)\r\n        {\r\n            return ((Exception)value).Message;\r\n        }\r\n\r\n        IDictionary<string, string> map = value as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            List<string> pairs = new List<string>();\r\n\r\n            foreach (KeyValuePair<string, string> pair in map)\r\n            {\r\n                pairs.Add(pair.Key + \"=\" + pair.Value);\r\n            }\r\n\r\n            return \"{\" + string.Join(\", \", pairs.ToArray()) + \"}\";\r\n        }\r\n\r\n        List<string> list = value as List<string>;\r\n\r\n        if (list != null)\r\n        {\r\n            return ListToString(list);\r\n        }\r\n\r\n        IFormattable formattable = value as IFormattable;\r\n\r\n        if (formattable != null)\r\n        {\r\n            return formattable.ToString(null, Invariant);\r\n        }\r\n\r\n        return value.ToString();\r\n    }\r\n\r\n    public static bool ToBool(object value)\r\n    {\r\n        if (value is bool)\r\n        {\r\n            return (bool)value;\r\n        }\r\n\r\n        if (value is int || value is long || value is double || value is decimal)\r\n        {\r\n            return Convert.ToDouble(value, Invariant) != 0;\r\n        }\r\n\r\n        return TrueValue.IsMatch(ToStr(value));\r\n    }\r\n\r\n    public static double ToDouble(object value)\r\n    {\r\n        if (value is double)\r\n        {\r\n            return (double)value;\r\n        }\r\n\r\n        if (value is int || value is long || value is decimal || value is float)\r\n        {\r\n            return Convert.ToDouble(value, Invariant);\r\n        }\r\n\r\n        if (value is bool)\r\n        {\r\n            return (bool)value ? 1 : 0;\r\n        }\r\n\r\n        double result;\r\n        return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result) ? result : 0;\r\n    }\r\n\r\n    /// <summary>number(x): converts strictly; empty text, \"null\", \"---\" and other text fail in MII.</summary>\r\n    public static double Number(object value)\r\n    {\r\n        if (value is double || value is int || value is long || value is decimal || value is float || value is bool)\r\n        {\r\n            return ToDouble(value);\r\n        }\r\n\r\n        double result;\r\n\r\n        if (double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result))\r\n        {\r\n            return result;\r\n        }\r\n\r\n        throw new FormatException(\"number(\\\"\" + ToStr(value) + \"\\\") fails in MII: the text is no number\");\r\n    }\r\n\r\n    /// <summary>if(condition, a, b) returns a number in MII, also for text branches: text that is no number gives 0\r\n    /// (assigned to a string) or a type cast error (inside a string function); stringif returns text.</summary>\r\n    public static double If(bool condition, object whenTrue, object whenFalse)\r\n    {\r\n        return ToDouble(condition ? whenTrue : whenFalse);\r\n    }\r\n\r\n    public static int ToInt(object value)\r\n    {\r\n        double number = ToDouble(value);\r\n        return number > int.MaxValue ? int.MaxValue : number < int.MinValue ? int.MinValue : (int)number;\r\n    }\r\n\r\n    public static long ToLong(object value)\r\n    {\r\n        if (value is long)\r\n        {\r\n            return (long)value;\r\n        }\r\n\r\n        long result;\r\n\r\n        if (long.TryParse(ToStr(value).Trim(), NumberStyles.Integer, Invariant, out result))\r\n        {\r\n            return result;\r\n        }\r\n\r\n        return (long)ToDouble(value);\r\n    }\r\n\r\n    public static decimal ToDecimal(object value)\r\n    {\r\n        if (value is decimal)\r\n        {\r\n            return (decimal)value;\r\n        }\r\n\r\n        decimal result;\r\n\r\n        if (decimal.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result))\r\n        {\r\n            return result;\r\n        }\r\n\r\n        double number = ToDouble(value);\r\n        return number > (double)decimal.MaxValue || number < (double)decimal.MinValue ? 0m : (decimal)number;\r\n    }\r\n\r\n    public static DateTime ToDateTime(object value)\r\n    {\r\n        if (value is DateTime)\r\n        {\r\n            return (DateTime)value;\r\n        }\r\n\r\n        DateTime result;\r\n\r\n        if (DateTime.TryParseExact(ToStr(value).Trim(), DateFormats, Invariant, DateTimeStyles.None, out result))\r\n        {\r\n            return result;\r\n        }\r\n\r\n        return DateTime.MinValue;\r\n    }\r\n\r\n    public static XmlDocument ToXml(object value)\r\n    {\r\n        XmlDocument document = value as XmlDocument;\r\n\r\n        if (document != null)\r\n        {\r\n            return document;\r\n        }\r\n\r\n        if (value is IEnumerable<MiiRow> rows)\r\n        {\r\n            return RowsetDocument(rows, value.GetType());\r\n        }\r\n\r\n        if (value is MiiRow)\r\n        {\r\n            XmlDocument rowDocument = new XmlDocument();\r\n            rowDocument.AppendChild(RowElement(rowDocument, value));\r\n            return rowDocument;\r\n        }\r\n\r\n        XmlNode node = value as XmlNode;\r\n\r\n        if (node != null)\r\n        {\r\n            return NodeAsDocument(node);\r\n        }\r\n\r\n        string text = ToStr(value).Trim();\r\n        return text.StartsWith(\"<\") ? ParseXml(text) : new XmlDocument();\r\n    }\r\n\r\n    public static List<string> ToList(object value)\r\n    {\r\n        List<string> list = value as List<string>;\r\n\r\n        if (list != null)\r\n        {\r\n            return list;\r\n        }\r\n\r\n        List<string> result = new List<string>();\r\n\r\n        if (value == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        IDictionary<string, string> map = value as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            // an Iterator over a map goes through its keys\r\n            result.AddRange(map.Keys);\r\n            return result;\r\n        }\r\n\r\n        System.Collections.IEnumerable items = value as System.Collections.IEnumerable;\r\n\r\n        if (items != null && !(value is string) && !(value is XmlNode))\r\n        {\r\n            foreach (object item in items)\r\n            {\r\n                result.Add(ToStr(item));\r\n            }\r\n\r\n            return result;\r\n        }\r\n\r\n        string text = ToStr(value).Trim();\r\n\r\n        if (text.StartsWith(\"[\") && text.EndsWith(\"]\"))\r\n        {\r\n            foreach (Match match in Regex.Matches(text, @\"\\[(?:[A-Za-z]+:)?([^\\[\\]]*)\\]\"))\r\n            {\r\n                result.Add(match.Groups[1].Value);\r\n            }\r\n\r\n            return result;\r\n        }\r\n\r\n        if (text.Length > 0)\r\n        {\r\n            result.Add(text);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static Dictionary<string, string> ToMap(object value)\r\n    {\r\n        Dictionary<string, string> map = value as Dictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            return map;\r\n        }\r\n\r\n        Dictionary<string, string> result = new Dictionary<string, string>();\r\n        IDictionary<string, string> other = value as IDictionary<string, string>;\r\n\r\n        if (other != null)\r\n        {\r\n            foreach (KeyValuePair<string, string> pair in other)\r\n            {\r\n                result[pair.Key] = pair.Value;\r\n            }\r\n\r\n            return result;\r\n        }\r\n\r\n        foreach (Match match in Regex.Matches(ToStr(value), @\"([^{},=\\s][^{},=]*)=\\[(?:[A-Za-z]+:)?([^\\[\\]]*)\\]\"))\r\n        {\r\n            result[match.Groups[1].Value.Trim()] = match.Groups[2].Value;\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    /// <summary>An MII rowset document (or anything that converts to one) as row records, columns matched by name.</summary>\r\n    public static List<T> ToRows<T>(object value) where T : MiiRow, new()\r\n    {\r\n        if (value is List<T> list)\r\n        {\r\n            return list;\r\n        }\r\n\r\n        List<T> rows = [];\r\n        XmlDocument document = ToXml(value);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return rows;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(\"/Rowsets/Rowset/Row\"))\r\n        {\r\n            T row = new T();\r\n            FillRow(row, node);\r\n            rows.Add(row);\r\n        }\r\n\r\n        return rows;\r\n    }\r\n\r\n    /// <summary>Row records as an MII rowset document (Rowsets/Rowset with Columns and Row elements).</summary>\r\n    private static XmlDocument RowsetDocument(IEnumerable<MiiRow> rows, Type listType)\r\n    {\r\n        XmlDocument document = new XmlDocument();\r\n        XmlElement rowset = document.CreateElement(\"Rowset\");\r\n        document.AppendChild(document.CreateElement(\"Rowsets\")).AppendChild(rowset);\r\n        XmlElement columns = document.CreateElement(\"Columns\");\r\n        rowset.AppendChild(columns);\r\n        Type rowType = listType.IsGenericType ? listType.GetGenericArguments()[0] : typeof(MiiRow);\r\n\r\n        foreach (PropertyInfo property in ColumnsOf(rowType))\r\n        {\r\n            XmlElement column = document.CreateElement(\"Column\");\r\n            column.SetAttribute(\"Name\", property.Name);\r\n            columns.AppendChild(column);\r\n        }\r\n\r\n        foreach (MiiRow row in rows)\r\n        {\r\n            rowset.AppendChild(RowElement(document, row));\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    public static T ToRow<T>(object value) where T : MiiRow, new()\r\n    {\r\n        if (value is T)\r\n        {\r\n            return (T)value;\r\n        }\r\n\r\n        T row = new T();\r\n        XmlDocument document = ToXml(value);\r\n        XmlNode node = document.SelectSingleNode(\"//Row\") ?? document.DocumentElement;\r\n\r\n        if (node != null)\r\n        {\r\n            FillRow(row, node);\r\n        }\r\n\r\n        return row;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ comparisons\r\n\r\n    /// <summary>== in MII: numbers compare as numbers, everything else as text.</summary>\r\n    public static bool AreEqual(object left, object right)\r\n    {\r\n        if (IsNumber(left) || IsNumber(right))\r\n        {\r\n            double a;\r\n            double b;\r\n\r\n            if (TryNumber(left, out a) && TryNumber(right, out b))\r\n            {\r\n                return a == b;\r\n            }\r\n        }\r\n\r\n        if (left is bool || right is bool)\r\n        {\r\n            return ToBool(left) == ToBool(right);\r\n        }\r\n\r\n        return ToStr(left) == ToStr(right);\r\n    }\r\n\r\n    /// <summary>&lt; &gt; in MII: as numbers when both are numbers, else as text.</summary>\r\n    public static int Compare(object left, object right)\r\n    {\r\n        double a;\r\n        double b;\r\n\r\n        if (TryNumber(left, out a) && TryNumber(right, out b))\r\n        {\r\n            return a.CompareTo(b);\r\n        }\r\n\r\n        if (left is DateTime || right is DateTime)\r\n        {\r\n            return ToDateTime(left).CompareTo(ToDateTime(right));\r\n        }\r\n\r\n        return string.CompareOrdinal(ToStr(left), ToStr(right));\r\n    }\r\n\r\n    private static bool IsNumber(object value)\r\n    {\r\n        return value is int || value is long || value is double || value is decimal || value is float;\r\n    }\r\n\r\n    private static bool TryNumber(object value, out double number)\r\n    {\r\n        if (IsNumber(value))\r\n        {\r\n            number = Convert.ToDouble(value, Invariant);\r\n            return true;\r\n        }\r\n\r\n        return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out number);\r\n    }\r\n\r\n    // ------------------------------------------------------------------ XML\r\n\r\n    public static XmlDocument ParseXml(string text)\r\n    {\r\n        XmlDocument document = new XmlDocument();\r\n\r\n        if (text != null && text.Trim().Length > 0)\r\n        {\r\n            document.LoadXml(text.Trim());\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Doc{xpath}: the text of the first matching node, or the value of an XPath expression such as count(...).</summary>\r\n    public static string XPath(object source, string xpath)\r\n    {\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return string.Empty;\r\n        }\r\n\r\n        object result = document.CreateNavigator().Evaluate(xpath, Namespaces(document));\r\n        System.Xml.XPath.XPathNodeIterator nodes = result as System.Xml.XPath.XPathNodeIterator;\r\n\r\n        if (nodes != null)\r\n        {\r\n            return nodes.MoveNext() ? nodes.Current.Value : string.Empty;\r\n        }\r\n\r\n        if (result is double)\r\n        {\r\n            double number = (double)result;\r\n            return number == Math.Floor(number) && Math.Abs(number) < 1e15 ? ((long)number).ToString(Invariant) : number.ToString(\"R\", Invariant);\r\n        }\r\n\r\n        return ToStr(result);\r\n    }\r\n\r\n    /// <summary>Doc{xpath} used as XML: the first matching node as a document of its own.</summary>\r\n    public static XmlDocument SelectXml(object source, string xpath)\r\n    {\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return new XmlDocument();\r\n        }\r\n\r\n        XmlNode node = document.SelectSingleNode(xpath, Namespaces(document));\r\n        return node == null ? new XmlDocument() : NodeAsDocument(node);\r\n    }\r\n\r\n    /// <summary>The nodes a repeater runs over, each as a document of its own.</summary>\r\n    public static List<XmlDocument> SelectNodes(object source, string xpath)\r\n    {\r\n        List<XmlDocument> result = new List<XmlDocument>();\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))\r\n        {\r\n            result.Add(NodeAsDocument(node));\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    /// <summary>X{key} on a value of unknown type: a map lookup, else an XPath.</summary>\r\n    public static string Select(object source, string key)\r\n    {\r\n        IDictionary<string, string> map = source as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            return MapGet(map, key);\r\n        }\r\n\r\n        return XPath(source, key);\r\n    }\r\n\r\n    /// <summary>Assign link with XPath: sets the text of the node (created when the path is a plain element path).</summary>\r\n    public static XmlDocument SetXPathValue(XmlDocument document, string xpath, object value)\r\n    {\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null)\r\n        {\r\n            node.InnerText = ToStr(value);\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Assign XML link: without XPath the source document replaces the whole document; at an XPath the selected\r\n    /// node keeps its own element and gets the children and text of the source's root element instead of its own.</summary>\r\n    public static XmlDocument AssignXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n\r\n        if (sourceDocument.DocumentElement == null)\r\n        {\r\n            return document;\r\n        }\r\n\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node == null || node == document.DocumentElement || node == document)\r\n        {\r\n            document.RemoveAll();\r\n            document.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));\r\n            return document;\r\n        }\r\n\r\n        while (node.HasChildNodes)\r\n        {\r\n            node.RemoveChild(node.FirstChild);\r\n        }\r\n\r\n        foreach (XmlNode child in sourceDocument.DocumentElement.ChildNodes)\r\n        {\r\n            node.AppendChild(document.ImportNode(child, true));\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Append XML link: the source root element becomes the last child of the selected node.</summary>\r\n    public static XmlDocument AppendXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null && sourceDocument.DocumentElement != null)\r\n        {\r\n            node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Append After XML link: the source root element is inserted after the selected node.</summary>\r\n    public static XmlDocument AppendAfterXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null && node.ParentNode != null && sourceDocument.DocumentElement != null)\r\n        {\r\n            node.ParentNode.InsertAfter(document.ImportNode(sourceDocument.DocumentElement, true), node);\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Replace XML link: the children of the selected node are replaced by the source root element.</summary>\r\n    public static XmlDocument ReplaceXml(XmlDocument document, string xpath, object source)\r\n    {\r\n        XmlDocument sourceDocument = ToXml(source);\r\n        XmlNode node = FindOrCreate(document, xpath);\r\n\r\n        if (node != null && sourceDocument.DocumentElement != null)\r\n        {\r\n            while (node.FirstChild != null)\r\n            {\r\n                node.RemoveChild(node.FirstChild);\r\n            }\r\n\r\n            node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>Remove XML link: removes every node the XPath selects.</summary>\r\n    public static XmlDocument RemoveXml(XmlDocument document, string xpath)\r\n    {\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return document;\r\n        }\r\n\r\n        List<XmlNode> nodes = new List<XmlNode>();\r\n\r\n        foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))\r\n        {\r\n            nodes.Add(node);\r\n        }\r\n\r\n        foreach (XmlNode node in nodes)\r\n        {\r\n            if (node.ParentNode != null)\r\n            {\r\n                node.ParentNode.RemoveChild(node);\r\n            }\r\n        }\r\n\r\n        return document;\r\n    }\r\n\r\n    /// <summary>XSLT action.</summary>\r\n    public static XmlDocument XslTransform(object input, object stylesheet)\r\n    {\r\n        XslCompiledTransform transform = new XslCompiledTransform();\r\n\r\n        using (XmlReader reader = new XmlNodeReader(ToXml(stylesheet)))\r\n        {\r\n            transform.Load(reader);\r\n        }\r\n\r\n        StringBuilder output = new StringBuilder();\r\n\r\n        using (StringWriter writer = new StringWriter(output, Invariant))\r\n        {\r\n            transform.Transform(ToXml(input), null, writer);\r\n        }\r\n\r\n        string text = output.ToString().Trim();\r\n        return text.StartsWith(\"<\") ? ParseXml(text) : new XmlDocument();\r\n    }\r\n\r\n    /// <summary>A row for a rowset document that is not typed: column name, value, column name, value, ...</summary>\r\n    public static void AddRow(object document, params object[] columnsAndValues)\r\n    {\r\n        XmlDocument xml = ToXml(document);\r\n        XmlNode rowset = xml.SelectSingleNode(\"/Rowsets/Rowset\");\r\n\r\n        if (rowset == null)\r\n        {\r\n            return;\r\n        }\r\n\r\n        XmlElement row = xml.CreateElement(\"Row\");\r\n\r\n        for (int index = 0; index + 1 < columnsAndValues.Length; index += 2)\r\n        {\r\n            XmlElement cell = xml.CreateElement(ToStr(columnsAndValues[index]));\r\n            cell.InnerText = ToStr(columnsAndValues[index + 1]);\r\n            row.AppendChild(cell);\r\n        }\r\n\r\n        rowset.AppendChild(row);\r\n    }\r\n\r\n    public static List<string> GetListFromXPath(object source, object xpath)\r\n    {\r\n        List<string> result = new List<string>();\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))\r\n        {\r\n            result.Add(node.InnerText);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static Dictionary<string, string> GetMapFromXPath(object source, object xpath)\r\n    {\r\n        Dictionary<string, string> result = new Dictionary<string, string>();\r\n        XmlDocument document = ToXml(source);\r\n\r\n        if (document.DocumentElement == null)\r\n        {\r\n            return result;\r\n        }\r\n\r\n        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))\r\n        {\r\n            result[node.Name] = node.InnerText;\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static string Name(object source)\r\n    {\r\n        XmlDocument document = ToXml(source);\r\n        return document.DocumentElement == null ? string.Empty : document.DocumentElement.Name;\r\n    }\r\n\r\n    private static XmlNamespaceManager Namespaces(XmlDocument document)\r\n    {\r\n        XmlNamespaceManager manager = new XmlNamespaceManager(document.NameTable);\r\n\r\n        foreach (XmlNode node in document.SelectNodes(\"//namespace::*\"))\r\n        {\r\n            string prefix = node.LocalName == \"xmlns\" ? string.Empty : node.LocalName;\r\n\r\n            if (prefix.Length > 0 && prefix != \"xml\" && manager.LookupNamespace(prefix) == null)\r\n            {\r\n                manager.AddNamespace(prefix, node.Value);\r\n            }\r\n        }\r\n\r\n        return manager;\r\n    }\r\n\r\n    private static XmlDocument NodeAsDocument(XmlNode node)\r\n    {\r\n        XmlDocument document = new XmlDocument();\r\n\r\n        if (node is XmlDocument)\r\n        {\r\n            XmlNode root = ((XmlDocument)node).DocumentElement;\r\n\r\n            if (root != null)\r\n            {\r\n                document.AppendChild(document.ImportNode(root, true));\r\n            }\r\n\r\n            return document;\r\n        }\r\n\r\n        if (node is XmlElement)\r\n        {\r\n            document.AppendChild(document.ImportNode(node, true));\r\n            return document;\r\n        }\r\n\r\n        XmlElement value = document.CreateElement(\"Value\");\r\n        value.InnerText = node.Value ?? node.InnerText;\r\n        document.AppendChild(value);\r\n        return document;\r\n    }\r\n\r\n    /// <summary>The node of an XPath; a missing plain element path (/a/b/c) is created.</summary>\r\n    private static XmlNode FindOrCreate(XmlDocument document, string xpath)\r\n    {\r\n        if (document.DocumentElement != null)\r\n        {\r\n            XmlNode found = document.SelectSingleNode(xpath, Namespaces(document));\r\n\r\n            if (found != null)\r\n            {\r\n                return found;\r\n            }\r\n        }\r\n\r\n        if (!Regex.IsMatch(xpath, @\"^(/[A-Za-z_][\\w.\\-]*)+$\"))\r\n        {\r\n            return null;\r\n        }\r\n\r\n        XmlNode current = document;\r\n\r\n        foreach (string name in xpath.Trim('/').Split('/'))\r\n        {\r\n            XmlNode next = null;\r\n\r\n            foreach (XmlNode child in current.ChildNodes)\r\n            {\r\n                if (child.NodeType == XmlNodeType.Element && child.Name == name)\r\n                {\r\n                    next = child;\r\n                    break;\r\n                }\r\n            }\r\n\r\n            if (next == null)\r\n            {\r\n                if (current == document && document.DocumentElement != null)\r\n                {\r\n                    return null;\r\n                }\r\n\r\n                next = document.CreateElement(name);\r\n                current.AppendChild(next);\r\n            }\r\n\r\n            current = next;\r\n        }\r\n\r\n        return current;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ rows (reflection over the generated row classes)\r\n\r\n    public static List<PropertyInfo> ColumnsOf(Type rowType)\r\n    {\r\n        List<PropertyInfo> result = new List<PropertyInfo>();\r\n\r\n        foreach (PropertyInfo property in rowType.GetProperties(BindingFlags.Public | BindingFlags.Instance))\r\n        {\r\n            if (property.CanRead && property.CanWrite && property.GetIndexParameters().Length == 0)\r\n            {\r\n                result.Add(property);\r\n            }\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static object RowValue(object row, string column)\r\n    {\r\n        PropertyInfo property = FindColumn(row.GetType(), column);\r\n        return property == null ? null : property.GetValue(row, null);\r\n    }\r\n\r\n    public static XmlElement RowElement(XmlDocument document, object row)\r\n    {\r\n        XmlElement element = document.CreateElement(\"Row\");\r\n\r\n        foreach (PropertyInfo property in ColumnsOf(row.GetType()))\r\n        {\r\n            XmlElement cell = document.CreateElement(property.Name);\r\n            cell.InnerText = ToStr(property.GetValue(row, null));\r\n            element.AppendChild(cell);\r\n        }\r\n\r\n        return element;\r\n    }\r\n\r\n    public static void FillRow(object row, XmlNode node)\r\n    {\r\n        foreach (XmlNode cell in node.ChildNodes)\r\n        {\r\n            if (cell.NodeType != XmlNodeType.Element)\r\n            {\r\n                continue;\r\n            }\r\n\r\n            PropertyInfo property = FindColumn(row.GetType(), cell.LocalName);\r\n\r\n            if (property != null)\r\n            {\r\n                property.SetValue(row, ConvertTo(cell.InnerText, property.PropertyType), null);\r\n            }\r\n        }\r\n    }\r\n\r\n    private static PropertyInfo FindColumn(Type rowType, string column)\r\n    {\r\n        string wanted = Simplify(column);\r\n        PropertyInfo loose = null;\r\n\r\n        foreach (PropertyInfo property in ColumnsOf(rowType))\r\n        {\r\n            if (property.Name == column)\r\n            {\r\n                return property;\r\n            }\r\n\r\n            if (loose == null && Simplify(property.Name) == wanted)\r\n            {\r\n                loose = property;\r\n            }\r\n        }\r\n\r\n        return loose;\r\n    }\r\n\r\n    private static string Simplify(string name)\r\n    {\r\n        StringBuilder result = new StringBuilder();\r\n\r\n        foreach (char c in name)\r\n        {\r\n            if (char.IsLetterOrDigit(c))\r\n            {\r\n                result.Append(char.ToLowerInvariant(c));\r\n            }\r\n        }\r\n\r\n        return result.ToString();\r\n    }\r\n\r\n    private static object ConvertTo(string text, Type type)\r\n    {\r\n        if (type == typeof(string)) return text;\r\n\r\n        if (type == typeof(bool)) return ToBool(text);\r\n\r\n        if (type == typeof(int)) return ToInt(text);\r\n\r\n        if (type == typeof(long)) return ToLong(text);\r\n\r\n        if (type == typeof(double)) return ToDouble(text);\r\n\r\n        if (type == typeof(decimal)) return ToDecimal(text);\r\n\r\n        if (type == typeof(DateTime)) return ToDateTime(text);\r\n        return text;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ lists and maps\r\n\r\n    public static List<string> List(params object[] values)\r\n    {\r\n        List<string> result = new List<string>();\r\n\r\n        foreach (object value in values)\r\n        {\r\n            // a list argument contributes its elements: list(Local.Items, x) is a new, longer list\r\n            List<string> items = value as List<string>;\r\n\r\n            if (items != null)\r\n            {\r\n                result.AddRange(items);\r\n            }\r\n            else\r\n            {\r\n                result.Add(ToStr(value));\r\n            }\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static Dictionary<string, string> Map(params object[] keysAndValues)\r\n    {\r\n        Dictionary<string, string> result = new Dictionary<string, string>();\r\n\r\n        for (int index = 0; index + 1 < keysAndValues.Length; index += 2)\r\n        {\r\n            result[ToStr(keysAndValues[index])] = ToStr(keysAndValues[index + 1]);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static string MapGet(object map, string key)\r\n    {\r\n        string value;\r\n        // a missing key reads as the text \"null\" in MII, which is no empty text\r\n        return ToMap(map).TryGetValue(key, out value) ? value : \"null\";\r\n    }\r\n\r\n    public static string GetValueFromMap(object map, object key)\r\n    {\r\n        return MapGet(map, ToStr(key));\r\n    }\r\n\r\n    public static string ListGet(object list, int index)\r\n    {\r\n        List<string> items = ToList(list);\r\n        return index >= 0 && index < items.Count ? items[index] : string.Empty;\r\n    }\r\n\r\n    public static int Size(object value)\r\n    {\r\n        IDictionary<string, string> map = value as IDictionary<string, string>;\r\n\r\n        if (map != null)\r\n        {\r\n            return map.Count;\r\n        }\r\n\r\n        return ToList(value).Count;\r\n    }\r\n\r\n    /// <summary>append() works by reference in MII: the list itself gets the value.</summary>\r\n    public static List<string> Append(object list, object value)\r\n    {\r\n        List<string> items = ToList(list);\r\n        items.Add(ToStr(value));\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Insert(object list, object index, object value)\r\n    {\r\n        List<string> items = ToList(list);\r\n        items.Insert(Math.Max(0, Math.Min(items.Count, ToInt(index))), ToStr(value));\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Set(object list, object index, object value)\r\n    {\r\n        List<string> items = ToList(list);\r\n        int position = ToInt(index);\r\n\r\n        if (position >= 0 && position < items.Count)\r\n        {\r\n            items[position] = ToStr(value);\r\n        }\r\n\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Remove(object list, object index)\r\n    {\r\n        List<string> items = ToList(list);\r\n        int position = ToInt(index);\r\n\r\n        if (position >= 0 && position < items.Count)\r\n        {\r\n            items.RemoveAt(position);\r\n        }\r\n\r\n        return items;\r\n    }\r\n\r\n    /// <summary>remove(map, key): the map without the key.</summary>\r\n    public static Dictionary<string, string> RemoveKey(object map, object key)\r\n    {\r\n        Dictionary<string, string> items = ToMap(map);\r\n        items.Remove(ToStr(key));\r\n        return items;\r\n    }\r\n\r\n    public static int Find(object list, object value)\r\n    {\r\n        return ToList(list).IndexOf(ToStr(value));\r\n    }\r\n\r\n    /// <summary>first() of an empty list fails in MII.</summary>\r\n    public static string First(object list)\r\n    {\r\n        List<string> items = ToList(list);\r\n\r\n        if (items.Count == 0)\r\n        {\r\n            throw new InvalidOperationException(\"first() of an empty list fails in MII\");\r\n        }\r\n\r\n        return items[0];\r\n    }\r\n\r\n    /// <summary>last() of an empty list fails in MII.</summary>\r\n    public static string Last(object list)\r\n    {\r\n        List<string> items = ToList(list);\r\n\r\n        if (items.Count == 0)\r\n        {\r\n            throw new InvalidOperationException(\"last() of an empty list fails in MII\");\r\n        }\r\n\r\n        return items[items.Count - 1];\r\n    }\r\n\r\n    public static List<string> Sort(object list)\r\n    {\r\n        List<string> items = new List<string>(ToList(list));\r\n        items.Sort(StringComparer.Ordinal);\r\n        return items;\r\n    }\r\n\r\n    public static List<string> Keys(object map)\r\n    {\r\n        return new List<string>(ToMap(map).Keys);\r\n    }\r\n\r\n    public static List<string> Values(object map)\r\n    {\r\n        return new List<string>(ToMap(map).Values);\r\n    }\r\n\r\n    public static Dictionary<string, string> Put(object map, object key, object value)\r\n    {\r\n        Dictionary<string, string> items = ToMap(map);\r\n        items[ToStr(key)] = ToStr(value);\r\n        return items;\r\n    }\r\n\r\n    public static bool ContainsKey(object map, object key)\r\n    {\r\n        return ToMap(map).ContainsKey(ToStr(key));\r\n    }\r\n\r\n    public static bool ContainsValue(object map, object value)\r\n    {\r\n        return ToMap(map).ContainsValue(ToStr(value));\r\n    }\r\n\r\n    public static Dictionary<string, string> ListsToMap(object keys, object values)\r\n    {\r\n        List<string> keyList = ToList(keys);\r\n        List<string> valueList = ToList(values);\r\n        SortedDictionary<string, string> sorted = new SortedDictionary<string, string>(StringComparer.Ordinal);\r\n\r\n        for (int index = 0; index < keyList.Count; index++)\r\n        {\r\n            sorted[keyList[index]] = index < valueList.Count ? valueList[index] : string.Empty;\r\n        }\r\n\r\n        // liststomap sorts its keys in MII (map() keeps no order at all)\r\n        return new Dictionary<string, string>(sorted);\r\n    }\r\n\r\n    /// <summary>Splits on a regular expression (default \",\"); further MII arguments are ignored.</summary>\r\n    public static List<string> StringToList(object text, params object[] options)\r\n    {\r\n        string delimiter = options.Length > 0 ? ToStr(options[0]) : \",\";\r\n        return new List<string>(Regex.Split(ToStr(text), delimiter));\r\n    }\r\n\r\n    public static List<string> StringToListWithLimit(object text, object delimiter, object limit)\r\n    {\r\n        return new List<string>(new Regex(ToStr(delimiter)).Split(ToStr(text), Math.Max(1, ToInt(limit))));\r\n    }\r\n\r\n    public static string ListToString(object list, params object[] delimiter)\r\n    {\r\n        string separator = delimiter.Length > 0 ? ToStr(delimiter[0]) : \",\";\r\n        return string.Join(separator, ToList(list).ToArray());\r\n    }\r\n\r\n    public static List<string> TimeZoneIds()\r\n    {\r\n        List<string> result = new List<string>();\r\n\r\n        foreach (TimeZoneInfo zone in TimeZoneInfo.GetSystemTimeZones())\r\n        {\r\n            result.Add(zone.Id);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ strings\r\n\r\n    public static string StringLeft(object text, object length)\r\n    {\r\n        string value = ToStr(text);\r\n        return value.Substring(0, Math.Max(0, Math.Min(value.Length, ToInt(length))));\r\n    }\r\n\r\n    public static string StringRight(object text, object length)\r\n    {\r\n        string value = ToStr(text);\r\n        int count = Math.Max(0, Math.Min(value.Length, ToInt(length)));\r\n        return value.Substring(value.Length - count);\r\n    }\r\n\r\n    /// <summary>stringpart(text, start, length) with a 1-based start: stringpart(\"Football\", 1, 1) = \"F\".</summary>\r\n    public static string StringPart(object text, object start, object length)\r\n    {\r\n        string value = ToStr(text);\r\n        int begin = Math.Max(0, ToInt(start) - 1);\r\n\r\n        if (begin >= value.Length)\r\n        {\r\n            return string.Empty;\r\n        }\r\n\r\n        return value.Substring(begin, Math.Max(0, Math.Min(value.Length - begin, ToInt(length))));\r\n    }\r\n\r\n    public static int StringIndexOf(object text, object part)\r\n    {\r\n        return ToStr(text).IndexOf(ToStr(part), StringComparison.Ordinal);\r\n    }\r\n\r\n    public static int StringLastIndexOf(object text, object part)\r\n    {\r\n        return ToStr(text).LastIndexOf(ToStr(part), StringComparison.Ordinal);\r\n    }\r\n\r\n    /// <summary>stringreplace replaces every occurrence (literal text).</summary>\r\n    public static string StringReplace(object text, object find, object replacement)\r\n    {\r\n        string search = ToStr(find);\r\n        return search.Length == 0 ? ToStr(text) : ToStr(text).Replace(search, ToStr(replacement));\r\n    }\r\n\r\n    /// <summary>stringreplaceall replaces every match of a regular expression; MII drops the blanks of the replacement\r\n    /// text (\"$1 \" inserts the group only).</summary>\r\n    public static string StringReplaceAll(object text, object pattern, object replacement)\r\n    {\r\n        return Regex.Replace(ToStr(text), ToStr(pattern), ToStr(replacement).Replace(\" \", string.Empty));\r\n    }\r\n\r\n    /// <summary>MII's empty check: null, \"\", blanks, the text \"null\" or \"---\" (any case), as match(x, \"(?i)^\\s*(null|---)?\\s*$\").</summary>\r\n    public static bool IsEmpty(object value)\r\n    {\r\n        return EmptyValue.IsMatch(ToStr(value));\r\n    }\r\n\r\n    /// <summary>MII's boolean check on text: \"true\" or \"1\" (any case, blanks around), as match(x, \"(?i)^\\s*(true|1)\\s*$\").</summary>\r\n    public static bool IsTrue(object value)\r\n    {\r\n        return TrueValue.IsMatch(ToStr(value));\r\n    }\r\n\r\n    /// <summary>match(text, pattern) with more arguments than usual; case-sensitive like on the system.</summary>\r\n    public static bool Match(object text, object pattern, params object[] ignored)\r\n    {\r\n        return Regex.IsMatch(ToStr(text), ToStr(pattern));\r\n    }\r\n\r\n    /// <summary>match2(text, pattern, caseSensitive).</summary>\r\n    public static bool Match2(object text, object pattern, params object[] caseSensitive)\r\n    {\r\n        bool sensitive = caseSensitive.Length == 0 || ToBool(caseSensitive[0]);\r\n        return Regex.IsMatch(ToStr(text), ToStr(pattern), sensitive ? RegexOptions.None : RegexOptions.IgnoreCase);\r\n    }\r\n\r\n    public static string Quotes(object text)\r\n    {\r\n        return \"\\\"\" + ToStr(text) + \"\\\"\";\r\n    }\r\n\r\n    /// <summary>encode is form encoding (a blank becomes +).</summary>\r\n    public static string Encode(object text)\r\n    {\r\n        return System.Net.WebUtility.UrlEncode(ToStr(text));\r\n    }\r\n\r\n    /// <summary>decode is form decoding (+ becomes a blank).</summary>\r\n    public static string Decode(object text)\r\n    {\r\n        return System.Net.WebUtility.UrlDecode(ToStr(text));\r\n    }\r\n\r\n    public static string Base64Encode(object text)\r\n    {\r\n        return Convert.ToBase64String(Encoding.UTF8.GetBytes(ToStr(text)));\r\n    }\r\n\r\n    public static string Base64Decode(object text)\r\n    {\r\n        return Encoding.UTF8.GetString(Convert.FromBase64String(ToStr(text)));\r\n    }\r\n\r\n    public static string BooleanToString(object value)\r\n    {\r\n        return ToBool(value) ? \"true\" : \"false\";\r\n    }\r\n\r\n    public static string XmlEncode(object text)\r\n    {\r\n        return ToStr(text).Replace(\"&\", \"&amp;\").Replace(\"<\", \"&lt;\").Replace(\">\", \"&gt;\").Replace(\"\\\"\", \"&quot;\").Replace(\"'\", \"&apos;\");\r\n    }\r\n\r\n    public static string XmlDecode(object text)\r\n    {\r\n        return ToStr(text).Replace(\"&lt;\", \"<\").Replace(\"&gt;\", \">\").Replace(\"&quot;\", \"\\\"\").Replace(\"&apos;\", \"'\").Replace(\"&amp;\", \"&\");\r\n    }\r\n\r\n    public static string Format(object number, object pattern)\r\n    {\r\n        return ToDouble(number).ToString(ToStr(pattern), Invariant);\r\n    }\r\n\r\n    // ------------------------------------------------------------------ dates (patterns are Java patterns as in MII)\r\n\r\n    public static string DateFormat(object value, object fromFormat, object toFormat)\r\n    {\r\n        DateTime date;\r\n\r\n        if (!(value is DateTime) && DateTime.TryParseExact(ToStr(value).Trim(), NetFormat(ToStr(fromFormat)), Invariant, DateTimeStyles.None, out date))\r\n        {\r\n            return date.ToString(NetFormat(ToStr(toFormat)), Invariant);\r\n        }\r\n\r\n        return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);\r\n    }\r\n\r\n    /// <summary>datefromxmlformat(date, toFormat): the date as text in toFormat.</summary>\r\n    public static string DateFromXmlFormat(object value, object toFormat)\r\n    {\r\n        return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);\r\n    }\r\n\r\n    /// <summary>datetoxmlformat(text, fromFormat): the date text in the XML date format.</summary>\r\n    public static string DateToXmlFormat(object value, object fromFormat)\r\n    {\r\n        return DateFormat(value, fromFormat, \"yyyy-MM-dd'T'HH:mm:ss\");\r\n    }\r\n\r\n    public static int Year(object value) { return ToDateTime(value).Year; }\r\n\r\n    public static int Month(object value) { return ToDateTime(value).Month; }\r\n\r\n    public static int Day(object value) { return ToDateTime(value).Day; }\r\n\r\n    public static int Hour(object value) { return ToDateTime(value).Hour; }\r\n\r\n    public static int Minute(object value) { return ToDateTime(value).Minute; }\r\n\r\n    public static int Second(object value) { return ToDateTime(value).Second; }\r\n\r\n    /// <summary>dayofweek: 1 = Sunday ... 7 = Saturday.</summary>\r\n    public static int DayOfWeek(object value) { return (int)ToDateTime(value).DayOfWeek + 1; }\r\n\r\n    public static int DayOfYear(object value) { return ToDateTime(value).DayOfYear; }\r\n\r\n    public static int DaysInMonth(object value)\r\n    {\r\n        DateTime date = ToDateTime(value);\r\n        return DateTime.DaysInMonth(date.Year, date.Month);\r\n    }\r\n\r\n    public static DateTime MonthStart(object value)\r\n    {\r\n        DateTime date = ToDateTime(value);\r\n        return new DateTime(date.Year, date.Month, 1);\r\n    }\r\n\r\n    /// <summary>monthend: the first day of the NEXT month at midnight.</summary>\r\n    public static DateTime MonthEnd(object value)\r\n    {\r\n        return MonthStart(value).AddMonths(1);\r\n    }\r\n\r\n    public static DateTime YearStart(object value)\r\n    {\r\n        return new DateTime(ToDateTime(value).Year, 1, 1);\r\n    }\r\n\r\n    /// <summary>yearend: the first day of the NEXT year at midnight.</summary>\r\n    public static DateTime YearEnd(object value)\r\n    {\r\n        return YearStart(value).AddYears(1);\r\n    }\r\n\r\n    public static string FormatDateNow(object format)\r\n    {\r\n        return DateTime.Now.ToString(NetFormat(ToStr(format)), Invariant);\r\n    }\r\n\r\n    /// <summary>datediff returns seconds (second minus first).</summary>\r\n    public static long DateDiff(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalSeconds;\r\n    }\r\n\r\n    public static long DateDiffDays(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalDays;\r\n    }\r\n\r\n    public static long DateDiffHours(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalHours;\r\n    }\r\n\r\n    public static long DateDiffMinutes(object first, object second)\r\n    {\r\n        return (long)(ToDateTime(second) - ToDateTime(first)).TotalMinutes;\r\n    }\r\n\r\n    public static int DateCompare(object first, object second)\r\n    {\r\n        return Math.Sign(ToDateTime(first).CompareTo(ToDateTime(second)));\r\n    }\r\n\r\n    public static bool DateBetween(object value, object start, object end)\r\n    {\r\n        DateTime date = ToDateTime(value);\r\n        return date >= ToDateTime(start) && date <= ToDateTime(end);\r\n    }\r\n\r\n    public static DateTime DateAddSeconds(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddSeconds(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddMinutes(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddMinutes(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddHours(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddHours(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddDays(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddDays(ToDouble(amount));\r\n    }\r\n\r\n    public static DateTime DateAddMonths(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddMonths(ToInt(amount));\r\n    }\r\n\r\n    public static DateTime DateAddYears(object value, object amount)\r\n    {\r\n        return ToDateTime(value).AddYears(ToInt(amount));\r\n    }\r\n\r\n    public static long DateToSeconds(object value)\r\n    {\r\n        return (long)(ToDateTime(value) - new DateTime(1970, 1, 1)).TotalSeconds;\r\n    }\r\n\r\n    public static DateTime DateFromSeconds(object seconds)\r\n    {\r\n        return new DateTime(1970, 1, 1).AddSeconds(ToDouble(seconds));\r\n    }\r\n\r\n    /// <summary>converttimezone(date, toZone) converts from the server's zone, converttimezone(date, fromZone, toZone)\r\n    /// between two zones. MII uses Java zone ids (Europe/Berlin), Windows knows other ids, so an unknown id leaves the\r\n    /// date unchanged.</summary>\r\n    public static DateTime ConvertTimeZone(object value, params object[] zones)\r\n    {\r\n        DateTime date = ToDateTime(value);\r\n\r\n        if (zones.Length == 0)\r\n        {\r\n            return date;\r\n        }\r\n\r\n        try\r\n        {\r\n            TimeZoneInfo source = zones.Length >= 2 ? TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[0])) : TimeZoneInfo.Local;\r\n            TimeZoneInfo target = TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[zones.Length >= 2 ? 1 : 0]));\r\n            return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(date, DateTimeKind.Unspecified), source, target);\r\n        }\r\n        catch (TimeZoneNotFoundException)\r\n        {\r\n            return date;\r\n        }\r\n    }\r\n\r\n    public static DateTime ConvertTimeZone2(object value, params object[] zones)\r\n    {\r\n        return ConvertTimeZone(value, zones);\r\n    }\r\n\r\n    /// <summary>currenttimezoneoffset: the offset of the server's time zone to UTC in milliseconds.</summary>\r\n    public static long CurrentTimeZoneOffset()\r\n    {\r\n        return (long)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMilliseconds;\r\n    }\r\n\r\n    /// <summary>getsessionvariable(name): a value of the calling user's session (e.g. IllumLoginRoles).</summary>\r\n    public static string GetSessionVariable(object name)\r\n    {\r\n        return string.Empty;\r\n    }\r\n\r\n    public static long CurrentTimeMillis()\r\n    {\r\n        return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;\r\n    }\r\n\r\n    /// <summary>Java date pattern -> .NET: the common letters are the same; S (milliseconds), a (AM/PM), E (day name),\r\n    /// Z/X (offset) differ.</summary>\r\n    private static string NetFormat(string javaFormat)\r\n    {\r\n        return javaFormat.Replace(\"SSS\", \"fff\").Replace(\"a\", \"tt\").Replace(\"EEEE\", \"dddd\").Replace(\"EEE\", \"ddd\").Replace(\"Z\", \"zzz\").Replace(\"XXX\", \"zzz\");\r\n    }\r\n\r\n    // ------------------------------------------------------------------ numbers\r\n\r\n    public static double Round(object value, params object[] digits)\r\n    {\r\n        int places = digits.Length > 0 ? ToInt(digits[0]) : 0;\r\n        return Math.Round(ToDouble(value), Math.Max(0, Math.Min(15, places)), MidpointRounding.AwayFromZero);\r\n    }\r\n\r\n    public static double Min(params object[] values)\r\n    {\r\n        List<double> numbers = Numbers(values);\r\n        double result = numbers.Count > 0 ? numbers[0] : 0;\r\n\r\n        foreach (double number in numbers)\r\n        {\r\n            result = Math.Min(result, number);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static double Max(params object[] values)\r\n    {\r\n        List<double> numbers = Numbers(values);\r\n        double result = numbers.Count > 0 ? numbers[0] : 0;\r\n\r\n        foreach (double number in numbers)\r\n        {\r\n            result = Math.Max(result, number);\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static double Sum(params object[] values)\r\n    {\r\n        double result = 0;\r\n\r\n        foreach (double number in Numbers(values))\r\n        {\r\n            result += number;\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    public static double Average(params object[] values)\r\n    {\r\n        List<double> numbers = Numbers(values);\r\n        return numbers.Count == 0 ? 0 : Sum(values) / numbers.Count;\r\n    }\r\n\r\n    private static readonly Random Randomizer = new Random();\r\n\r\n    /// <summary>random() between 0 and 1, random(low, high) between low and high.</summary>\r\n    public static double Random(params object[] bounds)\r\n    {\r\n        double low = bounds.Length > 1 ? ToDouble(bounds[0]) : 0;\r\n        double high = bounds.Length > 1 ? ToDouble(bounds[1]) : 1;\r\n        return low + Randomizer.NextDouble() * (high - low);\r\n    }\r\n\r\n    public static double Exp(object value) { return Math.Exp(ToDouble(value)); }\r\n\r\n    public static double Ln(object value) { return Math.Log(ToDouble(value)); }\r\n\r\n    public static double Log(object value) { return Math.Log10(ToDouble(value)); }\r\n\r\n    public static double LogN(object value, object logBase) { return Math.Log(ToDouble(value), ToDouble(logBase)); }\r\n\r\n    public static double Sin(object value) { return Math.Sin(ToDouble(value)); }\r\n\r\n    public static double Cos(object value) { return Math.Cos(ToDouble(value)); }\r\n\r\n    public static double Tan(object value) { return Math.Tan(ToDouble(value)); }\r\n\r\n    public static double Asin(object value) { return Math.Asin(ToDouble(value)); }\r\n\r\n    public static double Acos(object value) { return Math.Acos(ToDouble(value)); }\r\n\r\n    public static double Atan(object value) { return Math.Atan(ToDouble(value)); }\r\n\r\n    public static double Sinh(object value) { return Math.Sinh(ToDouble(value)); }\r\n\r\n    public static double Cosh(object value) { return Math.Cosh(ToDouble(value)); }\r\n\r\n    public static double Tanh(object value) { return Math.Tanh(ToDouble(value)); }\r\n\r\n    public static double Ceiling(object value)\r\n    {\r\n        return Math.Ceiling(ToDouble(value));\r\n    }\r\n\r\n    public static double Floor(object value)\r\n    {\r\n        return Math.Floor(ToDouble(value));\r\n    }\r\n\r\n    public static double Sqrt(object value)\r\n    {\r\n        return Math.Sqrt(ToDouble(value));\r\n    }\r\n\r\n    private static List<double> Numbers(object[] values)\r\n    {\r\n        List<double> result = new List<double>();\r\n\r\n        foreach (object value in values)\r\n        {\r\n            if (value is List<string>)\r\n            {\r\n                foreach (string item in (List<string>)value)\r\n                {\r\n                    result.Add(ToDouble(item));\r\n                }\r\n            }\r\n            else\r\n            {\r\n                result.Add(ToDouble(value));\r\n            }\r\n        }\r\n\r\n        return result;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ Catch outputs\r\n\r\n    public static string ExceptionMessage(Exception exception)\r\n    {\r\n        return exception == null ? string.Empty : exception.Message;\r\n    }\r\n\r\n    public static string ExceptionType(Exception exception)\r\n    {\r\n        return exception == null ? string.Empty : exception.GetType().Name;\r\n    }\r\n\r\n    public static string ExceptionSource(Exception exception)\r\n    {\r\n        MiiException mii = exception as MiiException;\r\n\r\n        if (mii != null)\r\n        {\r\n            return mii.ActionName;\r\n        }\r\n\r\n        return exception == null ? string.Empty : exception.Source ?? string.Empty;\r\n    }\r\n\r\n    public static string ExceptionActionType(Exception exception)\r\n    {\r\n        MiiException mii = exception as MiiException;\r\n        return mii != null ? mii.ActionType : string.Empty;\r\n    }\r\n\r\n    /// <summary>True when the exception is the transaction's own Terminate Transaction (not to be caught there).</summary>\r\n    public static bool IsTerminationOf(Exception exception, string transactionPath)\r\n    {\r\n        TransactionTerminatedException termination = exception as TransactionTerminatedException;\r\n        return termination != null && termination.TransactionPath == transactionPath;\r\n    }\r\n\r\n    // ------------------------------------------------------------------ what X-Ray could not translate\r\n\r\n    /// <summary>A reference X-Ray could not map (see the notes in the file header); yields \"\".</summary>\r\n    public static object Unresolved(string reference)\r\n    {\r\n        return string.Empty;\r\n    }\r\n\r\n    /// <summary>An expression X-Ray could not parse (see the notes in the file header); yields \"\".</summary>\r\n    public static object Unparsed(string expression)\r\n    {\r\n        return string.Empty;\r\n    }\r\n\r\n    /// <summary>#expr#: MII evaluates the text as an expression at runtime; here the text itself is returned.</summary>\r\n    public static object Evaluate(string expression)\r\n    {\r\n        return expression;\r\n    }\r\n\r\n    /// <summary>getvalue(name): reads a property by a name built at runtime; not available outside MII.</summary>\r\n    public static string GetValue(object name)\r\n    {\r\n        return string.Empty;\r\n    }\r\n\r\n    public static object Function(string name, params object[] arguments)\r\n    {\r\n        throw new NotImplementedException(\"The MII function \" + name + \"() has no X-Ray equivalent.\");\r\n    }\r\n}\r\n\r\n#endregion\r\n";
 
 return { RUNTIME_SOURCE };
 });
@@ -4440,7 +4716,19 @@ class CatalogSource {
 
   /** Object paths below a folder (recursive). */
   async listObjects(folder) {
-    const document = parseAnswer(await this._post({ Mode: 'LoadFilesInsideFolderAndSubfolders', Folder: folder, 'Content-Type': 'text/xml' }));
+    return (await this.folderObjects(folder)).map((entry) => entry.path);
+  }
+
+  /** Whether a path names a folder (Catalog Exists answers 1 for an object, 2 for a folder, 0 for nothing). */
+  async isFolder(objectPath) {
+    const path = ObjectPath.normalize(objectPath);
+    return path.length > 0 && (await this._existsCode(path)) === '2';
+  }
+
+  /** The transactions and query templates below a folder (recursive) as { path, type }; type is 'Transaction' or
+   * 'QueryTemplate' (Catalog LoadFilesInsideFolderAndSubfolders, which lists no web files). */
+  async folderObjects(folder) {
+    const document = parseAnswer(await this._post({ Mode: 'LoadFilesInsideFolderAndSubfolders', Folder: ObjectPath.normalize(folder), 'Content-Type': 'text/xml' }));
     const result = [];
 
     for (const row of descendants(document, 'Row')) {
@@ -4448,7 +4736,8 @@ class CatalogSource {
       const objectName = MiiXml.childText(row, 'ObjectName').trim();
 
       if (objectName.length > 0) {
-        result.push(ObjectPath.normalize(filePath.length > 0 ? filePath + '/' + objectName : objectName));
+        const type = MiiXml.childText(row, 'Type').trim();
+        result.push({ path: ObjectPath.normalize(filePath.length > 0 ? filePath + '/' + objectName : objectName), type: type.length > 0 ? type : typeOfName(objectName) });
       }
     }
 
@@ -4456,9 +4745,13 @@ class CatalogSource {
   }
 
   async _exists(path) {
+    return (await this._existsCode(path)) === '1';
+  }
+
+  async _existsCode(path) {
     const document = parseAnswer(await this._post({ Mode: 'Exists', ObjectName: path, 'Content-Type': 'text/xml', _: String(Date.now()) }));
     const messages = descendants(document, 'Message');
-    return messages.length > 0 && messages[0].innerText.trim() === '1';
+    return messages.length > 0 ? messages[0].innerText.trim() : '0';
   }
 
   async _post(form, retried) {
@@ -4493,6 +4786,11 @@ class CatalogSource {
 
     return response.text();
   }
+}
+
+/** The object type by file extension, for answers without a Type column. */
+function typeOfName(name) {
+  return name.toLowerCase().endsWith('.trx') ? 'Transaction' : ObjectPath.isKnownExtension(name) ? 'QueryTemplate' : '';
 }
 
 function parseAnswer(text) {
@@ -4536,7 +4834,7 @@ function descendants(node, name) {
   return result;
 }
 
-return { ObjectPath, SourceError, findSimilar, editDistance, CatalogSource };
+return { ObjectPath, SourceError, findSimilar, editDistance, CatalogSource, typeOfName };
 });
 __define('translator.js', () => {
 // MII expressions as C#. Known types use native operators; anything else goes through the Mii.* helpers, which take
@@ -4687,7 +4985,16 @@ helpers(CsType.DateTime,
   'dateaddseconds', 'DateAddSeconds', 'dateaddminutes', 'DateAddMinutes', 'dateaddhours', 'DateAddHours',
   'dateadddays', 'DateAddDays', 'dateaddmonths', 'DateAddMonths', 'dateaddyears', 'DateAddYears',
   'converttimezone', 'ConvertTimeZone', 'converttimezone2', 'ConvertTimeZone2',
-  'datefromxmlformat', 'ToDateTime', 'datefromseconds', 'DateFromSeconds');
+  'datefromxmlformat', 'ToDateTime', 'datefromseconds', 'DateFromSeconds',
+  'monthstart', 'MonthStart', 'monthend', 'MonthEnd', 'yearstart', 'YearStart', 'yearend', 'YearEnd');
+helpers(CsType.Int,
+  'year', 'Year', 'month', 'Month', 'day', 'Day', 'hour', 'Hour', 'minute', 'Minute', 'second', 'Second',
+  'dayofweek', 'DayOfWeek', 'dayofyear', 'DayOfYear', 'daysinmonth', 'DaysInMonth');
+helpers(CsType.Double,
+  'exp', 'Exp', 'ln', 'Ln', 'log', 'Log', 'logn', 'LogN', 'sin', 'Sin', 'cos', 'Cos', 'tan', 'Tan',
+  'asin', 'Asin', 'acos', 'Acos', 'atan', 'Atan', 'sinh', 'Sinh', 'cosh', 'Cosh', 'tanh', 'Tanh');
+helpers(CsType.String,
+  'getsessionvariable', 'GetSessionVariable', 'datetoxmlformat', 'DateToXmlFormat');
 
 /** symbols: { resolve(reference) -> TypedCode | null, note(message), transactionPath, newName(wanted) } */
 class ExpressionTranslator {
@@ -4712,6 +5019,16 @@ class ExpressionTranslator {
 
       this._symbols.note('expression not understood (' + error.message + '): ' + oneLine(expression));
       return TypedCode.primary('Mii.Unparsed(' + CsLiteral.string(expression) + ')', CsType.Object);
+    }
+
+    // MII documents only the escapes \\ and \" (\r, \n and \t run); another one such as \[ makes the expression fail
+    for (const text of (expression || '').match(/"(?:[^"\\]|\\.)*"/g) || []) {
+      const escape = (text.match(/\\./g) || []).find((pair) => !['\\\\', '\\"', '\\r', '\\n', '\\t'].includes(pair));
+
+      if (escape) {
+        this._symbols.note('string literal with the escape ' + escape + ' (MII knows \\\\ and \\"; the expression does not compile in MII): ' + oneLine(expression));
+        break;
+      }
     }
 
     return this.translateNode(node);
@@ -4756,7 +5073,9 @@ class ExpressionTranslator {
       case 'dateoffsetformat': return literal('"yyyy-MM-dd\'T\'HH:mm:ssZ"', CsType.String, "yyyy-MM-dd'T'HH:mm:ssZ");
       case 'datetimezoneformat': return literal('"yyyy-MM-dd\'T\'HH:mm:ssz"', CsType.String, "yyyy-MM-dd'T'HH:mm:ssz");
       case 'currenttimezone': return TypedCode.primary('TimeZoneInfo.Local.Id', CsType.String);
-      case 'currenttimeoffset': return TypedCode.primary('Mii.CurrentTimeOffset()', CsType.String);
+      case 'currenttimeoffset':
+        this._symbols.note('currenttimeoffset does not exist in MII (currenttimezoneoffset is the offset in milliseconds)');
+        return this.unresolved(name);
       case 'timezoneids': return TypedCode.primary('Mii.TimeZoneIds()', CsType.List);
       case 'emptylist': return TypedCode.primary('new List<string>()', CsType.List);
       case 'emptymap': return TypedCode.primary('new Dictionary<string, string>()', CsType.Map);
@@ -4771,7 +5090,7 @@ class ExpressionTranslator {
       case 'transactionpath': return literal(CsLiteral.string(this._symbols.transactionPath), CsType.String, this._symbols.transactionPath);
       case 'currenttimemillis': return TypedCode.primary('Mii.CurrentTimeMillis()', CsType.Long);
       case 'userlocale': return TypedCode.primary('Mii.UserLocale', CsType.String);
-      case 'currenttimezoneoffset': return TypedCode.primary('Mii.CurrentTimeOffset()', CsType.String);
+      case 'currenttimezoneoffset': return TypedCode.primary('Mii.CurrentTimeZoneOffset()', CsType.Long);
       default: return this.unresolved(name);
     }
   }
@@ -4799,7 +5118,12 @@ class ExpressionTranslator {
 
   /** {xpath} on XML, {key} on a map, {index} on a list. Rowset XPaths of the usual forms become typed access. */
   applySelector(baseCode, selector) {
-    const trimmed = selector.trim();
+    let trimmed = selector.trim();
+
+    // Map{"Key"} is the documented form of a map key; the quotes are not part of the key
+    if (/^"[^"]*"$/.test(trimmed) && baseCode.type.kind !== TypeKind.Xml && baseCode.type.kind !== TypeKind.Rowset && baseCode.type.kind !== TypeKind.Row) {
+      trimmed = trimmed.substring(1, trimmed.length - 1);
+    }
 
     if (trimmed.includes('#')) {
       return xpathCall(baseCode, this._interpolatedText(trimmed).code);
@@ -4956,10 +5280,11 @@ class ExpressionTranslator {
       case '==':
       case '!=':
         return equality(binary.operator, left, right);
+      // MII evaluates both sides of && and ||: C#'s & and | on bools do the same, && and || would not
       case '&&':
-        return new TypedCode(toBoolCode(left).at(Precedence.LogicalAnd) + ' && ' + toBoolCode(right).at(Precedence.LogicalAnd + 1), CsType.Bool, Precedence.LogicalAnd);
+        return new TypedCode(toBoolCode(left).at(Precedence.BitwiseAnd) + ' & ' + toBoolCode(right).at(Precedence.BitwiseAnd + 1), CsType.Bool, Precedence.BitwiseAnd);
       case '||':
-        return new TypedCode(toBoolCode(left).at(Precedence.LogicalOr) + ' || ' + toBoolCode(right).at(Precedence.LogicalOr + 1), CsType.Bool, Precedence.LogicalOr);
+        return new TypedCode(toBoolCode(left).at(Precedence.BitwiseOr) + ' | ' + toBoolCode(right).at(Precedence.BitwiseOr + 1), CsType.Bool, Precedence.BitwiseOr);
       default:
         throw new Error('unknown operator ' + binary.operator);
     }
@@ -5045,7 +5370,7 @@ class ExpressionTranslator {
       case 'if':
       case 'objectif':
         if (args.length === 3) {
-          return this._conditional(args);
+          return fn.name === 'if' ? this._numericConditional(args) : this._conditional(args);
         }
 
         break;
@@ -5058,8 +5383,8 @@ class ExpressionTranslator {
       case 'and':
       case 'or':
         if (args.length >= 2) {
-          const op = fn.name === 'and' ? ' && ' : ' || ';
-          const precedence = fn.name === 'and' ? Precedence.LogicalAnd : Precedence.LogicalOr;
+          const op = fn.name === 'and' ? ' & ' : ' | ';
+          const precedence = fn.name === 'and' ? Precedence.BitwiseAnd : Precedence.BitwiseOr;
           const parts = args.map((argument) => toBoolCode(this.translateNode(argument)).at(precedence + 1));
           return new TypedCode(parts.join(op), CsType.Bool, precedence);
         }
@@ -5073,7 +5398,25 @@ class ExpressionTranslator {
             return count;
           }
 
-          return convertTo(this.translateNode(args[0]), CsType.Double);
+          // number() converts strictly: empty or other text fails in MII
+          const value = this.translateNode(args[0]);
+          return value.type.isNumeric ? toDoubleCode(value) : call('Mii.Number', value, CsType.Double);
+        }
+
+        break;
+      case 'datefromxmlformat':
+        if (args.length === 2) {
+          return TypedCode.primary('Mii.DateFromXmlFormat(' + this.translateNode(args[0]).code + ', ' + this.translateNode(args[1]).code + ')', CsType.String);
+        }
+
+        break;
+      case 'remove':
+        if (args.length === 2) {
+          const collection = this.translateNode(args[0]);
+
+          if (collection.type.kind === TypeKind.Map) {
+            return TypedCode.primary('Mii.RemoveKey(' + collection.code + ', ' + this.translateNode(args[1]).code + ')', CsType.Map);
+          }
         }
 
         break;
@@ -5159,6 +5502,20 @@ class ExpressionTranslator {
     }
 
     return new TypedCode(condition.at(Precedence.Conditional + 1) + ' ? ' + whenTrue.at(Precedence.Conditional + 1) + ' : ' + whenFalse.at(Precedence.Conditional), type, Precedence.Conditional);
+  }
+
+  /** if() returns a number in MII, also for text branches: text gives 0 when assigned to a string and a type cast error
+   * inside a string function. Number branches stay a C# conditional; text branches become Mii.If (a double). */
+  _numericConditional(args) {
+    const whenTrue = this.translateNode(args[1]);
+    const whenFalse = this.translateNode(args[2]);
+
+    if (whenTrue.type.kind !== TypeKind.String && whenFalse.type.kind !== TypeKind.String) {
+      return this._conditional(args);
+    }
+
+    this._symbols.note('if() with a text branch returns a number in MII (0 for text, a type cast error inside a string function); stringif() returns text');
+    return TypedCode.primary('Mii.If(' + toBoolCode(this.translateNode(args[0])).code + ', ' + whenTrue.code + ', ' + whenFalse.code + ')', CsType.Double);
   }
 
   /** getvalue(CatchX.Source & ".Message"): the caught exception's message. */
@@ -5377,7 +5734,7 @@ CsType.Object = new CsType(TypeKind.Object, 'object');
 
 /** C# operator precedence levels (higher binds tighter). */
 const Precedence = {
-  Conditional: 3, LogicalOr: 5, LogicalAnd: 6, Equality: 10, Relational: 11, Additive: 13, Multiplicative: 14, Unary: 15, Primary: 16,
+  Conditional: 3, LogicalOr: 5, LogicalAnd: 6, BitwiseOr: 7, BitwiseAnd: 9, Equality: 10, Relational: 11, Additive: 13, Multiplicative: 14, Unary: 15, Primary: 16,
 };
 
 /** A translated C# expression with its type. */

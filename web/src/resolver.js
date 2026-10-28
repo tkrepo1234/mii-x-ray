@@ -28,6 +28,23 @@ export class ObjectGraph {
 
 const STRING_LITERAL = /^\s*"([^"\\]*)"\s*$/;
 
+/** The expression of an incoming link to Action.Property; null when there is none. */
+export function linkedExpression(owner, actionName, property) {
+  for (const use of owner.allActionUses()) {
+    if (use.name !== actionName) {
+      continue;
+    }
+
+    for (const link of use.incoming) {
+      if (link.to === actionName + '.' + property) {
+        return link.from;
+      }
+    }
+  }
+
+  return null;
+}
+
 /** The value of an incoming link to Action.Property when it is a plain string literal; null otherwise. */
 export function literalLinkedValue(owner, actionName, property) {
   for (const use of owner.allActionUses()) {
@@ -116,7 +133,9 @@ export class DependencyResolver {
 
   async _followAction(owner, action) {
     if (action.actionType === 'TransactionCall') {
-      const name = action.static('TransactionName');
+      // a literal link to TransactionName wins over the configured name; an expression leaves the callee open
+      const linked = linkedExpression(owner, action.name, 'TransactionName');
+      const name = linked === null ? action.static('TransactionName') : literalLinkedValue(owner, action.name, 'TransactionName') || '';
 
       if (name.length > 0) {
         await this._loadTransaction(name);

@@ -195,7 +195,7 @@ namespace MiiXRay.Generate
                 case "dateoffsetformat": return Literal("\"yyyy-MM-dd'T'HH:mm:ssZ\"", CsType.String, "yyyy-MM-dd'T'HH:mm:ssZ");
                 case "datetimezoneformat": return Literal("\"yyyy-MM-dd'T'HH:mm:ssz\"", CsType.String, "yyyy-MM-dd'T'HH:mm:ssz");
                 case "currenttimezone": return TypedCode.Primary("TimeZoneInfo.Local.Id", CsType.String);
-                case "currenttimeoffset": return TypedCode.Primary("Mii.CurrentTimeOffset()", CsType.String);
+                case "currenttimeoffset": return Unresolved(name);
                 case "timezoneids": return TypedCode.Primary("Mii.TimeZoneIds()", CsType.List);
                 case "emptylist": return TypedCode.Primary("new List<string>()", CsType.List);
                 case "emptymap": return TypedCode.Primary("new Dictionary<string, string>()", CsType.Map);
@@ -210,7 +210,7 @@ namespace MiiXRay.Generate
                 case "transactionpath": return Literal(CsLiteral.String(_symbols.TransactionPath), CsType.String, _symbols.TransactionPath);
                 case "currenttimemillis": return TypedCode.Primary("Mii.CurrentTimeMillis()", CsType.Long);
                 case "userlocale": return TypedCode.Primary("Mii.UserLocale", CsType.String);
-                case "currenttimezoneoffset": return TypedCode.Primary("Mii.CurrentTimeOffset()", CsType.String);
+                case "currenttimezoneoffset": return TypedCode.Primary("Mii.CurrentTimeZoneOffset()", CsType.Long);
                 default: return Unresolved(name);
             }
         }

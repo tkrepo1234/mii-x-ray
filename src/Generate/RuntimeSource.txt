@@ -19,6 +19,10 @@ public sealed class Query(string text)
 
     public List<KeyValuePair<string, object>> Parameters { get; } = [];
 
+    /// <summary>MII's RowCount: the query returns at most this many rows and drops the others without a message
+    /// (0: not set).</summary>
+    public int RowCount { get; set; }
+
     public void AddParameter(string name, object value) => Parameters.Add(new(name, value));
 }
 
@@ -248,6 +252,31 @@ public static class Mii
         return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result) ? result : 0;
     }
 
+    /// <summary>number(x): converts strictly; empty text, "null", "---" and other text fail in MII.</summary>
+    public static double Number(object value)
+    {
+        if (value is double || value is int || value is long || value is decimal || value is float || value is bool)
+        {
+            return ToDouble(value);
+        }
+
+        double result;
+
+        if (double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result))
+        {
+            return result;
+        }
+
+        throw new FormatException("number(\"" + ToStr(value) + "\") fails in MII: the text is no number");
+    }
+
+    /// <summary>if(condition, a, b) returns a number in MII, also for text branches: text that is no number gives 0
+    /// (assigned to a string) or a type cast error (inside a string function); stringif returns text.</summary>
+    public static double If(bool condition, object whenTrue, object whenFalse)
+    {
+        return ToDouble(condition ? whenTrue : whenFalse);
+    }
+
     public static int ToInt(object value)
     {
         double number = ToDouble(value);
@@ -358,7 +387,8 @@ public static class Mii
 
         if (map != null)
         {
-            result.AddRange(map.Values);
+            // an Iterator over a map goes through its keys
+            result.AddRange(map.Keys);
             return result;
         }
 
@@ -653,7 +683,8 @@ public static class Mii
         return document;
     }
 
-    /// <summary>Assign XML link: replaces the selected node by the source document's root element.</summary>
+    /// <summary>Assign XML link: without XPath the source document replaces the whole document; at an XPath the selected
+    /// node keeps its own element and gets the children and text of the source's root element instead of its own.</summary>
     public static XmlDocument AssignXml(XmlDocument document, string xpath, object source)
     {
         XmlDocument sourceDocument = ToXml(source);
@@ -672,7 +703,16 @@ public static class Mii
             return document;
         }
 
-        node.ParentNode.ReplaceChild(document.ImportNode(sourceDocument.DocumentElement, true), node);
+        while (node.HasChildNodes)
+        {
+            node.RemoveChild(node.FirstChild);
+        }
+
+        foreach (XmlNode child in sourceDocument.DocumentElement.ChildNodes)
+        {
+            node.AppendChild(document.ImportNode(child, true));
+        }
+
         return document;
     }
 
@@ -1047,7 +1087,17 @@ public static class Mii
 
         foreach (object value in values)
         {
-            result.Add(ToStr(value));
+            // a list argument contributes its elements: list(Local.Items, x) is a new, longer list
+            List<string> items = value as List<string>;
+
+            if (items != null)
+            {
+                result.AddRange(items);
+            }
+            else
+            {
+                result.Add(ToStr(value));
+            }
         }
 
         return result;
@@ -1068,7 +1118,8 @@ public static class Mii
     public static string MapGet(object map, string key)
     {
         string value;
-        return ToMap(map).TryGetValue(key, out value) ? value : string.Empty;
+        // a missing key reads as the text "null" in MII, which is no empty text
+        return ToMap(map).TryGetValue(key, out value) ? value : "null";
     }
 
     public static string GetValueFromMap(object map, object key)
@@ -1135,21 +1186,43 @@ public static class Mii
         return items;
     }
 
+    /// <summary>remove(map, key): the map without the key.</summary>
+    public static Dictionary<string, string> RemoveKey(object map, object key)
+    {
+        Dictionary<string, string> items = ToMap(map);
+        items.Remove(ToStr(key));
+        return items;
+    }
+
     public static int Find(object list, object value)
     {
         return ToList(list).IndexOf(ToStr(value));
     }
 
+    /// <summary>first() of an empty list fails in MII.</summary>
     public static string First(object list)
     {
         List<string> items = ToList(list);
-        return items.Count > 0 ? items[0] : string.Empty;
+
+        if (items.Count == 0)
+        {
+            throw new InvalidOperationException("first() of an empty list fails in MII");
+        }
+
+        return items[0];
     }
 
+    /// <summary>last() of an empty list fails in MII.</summary>
     public static string Last(object list)
     {
         List<string> items = ToList(list);
-        return items.Count > 0 ? items[items.Count - 1] : string.Empty;
+
+        if (items.Count == 0)
+        {
+            throw new InvalidOperationException("last() of an empty list fails in MII");
+        }
+
+        return items[items.Count - 1];
     }
 
     public static List<string> Sort(object list)
@@ -1190,14 +1263,15 @@ public static class Mii
     {
         List<string> keyList = ToList(keys);
         List<string> valueList = ToList(values);
-        Dictionary<string, string> result = new Dictionary<string, string>();
+        SortedDictionary<string, string> sorted = new SortedDictionary<string, string>(StringComparer.Ordinal);
 
         for (int index = 0; index < keyList.Count; index++)
         {
-            result[keyList[index]] = index < valueList.Count ? valueList[index] : string.Empty;
+            sorted[keyList[index]] = index < valueList.Count ? valueList[index] : string.Empty;
         }
 
-        return result;
+        // liststomap sorts its keys in MII (map() keeps no order at all)
+        return new Dictionary<string, string>(sorted);
     }
 
     /// <summary>Splits on a regular expression (default ","); further MII arguments are ignored.</summary>
@@ -1276,10 +1350,11 @@ public static class Mii
         return search.Length == 0 ? ToStr(text) : ToStr(text).Replace(search, ToStr(replacement));
     }
 
-    /// <summary>stringreplaceall replaces every match of a regular expression.</summary>
+    /// <summary>stringreplaceall replaces every match of a regular expression; MII drops the blanks of the replacement
+    /// text ("$1 " inserts the group only).</summary>
     public static string StringReplaceAll(object text, object pattern, object replacement)
     {
-        return Regex.Replace(ToStr(text), ToStr(pattern), ToStr(replacement));
+        return Regex.Replace(ToStr(text), ToStr(pattern), ToStr(replacement).Replace(" ", string.Empty));
     }
 
     /// <summary>MII's empty check: null, "", blanks, the text "null" or "---" (any case), as match(x, "(?i)^\s*(null|---)?\s*$").</summary>
@@ -1312,14 +1387,16 @@ public static class Mii
         return "\"" + ToStr(text) + "\"";
     }
 
+    /// <summary>encode is form encoding (a blank becomes +).</summary>
     public static string Encode(object text)
     {
-        return Uri.EscapeDataString(ToStr(text));
+        return System.Net.WebUtility.UrlEncode(ToStr(text));
     }
 
+    /// <summary>decode is form decoding (+ becomes a blank).</summary>
     public static string Decode(object text)
     {
-        return Uri.UnescapeDataString(ToStr(text));
+        return System.Net.WebUtility.UrlDecode(ToStr(text));
     }
 
     public static string Base64Encode(object text)
@@ -1364,6 +1441,64 @@ public static class Mii
         }
 
         return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);
+    }
+
+    /// <summary>datefromxmlformat(date, toFormat): the date as text in toFormat.</summary>
+    public static string DateFromXmlFormat(object value, object toFormat)
+    {
+        return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);
+    }
+
+    /// <summary>datetoxmlformat(text, fromFormat): the date text in the XML date format.</summary>
+    public static string DateToXmlFormat(object value, object fromFormat)
+    {
+        return DateFormat(value, fromFormat, "yyyy-MM-dd'T'HH:mm:ss");
+    }
+
+    public static int Year(object value) { return ToDateTime(value).Year; }
+
+    public static int Month(object value) { return ToDateTime(value).Month; }
+
+    public static int Day(object value) { return ToDateTime(value).Day; }
+
+    public static int Hour(object value) { return ToDateTime(value).Hour; }
+
+    public static int Minute(object value) { return ToDateTime(value).Minute; }
+
+    public static int Second(object value) { return ToDateTime(value).Second; }
+
+    /// <summary>dayofweek: 1 = Sunday ... 7 = Saturday.</summary>
+    public static int DayOfWeek(object value) { return (int)ToDateTime(value).DayOfWeek + 1; }
+
+    public static int DayOfYear(object value) { return ToDateTime(value).DayOfYear; }
+
+    public static int DaysInMonth(object value)
+    {
+        DateTime date = ToDateTime(value);
+        return DateTime.DaysInMonth(date.Year, date.Month);
+    }
+
+    public static DateTime MonthStart(object value)
+    {
+        DateTime date = ToDateTime(value);
+        return new DateTime(date.Year, date.Month, 1);
+    }
+
+    /// <summary>monthend: the first day of the NEXT month at midnight.</summary>
+    public static DateTime MonthEnd(object value)
+    {
+        return MonthStart(value).AddMonths(1);
+    }
+
+    public static DateTime YearStart(object value)
+    {
+        return new DateTime(ToDateTime(value).Year, 1, 1);
+    }
+
+    /// <summary>yearend: the first day of the NEXT year at midnight.</summary>
+    public static DateTime YearEnd(object value)
+    {
+        return YearStart(value).AddYears(1);
     }
 
     public static string FormatDateNow(object format)
@@ -1472,10 +1607,16 @@ public static class Mii
         return ConvertTimeZone(value, zones);
     }
 
-    public static string CurrentTimeOffset()
+    /// <summary>currenttimezoneoffset: the offset of the server's time zone to UTC in milliseconds.</summary>
+    public static long CurrentTimeZoneOffset()
     {
-        TimeSpan offset = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now);
-        return (offset < TimeSpan.Zero ? "-" : "+") + offset.ToString("hhmm", Invariant);
+        return (long)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMilliseconds;
+    }
+
+    /// <summary>getsessionvariable(name): a value of the calling user's session (e.g. IllumLoginRoles).</summary>
+    public static string GetSessionVariable(object name)
+    {
+        return string.Empty;
     }
 
     public static long CurrentTimeMillis()
@@ -1544,10 +1685,39 @@ public static class Mii
 
     private static readonly Random Randomizer = new Random();
 
-    public static double Random(params object[] ignored)
+    /// <summary>random() between 0 and 1, random(low, high) between low and high.</summary>
+    public static double Random(params object[] bounds)
     {
-        return Randomizer.NextDouble();
+        double low = bounds.Length > 1 ? ToDouble(bounds[0]) : 0;
+        double high = bounds.Length > 1 ? ToDouble(bounds[1]) : 1;
+        return low + Randomizer.NextDouble() * (high - low);
     }
+
+    public static double Exp(object value) { return Math.Exp(ToDouble(value)); }
+
+    public static double Ln(object value) { return Math.Log(ToDouble(value)); }
+
+    public static double Log(object value) { return Math.Log10(ToDouble(value)); }
+
+    public static double LogN(object value, object logBase) { return Math.Log(ToDouble(value), ToDouble(logBase)); }
+
+    public static double Sin(object value) { return Math.Sin(ToDouble(value)); }
+
+    public static double Cos(object value) { return Math.Cos(ToDouble(value)); }
+
+    public static double Tan(object value) { return Math.Tan(ToDouble(value)); }
+
+    public static double Asin(object value) { return Math.Asin(ToDouble(value)); }
+
+    public static double Acos(object value) { return Math.Acos(ToDouble(value)); }
+
+    public static double Atan(object value) { return Math.Atan(ToDouble(value)); }
+
+    public static double Sinh(object value) { return Math.Sinh(ToDouble(value)); }
+
+    public static double Cosh(object value) { return Math.Cosh(ToDouble(value)); }
+
+    public static double Tanh(object value) { return Math.Tanh(ToDouble(value)); }
 
     public static double Ceiling(object value)
     {
