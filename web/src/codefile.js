@@ -6,8 +6,9 @@ import { TransactionEmitter, indent } from './emitter.js';
 import { addBlankLines } from './placer.js';
 import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
 import { ObjectPath } from './sources.js';
+import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.4.0';
+export const TOOL_VERSION = '2.5.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -15,6 +16,9 @@ const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt
 export function generateCode(graph, sourceDescription, runtimeText, now) {
   const context = new GenerationContext(graph);
   ContractBuilder.build(context);
+  context.queries.forEach((contract, query) => {
+    contract.fileConstant = query.kind === MiiQueryKind.Xml ? context.fileConstant(webFilePath(query.url)) : null;
+  });
 
   // methods first: they complete the row records (columns read by XPath)
   const methods = [];
@@ -69,6 +73,7 @@ export function generateCode(graph, sourceDescription, runtimeText, now) {
     ...indent(methods.slice(1)),
     '}',
     ...records(context),
+    ...filesClass(context),
     '',
     ...runtimeText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd().split('\n'),
   ];
@@ -95,8 +100,9 @@ function header(context, root, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of the transaction and of every transaction and query it uses, as C# 12 (.NET 8). It shows what the',
-    '// code does, not how MII runs it: MII runtime settings and default values are left out, a called transaction is a',
-    '// method, a query goes through IQueryService, an MII action without a C# equivalent through IPluginService.',
+    '// code does, not how MII runs it: MII settings and default values stand as comments at the actions and declarations,',
+    '// a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent through',
+    '// IPluginService.',
     '// The Mii class at the end implements the MII expression functions and the XML handling.',
     '//',
     '// Entry point: new ' + context.className + '(queries, plugins).' + root.methodName + '(...)',
@@ -132,8 +138,8 @@ function folderHeader(context, queryMethods, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of every transaction and query template in the folder and of every transaction and query they use, as',
-    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII runtime settings and default values are left',
-    '// out, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
+    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII settings and default values stand as comments',
+    '// at the actions and declarations, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
     '// through IPluginService. The Mii class at the end implements the MII expression functions and the XML handling.',
     '//',
     '// Entry points: new ' + context.className + '(queries, plugins).<Method>(...), one public method per transaction of the',
@@ -182,6 +188,23 @@ function headerTail(context, lines, rule) {
 
     for (const query of context.graph.queries) {
       lines.push(...queryOverview(context.queries.get(query)));
+    }
+  }
+
+  if (context.graph.files.size > 0) {
+    lines.push('//', '// Web files the transactions name (content in the class MiiFiles at the end):');
+
+    for (const path of context.graph.files.keys()) {
+      const constant = context.fileConstant(path);
+      lines.push('//   ' + path + ' = ' + (constant !== null ? constant : '(not found on the server)'));
+    }
+  }
+
+  if (context.graph.sharedProperties.length > 0) {
+    lines.push('//', '// Shared properties the transactions use (definition and default value from <Project>/META-INF/SharedProperties.mem):');
+
+    for (const property of context.graph.sharedProperties) {
+      lines.push(...sharedPropertyOverview(property));
     }
   }
 
@@ -244,8 +267,11 @@ function readingRules() {
     '//     value as text; quoting and escaping are done by the template and the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
     '//     AddTypedParameter(name, type, value): Use Typed Parameters on, MII checks the value against the type and binds',
     '//     it as a statement parameter; an unquoted [Param.N] is right there, a quoted one is no parameter (notes).',
-    '//   - A comment at a declaration gives the exact MII name (case as in MII): Transaction.X for an input or output,',
-    '//     Local.X, action X for the result of an action, column X for a rowset column.',
+    '//   - A comment at a declaration gives the exact MII name (case as in MII), the MII type and the MII default value:',
+    '//     Transaction.X for an input or output, Local.X, action X for the result of an action, column X for a column.',
+    '//     The code itself starts from empty values (a caller passes what MII links).',
+    '//   - "MII settings" under an action name list every configured property of the action as MII stores it ("linked":',
+    '//     a link sets it at runtime, the code shows that), without the results of the last test run.',
     '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
     '//   - MII rowset documents are lists of row records; FirstOrEmpty() and RowAt(n) give an empty row instead of null.',
     '//   - Conditions combine with & and |, not && and ||: MII evaluates every part (a later part is no guard).',
@@ -281,6 +307,46 @@ function callTree(contract, prefix, expanded, lines) {
   }
 }
 
+function sharedPropertyOverview(property) {
+  const head = '//   ' + property.name + ' (project ' + property.project + ')';
+
+  if (property.definition === null) {
+    return [head + (property.projectLoaded ? ': not defined in SharedProperties.mem' : ': SharedProperties.mem not readable')];
+  }
+
+  const settings = property.definition.attributes.filter(([name, value]) => name !== 'Name' && name !== 'Project' && value.length > 0)
+    .map(([name, value]) => name + ' = ' + value);
+  const lines = [head + ': ' + settings.join(', ')];
+  const value = property.definition.defaultValue.replace(/\r\n?/g, '\n').split('\n');
+
+  if (value.length === 1) {
+    lines.push('//     default: ' + value[0]);
+  } else {
+    lines.push('//     default:', ...value.map((line) => '//       ' + line));
+  }
+
+  return lines;
+}
+
+/** The web files as text constants. */
+function filesClass(context) {
+  if (context.fileConstants.size === 0) {
+    return [];
+  }
+
+  const body = [];
+
+  for (const [path, name] of context.fileConstants) {
+    if (body.length > 0) {
+      body.push('');
+    }
+
+    body.push('/// <summary>' + xmlText(path) + '</summary>', 'public const string ' + name + ' = ' + CsLiteral.string(context.graph.files.get(path)) + ';');
+  }
+
+  return ['', '/// <summary>The web files the transactions name, as loaded from the MII server.</summary>', 'public static class MiiFiles', '{', ...indent(body), '}'];
+}
+
 function queryOverview(contract) {
   const query = contract.query;
   const kind = query.kind === MiiQueryKind.Xacute ? 'Xacute query, runs its transaction'
@@ -292,6 +358,21 @@ function queryOverview(contract) {
       : contract.parameterMode === 'text' ? ' (text: replaced as text)' : '';
     lines.push('//     parameters' + mode + ': ' + contract.parameters.map((p) => '[Param.' + p.slot + '] ' + p.name
       + (contract.parameterMode === 'typed' ? ' ' + (p.type || '(no type)') : '')).join(', '));
+  }
+
+  const settings = query.attributes.filter(([name, value]) => value.trim().length > 0 && name !== 'Query' && !/^Param(Description|Type)?\.\d+$/.test(name));
+  const defaults = query.attributes.filter(([name, value]) => value.length > 0 && /^Param\.\d+$/.test(name));
+
+  if (settings.length > 0) {
+    lines.push('//     settings: ' + settings.map(([name, value]) => name + ' = ' + value.replace(/\r\n?|\n/g, ' ')).join(', '));
+  }
+
+  if (defaults.length > 0) {
+    lines.push('//     parameter defaults: ' + defaults.map(([name, value]) => '[' + name + '] = ' + value.replace(/\r\n?|\n/g, ' ')).join(', '));
+  }
+
+  if (query.kind === MiiQueryKind.Xml && contract.fileConstant) {
+    lines.push('//     URL content: ' + contract.fileConstant);
   }
 
   lines.push('//     run by: ' + (contract.callers.length > 0 ? contract.callers.join('; ') : '(no action of these transactions)'));
@@ -323,7 +404,7 @@ function records(context) {
     lines.push('', '/// <summary>The outputs of ' + xmlText(transaction.path) + '.</summary>');
     lines.push('public sealed record ' + contract.resultRecordName + '(');
     contract.outputs.forEach((output, index) => lines.push('    ' + output.type.name + ' ' + output.resultName
-      + (index < contract.outputs.length - 1 ? ',' : ');') + ' // Transaction.' + output.miiName));
+      + (index < contract.outputs.length - 1 ? ',' : ');') + ' // Transaction.' + output.miiName + ' (' + (output.miiType || 'no type') + ')'));
   }
 
   for (const contract of context.contracts) {

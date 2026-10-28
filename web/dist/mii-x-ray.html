@@ -239,7 +239,6 @@ pre {
         </div>
         <div class="actions">
           <button type="button" id="copy" class="button secondary">Copy</button>
-          <button type="button" id="download-raw" class="button secondary" title="The MII objects, web files and shared properties exactly as loaded">Raw ZIP</button>
           <button type="button" id="download" class="button">Download</button>
         </div>
       </div>
@@ -260,12 +259,12 @@ const { CatalogSource, SourceError, ObjectPath } = __require('sources.js');
 const { DependencyResolver } = __require('resolver.js');
 const { generateCode } = __require('codefile.js');
 const { RUNTIME_SOURCE } = __require('runtime.js');
-const { collectRawFiles, buildZip } = __require('rawexport.js');
+const { loadStaticContent } = __require('staticfiles.js');
 
 const RECENT_KEY = 'mii-x-ray.recent';
 const $ = (id) => document.getElementById(id);
 
-const state = { source: null, result: null, raw: null, busy: false };
+const state = { source: null, result: null, busy: false };
 
 function readRecent() {
   try {
@@ -358,9 +357,9 @@ async function xray() {
       return;
     }
 
-    state.result = generateCode(graph, source.description, RUNTIME_SOURCE, new Date());
     setStatus('Loading web files and shared properties …');
-    state.raw = await collectRawFiles(graph, source, () => {});
+    await loadStaticContent(graph, source, () => {});
+    state.result = generateCode(graph, source.description, RUNTIME_SOURCE, new Date());
     remember(path);
     showResult();
     setStatus('');
@@ -413,10 +412,6 @@ function download() {
   save(blob, state.result.rootName + '.xray.cs');
 }
 
-function downloadRaw() {
-  save(new Blob([buildZip(state.raw, new Date())], { type: 'application/zip' }), state.result.rootName + '.xray.zip');
-}
-
 function save(blob, name) {
   const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
   document.body.appendChild(link);
@@ -433,9 +428,7 @@ function start() {
     }
   });
   $('copy').addEventListener('click', copy);
-  $('download').addEventListener('click', download);
-  $('download-raw').addEventListener('click', downloadRaw);
-  showRecent();
+  $('download').addEventListener('click', download);  showRecent();
 
   if (!onServer()) {
     // opened as a file: there is no MII server to read from
@@ -461,8 +454,9 @@ const { TransactionEmitter, indent } = __require('emitter.js');
 const { addBlankLines } = __require('placer.js');
 const { TypeKind, Naming, UniqueNames, CsLiteral } = __require('types.js');
 const { ObjectPath } = __require('sources.js');
+const { webFilePath } = __require('staticfiles.js');
 
-const TOOL_VERSION = '2.4.0';
+const TOOL_VERSION = '2.5.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -470,6 +464,9 @@ const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt
 function generateCode(graph, sourceDescription, runtimeText, now) {
   const context = new GenerationContext(graph);
   ContractBuilder.build(context);
+  context.queries.forEach((contract, query) => {
+    contract.fileConstant = query.kind === MiiQueryKind.Xml ? context.fileConstant(webFilePath(query.url)) : null;
+  });
 
   // methods first: they complete the row records (columns read by XPath)
   const methods = [];
@@ -524,6 +521,7 @@ function generateCode(graph, sourceDescription, runtimeText, now) {
     ...indent(methods.slice(1)),
     '}',
     ...records(context),
+    ...filesClass(context),
     '',
     ...runtimeText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd().split('\n'),
   ];
@@ -550,8 +548,9 @@ function header(context, root, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of the transaction and of every transaction and query it uses, as C# 12 (.NET 8). It shows what the',
-    '// code does, not how MII runs it: MII runtime settings and default values are left out, a called transaction is a',
-    '// method, a query goes through IQueryService, an MII action without a C# equivalent through IPluginService.',
+    '// code does, not how MII runs it: MII settings and default values stand as comments at the actions and declarations,',
+    '// a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent through',
+    '// IPluginService.',
     '// The Mii class at the end implements the MII expression functions and the XML handling.',
     '//',
     '// Entry point: new ' + context.className + '(queries, plugins).' + root.methodName + '(...)',
@@ -587,8 +586,8 @@ function folderHeader(context, queryMethods, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of every transaction and query template in the folder and of every transaction and query they use, as',
-    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII runtime settings and default values are left',
-    '// out, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
+    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII settings and default values stand as comments',
+    '// at the actions and declarations, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
     '// through IPluginService. The Mii class at the end implements the MII expression functions and the XML handling.',
     '//',
     '// Entry points: new ' + context.className + '(queries, plugins).<Method>(...), one public method per transaction of the',
@@ -637,6 +636,23 @@ function headerTail(context, lines, rule) {
 
     for (const query of context.graph.queries) {
       lines.push(...queryOverview(context.queries.get(query)));
+    }
+  }
+
+  if (context.graph.files.size > 0) {
+    lines.push('//', '// Web files the transactions name (content in the class MiiFiles at the end):');
+
+    for (const path of context.graph.files.keys()) {
+      const constant = context.fileConstant(path);
+      lines.push('//   ' + path + ' = ' + (constant !== null ? constant : '(not found on the server)'));
+    }
+  }
+
+  if (context.graph.sharedProperties.length > 0) {
+    lines.push('//', '// Shared properties the transactions use (definition and default value from <Project>/META-INF/SharedProperties.mem):');
+
+    for (const property of context.graph.sharedProperties) {
+      lines.push(...sharedPropertyOverview(property));
     }
   }
 
@@ -699,8 +715,11 @@ function readingRules() {
     '//     value as text; quoting and escaping are done by the template and the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
     '//     AddTypedParameter(name, type, value): Use Typed Parameters on, MII checks the value against the type and binds',
     '//     it as a statement parameter; an unquoted [Param.N] is right there, a quoted one is no parameter (notes).',
-    '//   - A comment at a declaration gives the exact MII name (case as in MII): Transaction.X for an input or output,',
-    '//     Local.X, action X for the result of an action, column X for a rowset column.',
+    '//   - A comment at a declaration gives the exact MII name (case as in MII), the MII type and the MII default value:',
+    '//     Transaction.X for an input or output, Local.X, action X for the result of an action, column X for a column.',
+    '//     The code itself starts from empty values (a caller passes what MII links).',
+    '//   - "MII settings" under an action name list every configured property of the action as MII stores it ("linked":',
+    '//     a link sets it at runtime, the code shows that), without the results of the last test run.',
     '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
     '//   - MII rowset documents are lists of row records; FirstOrEmpty() and RowAt(n) give an empty row instead of null.',
     '//   - Conditions combine with & and |, not && and ||: MII evaluates every part (a later part is no guard).',
@@ -736,6 +755,46 @@ function callTree(contract, prefix, expanded, lines) {
   }
 }
 
+function sharedPropertyOverview(property) {
+  const head = '//   ' + property.name + ' (project ' + property.project + ')';
+
+  if (property.definition === null) {
+    return [head + (property.projectLoaded ? ': not defined in SharedProperties.mem' : ': SharedProperties.mem not readable')];
+  }
+
+  const settings = property.definition.attributes.filter(([name, value]) => name !== 'Name' && name !== 'Project' && value.length > 0)
+    .map(([name, value]) => name + ' = ' + value);
+  const lines = [head + ': ' + settings.join(', ')];
+  const value = property.definition.defaultValue.replace(/\r\n?/g, '\n').split('\n');
+
+  if (value.length === 1) {
+    lines.push('//     default: ' + value[0]);
+  } else {
+    lines.push('//     default:', ...value.map((line) => '//       ' + line));
+  }
+
+  return lines;
+}
+
+/** The web files as text constants. */
+function filesClass(context) {
+  if (context.fileConstants.size === 0) {
+    return [];
+  }
+
+  const body = [];
+
+  for (const [path, name] of context.fileConstants) {
+    if (body.length > 0) {
+      body.push('');
+    }
+
+    body.push('/// <summary>' + xmlText(path) + '</summary>', 'public const string ' + name + ' = ' + CsLiteral.string(context.graph.files.get(path)) + ';');
+  }
+
+  return ['', '/// <summary>The web files the transactions name, as loaded from the MII server.</summary>', 'public static class MiiFiles', '{', ...indent(body), '}'];
+}
+
 function queryOverview(contract) {
   const query = contract.query;
   const kind = query.kind === MiiQueryKind.Xacute ? 'Xacute query, runs its transaction'
@@ -747,6 +806,21 @@ function queryOverview(contract) {
       : contract.parameterMode === 'text' ? ' (text: replaced as text)' : '';
     lines.push('//     parameters' + mode + ': ' + contract.parameters.map((p) => '[Param.' + p.slot + '] ' + p.name
       + (contract.parameterMode === 'typed' ? ' ' + (p.type || '(no type)') : '')).join(', '));
+  }
+
+  const settings = query.attributes.filter(([name, value]) => value.trim().length > 0 && name !== 'Query' && !/^Param(Description|Type)?\.\d+$/.test(name));
+  const defaults = query.attributes.filter(([name, value]) => value.length > 0 && /^Param\.\d+$/.test(name));
+
+  if (settings.length > 0) {
+    lines.push('//     settings: ' + settings.map(([name, value]) => name + ' = ' + value.replace(/\r\n?|\n/g, ' ')).join(', '));
+  }
+
+  if (defaults.length > 0) {
+    lines.push('//     parameter defaults: ' + defaults.map(([name, value]) => '[' + name + '] = ' + value.replace(/\r\n?|\n/g, ' ')).join(', '));
+  }
+
+  if (query.kind === MiiQueryKind.Xml && contract.fileConstant) {
+    lines.push('//     URL content: ' + contract.fileConstant);
   }
 
   lines.push('//     run by: ' + (contract.callers.length > 0 ? contract.callers.join('; ') : '(no action of these transactions)'));
@@ -778,7 +852,7 @@ function records(context) {
     lines.push('', '/// <summary>The outputs of ' + xmlText(transaction.path) + '.</summary>');
     lines.push('public sealed record ' + contract.resultRecordName + '(');
     contract.outputs.forEach((output, index) => lines.push('    ' + output.type.name + ' ' + output.resultName
-      + (index < contract.outputs.length - 1 ? ',' : ');') + ' // Transaction.' + output.miiName));
+      + (index < contract.outputs.length - 1 ? ',' : ');') + ' // Transaction.' + output.miiName + ' (' + (output.miiType || 'no type') + ')'));
   }
 
   for (const contract of context.contracts) {
@@ -816,6 +890,9 @@ class PropertySpec {
     this.type = type;
     this.initializer = null;
     this.description = description;
+    this.miiType = ''; // the MII data type (string, int, xml, list, map, ...)
+    this.defaultText = ''; // the MII default value as stored
+    this.defaultInCode = false; // the initializer already holds the full default value
   }
 }
 
@@ -920,7 +997,7 @@ class QueryContract {
   }
 }
 
-const RUNTIME_TYPE_NAMES = ['Mii', 'MiiRow', 'MiiRows', 'Query', 'IQueryService', 'IPluginService', 'PluginResult', 'MiiException', 'TransactionTerminatedException'];
+const RUNTIME_TYPE_NAMES = ['MiiFiles', 'Mii','MiiRow', 'MiiRows', 'Query', 'IQueryService', 'IPluginService', 'PluginResult', 'MiiException', 'TransactionTerminatedException'];
 
 /** Shared state of one generation run. */
 class GenerationContext {
@@ -933,7 +1010,23 @@ class GenerationContext {
     this.contracts = [];
     this.notes = [];
     this.className = null;
+    this.fileConstants = new Map(); // Catalog path of a loaded web file -> constant name in MiiFiles
+    this._fileNames = new UniqueNames();
     RUNTIME_TYPE_NAMES.forEach((name) => this.typeNames.reserve(name));
+  }
+
+  /** The constant (MiiFiles.Name) with the content of a loaded web file; null when the path is null or the file was
+   * not loaded. */
+  fileConstant(path) {
+    if (path === null || !this.graph.files || typeof this.graph.files.get(path) !== 'string') {
+      return null;
+    }
+
+    if (!this.fileConstants.has(path)) {
+      this.fileConstants.set(path, this._fileNames.claim(Naming.pascal(ObjectPath.leaf(path).replace(/\./g, '_')).replace(/^@/, '')));
+    }
+
+    return 'MiiFiles.' + this.fileConstants.get(path);
   }
 
   note(where, message) {
@@ -1083,9 +1176,9 @@ function buildInterface(context, contract) {
     const local = property(context, contract, parameter);
     // a local the flow never replaces as a whole is configuration or a template: it keeps its MII value
     const configuration = !written.has(parameter.name) && local.type.kind !== TypeKind.Rowset && parameter.defaultText.trim().length > 0;
-    local.initializer = configuration
-      ? ContractBuilder.initializer(local.type, local.type.kind === TypeKind.Xml ? shrinkXmlSample(parameter.defaultText) : parameter.defaultText)
-      : ContractBuilder.emptyValue(local.type);
+    const shown = configuration && local.type.kind === TypeKind.Xml ? shrinkXmlSample(parameter.defaultText) : parameter.defaultText;
+    local.initializer = configuration ? ContractBuilder.initializer(local.type, shown) : ContractBuilder.emptyValue(local.type);
+    local.defaultInCode = configuration && shown === parameter.defaultText;
     contract.locals.push(local);
   }
 }
@@ -1115,7 +1208,24 @@ function writtenLocals(transaction) {
 const WHOLE_WRITES = ['Assign', 'AssignXml', 'ReplaceXml'];
 
 function property(context, contract, parameter) {
-  return new PropertySpec(parameter.name, contract.localNames.claim(Naming.camel(parameter.name)), typeOf(context, contract, parameter), parameter.description);
+  const spec = new PropertySpec(parameter.name, contract.localNames.claim(Naming.camel(parameter.name)), typeOf(context, contract, parameter), parameter.description);
+  spec.miiType = parameter.type;
+  spec.defaultText = parameter.defaultText;
+  return spec;
+}
+
+/** The comment at a declaration: exact MII name and type, and the MII default value unless the code already
+ * initializes with it (a multi-line value follows on lines of its own). */
+function declarationComment(prefix, spec) {
+  const head = prefix + spec.miiName + ' (' + (spec.miiType || 'no type') + ')';
+  const value = spec.defaultInCode ? '' : spec.defaultText || '';
+
+  if (value.trim().length === 0) {
+    return [head];
+  }
+
+  const lines = value.replace(/\r\n?/g, '\n').split('\n');
+  return lines.length === 1 ? [head + ', default: ' + lines[0]] : [head + ', default:'].concat(lines.map((line) => '  ' + line));
 }
 
 function typeOf(context, contract, parameter) {
@@ -1225,7 +1335,7 @@ function addCachedQueryColumns(context) {
   }
 }
 
-return { PropertySpec, TransactionContract, QueryContract, GenerationContext, ContractBuilder };
+return { PropertySpec, TransactionContract, QueryContract, GenerationContext, ContractBuilder, declarationComment };
 });
 __define('emitter.js', () => {
 // The method of one transaction: the step tree becomes C# control flow, the actions become calls, the links become
@@ -1238,10 +1348,11 @@ const { MiiXml, MiiQueryKind } = __require('model.js');
 const { literalLinkedValue, linkedExpression } = __require('resolver.js');
 const { parseExpression, ExpressionError, referenceScope, referenceMember } = __require('expressions.js');
 const { ContractFactory } = __require('rowset.js');
-const { ContractBuilder } = __require('contracts.js');
+const { ContractBuilder, declarationComment } = __require('contracts.js');
 const { ExpressionTranslator, convertTo, toStringCode } = __require('translator.js');
 const { CsType, TypeKind, TypedCode, Precedence, Naming, CsLiteral } = __require('types.js');
 const { placeDeclarations, withMiiName } = __require('placer.js');
+const { webFilePath } = __require('staticfiles.js');
 
 const ActionKind = {
   None: 'None', TransactionCall: 'TransactionCall', Query: 'Query', QueryCommand: 'QueryCommand', Xacute: 'Xacute',
@@ -1273,7 +1384,19 @@ const NOISE_PROPERTIES = [
   'XmlContent', 'document', 'QueryParameters', 'SQLTransaction', 'Request', 'Success', 'TextOutput', 'Existed', 'Valid', 'Messages',
 ];
 
-const TRIVIAL_VALUES = ['', 'INHERIT', 'false', '0', '-1', '-9223372036854775808', 'NEVER', 'Never'];
+/** Actions whose settings are flow structure or the state of the last design-time run, shown by the code itself. */
+const STRUCTURAL_ACTIONS = ['Assignment', 'CatchAction', 'ConditionalAction', 'RepeaterAction', 'IteratorAction', 'ForNextRepeaterAction', 'SwitcherAction'];
+
+/** Action properties that hold what the last design-time run produced, not configuration. */
+const RUN_CACHES = [
+  'Results', 'ResultsAsString', 'ResultSet', 'QueryStartDate', 'QueryEndDate', 'Output', 'Response', 'LastErrorMessage',
+  'ItemCount', 'CurrentItem', 'Success', 'TextOutput', 'Existed', 'Valid', 'Messages', 'XmlContent', 'Item', 'document',
+];
+
+/** Settings that name a web file. */
+const FILE_SETTINGS = ['Transform', 'SourceUrl', 'XSDURL'];
+
+const TRIVIAL_VALUES =['', 'INHERIT', 'false', '0', '-1', '-9223372036854775808', 'NEVER', 'Never'];
 
 /** Every physical line indented, so raw string literals (closing quotes at the start of a line) keep their value. */
 function indent(lines) {
@@ -1612,20 +1735,26 @@ class TransactionEmitter {
       }
     }
 
+    const attributes = this._transaction.attributes.filter(([name, value]) => name !== 'Description' && value.length > 0);
+
+    if (attributes.length > 0) {
+      lines.push('/// MII transaction attributes: ' + xmlText(attributes.map(([name, value]) => name + ' = ' + oneLine(value)).join(', ')));
+    }
+
     lines.push('/// </summary>');
     lines.push(...this._signature(isPublic));
     lines.push('{');
 
     // outputs live for the whole method (they are returned); locals and action results move to where they are set
-    const body = this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', 'Transaction.' + output.miiName));
+    const body = this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', declarationComment('Transaction.', output)));
     const candidates = [];
     const configuration = [];
 
     for (const local of this._contract.locals) {
       if (local.initializer === ContractBuilder.emptyValue(local.type)) {
-        candidates.push({ type: local.type.name, name: local.name, miiName: 'Local.' + local.miiName, initializer: local.initializer, isCatch: false });
+        candidates.push({ type: local.type.name, name: local.name, miiName: declarationComment('Local.', local), initializer: local.initializer, isCatch: false });
       } else {
-        configuration.push(...withMiiName(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';', 'Local.' + local.miiName));
+        configuration.push(...withMiiName(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';', declarationComment('Local.', local)));
       }
     }
 
@@ -1669,8 +1798,20 @@ class TransactionEmitter {
       return [head + ')'];
     }
 
-    return [head].concat(inputs.map((input, index) => '    ' + input.type.name + ' ' + input.name + ' = default'
-      + (index < inputs.length - 1 ? ',' : ')') + ' // Transaction.' + input.miiName));
+    const lines = [head];
+
+    inputs.forEach((input, index) => {
+      const declaration = '    ' + input.type.name + ' ' + input.name + ' = default' + (index < inputs.length - 1 ? ',' : ')');
+      const comment = declarationComment('Transaction.', input);
+
+      if (comment.length === 1) {
+        lines.push(declaration + ' // ' + comment[0]);
+      } else {
+        lines.push(...comment.map((text) => '    // ' + text), declaration);
+      }
+    });
+
+    return lines;
   }
 
   /** Steps in order; a Catch wraps everything before it (including the lines passed in) in a try block. */
@@ -2166,7 +2307,7 @@ class TransactionEmitter {
     }
 
     const symbol = this._actions.get(use.name);
-    const lines = ['// ' + use.name];
+    const lines = ['// ' + use.name, ...this._settingsComment(use)];
 
     switch (use.definition.actionType) {
       case 'Assignment':
@@ -2211,6 +2352,59 @@ class TransactionEmitter {
 
     lines.push(...this._emitOutgoing(use));
     return lines;
+  }
+
+  /** Every configured setting of the action as MII stores it (linked ones marked), without the caches of the last
+   * design-time run; a setting that names a loaded web file points to its constant. */
+  _settingsComment(use) {
+    const definition = use.definition;
+
+    if (STRUCTURAL_ACTIONS.includes(definition.actionType)) {
+      return [];
+    }
+
+    const linked = new Set(use.incoming.map((link) => linkTarget(link.to).property));
+    const lines = [];
+    const empty = [];
+
+    for (const property of MiiXml.childElements(definition.value)) {
+      const name = property.localName;
+
+      if (RUN_CACHES.includes(name)) {
+        continue;
+      }
+
+      const mark = linked.has(name) ? ' (linked)' : '';
+      let value = MiiXml.ownText(property);
+
+      if (MiiXml.childElements(property).some((child) => child.localName !== 'ReferenceDocumentSource')) {
+        value = MiiXml.childElements(property).map((child) => child.outerXml).join('');
+      }
+
+      if (value.trim().length === 0) {
+        empty.push(name + mark);
+        continue;
+      }
+
+      if (SECRET.test(name)) {
+        value = '***';
+      }
+
+      const constant = FILE_SETTINGS.includes(name) ? this._context.fileConstant(webFilePath(value)) : null;
+      const valueLines = value.replace(/\r\n?/g, '\n').split('\n');
+
+      if (valueLines.length === 1) {
+        lines.push('//   ' + name + mark + ' = ' + valueLines[0] + (constant ? ' (content: ' + constant + ')' : ''));
+      } else {
+        lines.push('//   ' + name + mark + ' =', ...valueLines.map((line) => '//     ' + line));
+      }
+    }
+
+    if (empty.length > 0) {
+      lines.push('//   empty: ' + empty.join(', '));
+    }
+
+    return lines.length > 0 ? ['// MII settings (' + definition.actionType + '):', ...lines] : [];
   }
 
   _messageOf(use, property) {
@@ -2269,7 +2463,13 @@ class TransactionEmitter {
       stylesheetCode = stylesheet.code;
     } else {
       const path = this._inputValue(use, 'Transform', CsType.String) || TypedCode.primary('""', CsType.String);
-      stylesheetCode = 'plugins.LoadResource(' + path.code + ')';
+      const file = path.isLiteral ? webFilePath(path.literalText) : null;
+      const constant = this._context.fileConstant(file);
+      stylesheetCode = constant !== null ? constant : 'plugins.LoadResource(' + path.code + ')';
+
+      if (file !== null && constant === null) {
+        this.note('the stylesheet ' + file + ' was not found on the server');
+      }
     }
 
     return [assign(symbol, 'Mii.XslTransform(' + input.code + ', ' + stylesheetCode + ')')];
@@ -3378,6 +3578,7 @@ class MiiTransaction {
     this.path = path;
     this.description = '';
     this.throwOnLinkError = ''; // the transaction attribute; false or 0: a failing link does not stop the run
+    this.attributes = []; // [name, value] of every transaction attribute, in file order
     this.inputs = [];
     this.outputs = [];
     this.locals = [];
@@ -3416,6 +3617,7 @@ class MiiQuery {
     this.text = '';
     this.rowCount = ''; // RowCount of the template: MII returns at most this many rows
     this.typedParameters = false; // UseTypedParams
+    this.attributes = []; // [name, value] of every template setting (root attributes), in file order
     this.url = '';
     this.parameters = []; // { slot, description, type, defaultValue }
     this.xacuteTransaction = '';
@@ -3445,6 +3647,10 @@ const ObjectReader = {
     const transaction = new MiiTransaction(path);
     transaction.description = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'Description');
     transaction.throwOnLinkError = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'ThrowOnLinkError').trim();
+
+    for (const item of MiiXml.children(MiiXml.child(root, 'TransactionAttributes'), 'ContextItem')) {
+      transaction.attributes.push([MiiXml.childText(item, 'Name'), MiiXml.ownText(MiiXml.child(item, 'Value')).trim()]);
+    }
 
     for (const item of MiiXml.children(MiiXml.child(root, 'Context'), 'ContextItem')) {
       const parameter = readParameter(item);
@@ -3480,6 +3686,7 @@ const ObjectReader = {
     query.rowCount = root.getAttribute('RowCount').trim();
     // Use Typed Parameters: the values are bound as statement parameters instead of replacing [Param.N] as text
     query.typedParameters = /^(t|true)$/i.test(root.getAttribute('UseTypedParams').trim());
+    query.attributes = root.attributes.map((attribute) => [attribute.name, attribute.value]);
 
     switch (root.localName) {
       case 'SQLQuery':
@@ -3699,18 +3906,21 @@ function tryPlace(flow, variable) {
   return true;
 }
 
-/** A declaration with the exact MII name as a comment: at the end of a one-line statement, else on the line above
- * (nothing may follow the opening quotes of a raw string). */
-function withMiiName(line, miiName) {
-  if (!miiName) {
+/** A declaration with its MII comment (one text or several lines): one line at the end of a one-line statement,
+ * else above it (nothing may follow the opening quotes of a raw string). */
+function withMiiName(line, comment) {
+  const comments = comment ? [].concat(comment) : [];
+
+  if (comments.length === 0) {
     return [line];
   }
 
-  if (!line.includes('\n') && line.trimEnd().endsWith(';')) {
-    return [line + ' // ' + miiName];
+  if (comments.length === 1 && !line.includes('\n') && line.trimEnd().endsWith(';')) {
+    return [line + ' // ' + comments[0]];
   }
 
-  return [line.substring(0, line.length - line.trimStart().length) + '// ' + miiName, line];
+  const indentation = line.substring(0, line.length - line.trimStart().length);
+  return comments.map((text) => indentation + '// ' + text).concat([line]);
 }
 
 /** "catch (Exception xError) ... x = xError;" becomes "catch (Exception x)". */
@@ -3823,244 +4033,6 @@ const isComment = (text) => text.startsWith('//') && !text.startsWith('///');
 
 return { placeDeclarations, withMiiName, addBlankLines };
 });
-__define('rawexport.js', () => {
-// The raw side of an X-Ray: every object exactly as the source returned it, the static files the transactions name
-// and the shared properties of the projects involved, packed as one ZIP in the layout of an MII project.
-const { literalLinkedValue, linkedExpression } = __require('resolver.js');
-const { MiiQueryKind } = __require('model.js');
-
-const EXTENSIONS = {
-  Transaction: '.trx', SQLQuery: '.tqsq', XacuteQuery: '.tqxc', XMLQuery: '.tqxm', MDOQuery: '.tqmd', TagQuery: '.tqta',
-  PCoQuery: '.tqpc', AlarmQuery: '.tqal', AggregateQuery: '.tqag', CatalogQuery: '.tqet', KPIQuery: '.tqkp', OLAPQuery: '.tqol',
-};
-
-// properties that name a file: the stylesheet of an XSL transformation, the document of an XML loader, the schema of
-// an XSD validation
-const FILE_PROPERTIES = { XSLTransform: ['Transform'], XmlLoader: ['SourceUrl'], XSDValidation: ['XSDURL'] };
-
-/** The MII path of the object with the extension of its class (root element). */
-function rawObjectPath(path, rootName) {
-  return path + (EXTENSIONS[rootName] || '.xml');
-}
-
-/** The Catalog path (Project/WEB/...) of a web file reference: db://P/WEB/x, /XMII/CM/P/x, http(s)://host/XMII/CM/P/x
- * or P/WEB/x. Null for everything else (servlet URLs, other servers, expressions). */
-function webFilePath(reference) {
-  let text = (reference || '').trim().replace(/\\/g, '/').replace(/[?#].*$/, '');
-  let match = /^db:\/\/(.+)$/i.exec(text);
-
-  if (match) {
-    text = match[1];
-  } else {
-    match = /^(?:https?:\/\/[^/]+)?\/XMII\/CM\/([^/]+)\/(.+)$/i.exec(text);
-
-    if (match) {
-      text = match[1] + '/WEB/' + match[2];
-    }
-  }
-
-  text = text.replace(/^\/+/, '');
-  return /^[^/:]+\/WEB\/[^:]+[^/]$/i.test(text) ? text : null;
-}
-
-/** The file references of the graph: { file, owner, use, value } with file = Catalog path, or null when the value is
- * no web file or is computed at runtime. */
-function fileReferences(graph) {
-  const result = [];
-
-  for (const transaction of graph.transactions) {
-    for (const action of transaction.actions.values()) {
-      for (const property of FILE_PROPERTIES[action.actionType] || []) {
-        const linked = linkedExpression(transaction, action.name, property);
-        const value = linked === null ? action.static(property) : literalLinkedValue(transaction, action.name, property);
-
-        if (value === null) {
-          result.push({ file: null, owner: transaction.path, use: action.name + '.' + property, value: linked });
-        } else if (value.trim().length > 0) {
-          result.push({ file: webFilePath(value), owner: transaction.path, use: action.name + '.' + property, value });
-        }
-      }
-    }
-  }
-
-  for (const query of graph.queries) {
-    if (query.kind === MiiQueryKind.Xml && query.url.trim().length > 0) {
-      result.push({ file: webFilePath(query.url), owner: query.path, use: 'URL', value: query.url });
-    }
-  }
-
-  return result;
-}
-
-/** Collects the ZIP entries { path, text }: the loaded objects, the referenced web files and per project the shared
- * properties (definitions with default values; the running values where the server returns them). */
-async function collectRawFiles(graph, source, progress) {
-  const entries = [];
-  const taken = new Set();
-  const manifest = [];
-  const add = (path, text) => {
-    if (!taken.has(path.toLowerCase())) {
-      taken.add(path.toLowerCase());
-      entries.push({ path, text });
-    }
-  };
-
-  for (const object of graph.rawObjects) {
-    add(rawObjectPath(object.path, object.rootName), object.text);
-  }
-
-  const references = fileReferences(graph);
-
-  for (const reference of references) {
-    if (reference.file === null || taken.has(reference.file.toLowerCase())) {
-      continue;
-    }
-
-    const text = typeof source.loadFile === 'function' ? await source.loadFile(reference.file) : null;
-
-    if (text === null) {
-      manifest.push('not found: ' + reference.file + ' (' + reference.owner + ' ' + reference.use + ')');
-    } else {
-      add(reference.file, text);
-      progress('loaded ' + reference.file);
-    }
-  }
-
-  for (const reference of references.filter((item) => item.file === null)) {
-    manifest.push('not a web file or computed at runtime: ' + reference.owner + ' ' + reference.use + ' = ' + reference.value);
-  }
-
-  const projects = [...new Set(graph.rawObjects.map((object) => object.path.split('/')[0]))].sort();
-
-  for (const project of projects) {
-    const definitions = typeof source.loadFile === 'function' ? await source.loadFile(project + '/META-INF/SharedProperties.mem') : null;
-
-    if (definitions === null) {
-      manifest.push('not found: ' + project + '/META-INF/SharedProperties.mem');
-    } else {
-      add(project + '/META-INF/SharedProperties.mem', definitions);
-    }
-
-    const running = typeof source.loadRuntimeProperties === 'function' ? await source.loadRuntimeProperties(project) : null;
-
-    if (running !== null) {
-      add(project + '/META-INF/SharedProperties.runtime.xml', running);
-    }
-  }
-
-  for (const missing of graph.missing) {
-    manifest.push('not found: ' + missing);
-  }
-
-  const lines = [
-    'MII X-Ray raw export',
-    'Source: ' + source.description,
-    '',
-    'Every object as the source returned it, by MII path. <Project>/WEB/... are web files the transactions name,',
-    '<Project>/META-INF/SharedProperties.mem the shared property definitions with default values,',
-    'SharedProperties.runtime.xml the running values (Catalog GetRuntimePropertyList) where the server returns them.',
-    '',
-    'Files:',
-    ...entries.map((entry) => '  ' + entry.path),
-  ];
-
-  if (manifest.length > 0) {
-    lines.push('', 'Not included:', ...manifest.map((line) => '  ' + line));
-  }
-
-  entries.push({ path: 'xray-manifest.txt', text: lines.join('\r\n') + '\r\n' });
-  return entries;
-}
-
-/** A ZIP archive (stored, no compression) of { path, text } entries; names and contents as UTF-8. */
-function buildZip(entries, date) {
-  const encoder = new TextEncoder();
-  const time = ((date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1)) & 0xffff;
-  const day = (((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate()) & 0xffff;
-  const locals = [];
-  const centrals = [];
-  let offset = 0;
-
-  for (const entry of entries) {
-    const name = encoder.encode(entry.path);
-    const data = encoder.encode(entry.text);
-    const crc = crc32(data);
-    const local = new DataView(new ArrayBuffer(30));
-    local.setUint32(0, 0x04034b50, true);
-    local.setUint16(4, 20, true);
-    local.setUint16(6, 0x0800, true); // UTF-8 names
-    local.setUint16(10, time, true);
-    local.setUint16(12, day, true);
-    local.setUint32(14, crc, true);
-    local.setUint32(18, data.length, true);
-    local.setUint32(22, data.length, true);
-    local.setUint16(26, name.length, true);
-    locals.push(new Uint8Array(local.buffer), name, data);
-
-    const central = new DataView(new ArrayBuffer(46));
-    central.setUint32(0, 0x02014b50, true);
-    central.setUint16(4, 20, true);
-    central.setUint16(6, 20, true);
-    central.setUint16(8, 0x0800, true);
-    central.setUint16(12, time, true);
-    central.setUint16(14, day, true);
-    central.setUint32(16, crc, true);
-    central.setUint32(20, data.length, true);
-    central.setUint32(24, data.length, true);
-    central.setUint16(28, name.length, true);
-    central.setUint32(42, offset, true);
-    centrals.push(new Uint8Array(central.buffer), name);
-    offset += 30 + name.length + data.length;
-  }
-
-  const centralSize = centrals.reduce((sum, part) => sum + part.length, 0);
-  const end = new DataView(new ArrayBuffer(22));
-  end.setUint32(0, 0x06054b50, true);
-  end.setUint16(8, entries.length, true);
-  end.setUint16(10, entries.length, true);
-  end.setUint32(12, centralSize, true);
-  end.setUint32(16, offset, true);
-
-  const parts = [...locals, ...centrals, new Uint8Array(end.buffer)];
-  const result = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
-  let position = 0;
-
-  for (const part of parts) {
-    result.set(part, position);
-    position += part.length;
-  }
-
-  return result;
-}
-
-let crcTable = null;
-
-function crc32(bytes) {
-  if (crcTable === null) {
-    crcTable = new Uint32Array(256);
-
-    for (let n = 0; n < 256; n++) {
-      let c = n;
-
-      for (let k = 0; k < 8; k++) {
-        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-      }
-
-      crcTable[n] = c >>> 0;
-    }
-  }
-
-  let crc = 0xffffffff;
-
-  for (let index = 0; index < bytes.length; index++) {
-    crc = crcTable[(crc ^ bytes[index]) & 0xff] ^ (crc >>> 8);
-  }
-
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
-return { rawObjectPath, webFilePath, fileReferences, collectRawFiles, buildZip };
-});
 __define('resolver.js', () => {
 // Loads the root transaction and follows every static transaction and query reference recursively.
 const { ObjectReader, MiiQueryKind } = __require('model.js');
@@ -4079,7 +4051,8 @@ class ObjectGraph {
     this.transactionsByReference = new Map(); // lower-case normalized reference -> transaction
     this.queriesByReference = new Map();
     this.missing = [];
-    this.rawObjects = []; // { path, rootName, text }: every object exactly as the source returned it
+    this.files = new Map(); // web files the transactions name: Catalog path -> text (null: not found)
+    this.sharedProperties = []; // { project, name, definition } of the shared properties the transactions use
   }
 
   findTransaction(reference) {
@@ -4336,7 +4309,6 @@ class DependencyResolver {
     }
 
     let result;
-    this._graph.rawObjects.push({ path: key, rootName: document.documentElement ? document.documentElement.localName : '', text: loaded.text });
 
     if (ObjectReader.isTransaction(document)) {
       const transaction = ObjectReader.readTransaction(key, document);
@@ -5105,25 +5077,6 @@ class CatalogSource {
     return answer && answer.documentElement.localName === 'Rowsets' && descendants(answer, 'FatalError').length > 0 ? null : text;
   }
 
-  /** The running values of a project's shared properties (Catalog GetRuntimePropertyList, unverified mode); null when
-   * the server gives no XML answer or reports an error. */
-  async loadRuntimeProperties(project) {
-    let text;
-
-    try {
-      text = await this._post({ Mode: 'GetRuntimePropertyList', Project: project, 'Content-Type': 'text/xml', _: String(Date.now()) });
-    } catch (error) {
-      if (error instanceof SourceError) {
-        return null;
-      }
-
-      throw error;
-    }
-
-    const answer = tryParseXml(text);
-    return answer && answer.documentElement && descendants(answer, 'FatalError').length === 0 ? text : null;
-  }
-
   async findSimilar(objectPath, maximum) {
     let folder = ObjectPath.folder(objectPath);
     let candidates = [];
@@ -5279,6 +5232,144 @@ function descendants(node, name) {
 }
 
 return { ObjectPath, SourceError, findSimilar, editDistance, CatalogSource, typeOfName };
+});
+__define('staticfiles.js', () => {
+// What the transactions use besides transactions and queries: the web files they name (XSLT, XML, XSD) and the
+// shared properties they read. Loaded once after the objects, so the generator can put them into the file.
+const { literalLinkedValue, linkedExpression } = __require('resolver.js');
+const { MiiQueryKind, MiiXml } = __require('model.js');
+const { tryParseXml } = __require('xml.js');
+
+// properties that name a file: the stylesheet of an XSL transformation, the document of an XML loader, the schema of
+// an XSD validation
+const FILE_PROPERTIES = { XSLTransform: ['Transform'], XmlLoader: ['SourceUrl'], XSDValidation: ['XSDURL'] };
+
+const SHARED_PROPERTY = /\b(Inline|Persistent)\.([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/** The Catalog path (Project/WEB/...) of a web file reference: db://P/WEB/x, /XMII/CM/P/x, http(s)://host/XMII/CM/P/x
+ * or P/WEB/x. Null for everything else (servlet URLs, other servers, expressions). */
+function webFilePath(reference) {
+  let text = (reference || '').trim().replace(/\\/g, '/').replace(/[?#].*$/, '');
+  let match = /^db:\/\/(.+)$/i.exec(text);
+
+  if (match) {
+    text = match[1];
+  } else {
+    match = /^(?:https?:\/\/[^/]+)?\/XMII\/CM\/([^/]+)\/(.+)$/i.exec(text);
+
+    if (match) {
+      text = match[1] + '/WEB/' + match[2];
+    }
+  }
+
+  text = text.replace(/^\/+/, '');
+  return /^[^/:]+\/WEB\/[^:]+[^/]$/i.test(text) ? text : null;
+}
+
+/** The value of a file property as MII uses it: a literal link wins over the configured value; null when a link
+ * computes it at runtime. */
+function fileReferenceValue(owner, action, property) {
+  const linked = linkedExpression(owner, action.name, property);
+  return linked === null ? action.static(property) : literalLinkedValue(owner, action.name, property);
+}
+
+/** Every web file the graph names, as Catalog paths. */
+function referencedFiles(graph) {
+  const result = new Set();
+
+  for (const transaction of graph.transactions) {
+    for (const action of transaction.actions.values()) {
+      for (const property of FILE_PROPERTIES[action.actionType] || []) {
+        const path = webFilePath(fileReferenceValue(transaction, action, property));
+
+        if (path !== null) {
+          result.add(path);
+        }
+      }
+    }
+  }
+
+  for (const query of graph.queries) {
+    const path = query.kind === MiiQueryKind.Xml ? webFilePath(query.url) : null;
+
+    if (path !== null) {
+      result.add(path);
+    }
+  }
+
+  return [...result].sort();
+}
+
+/** The shared properties the transactions read or write, as { project, name } (name with Inline./Persistent.). */
+function referencedSharedProperties(graph) {
+  const result = new Map();
+
+  for (const transaction of graph.transactions) {
+    const project = transaction.path.split('/')[0];
+
+    for (const use of transaction.allActionUses()) {
+      for (const link of use.incoming.concat(use.outgoing)) {
+        for (const text of [link.from, link.to]) {
+          for (const match of (text || '').matchAll(SHARED_PROPERTY)) {
+            result.set((project + '/' + match[0]).toLowerCase(), { project, name: match[0] });
+          }
+        }
+      }
+    }
+  }
+
+  return [...result.values()].sort((a, b) => (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1));
+}
+
+/** Loads the web files and the shared property definitions into the graph: graph.files (Catalog path -> text, null
+ * when not found) and graph.sharedProperties ({ project, name, definition }, definition null when not found). */
+async function loadStaticContent(graph, source, progress) {
+  graph.files = new Map();
+  graph.sharedProperties = [];
+
+  if (typeof source.loadFile !== 'function') {
+    return;
+  }
+
+  for (const path of referencedFiles(graph)) {
+    graph.files.set(path, await source.loadFile(path));
+    progress('loaded ' + path);
+  }
+
+  const definitions = new Map();
+
+  for (const reference of referencedSharedProperties(graph)) {
+    if (!definitions.has(reference.project)) {
+      definitions.set(reference.project, parseSharedProperties(await source.loadFile(reference.project + '/META-INF/SharedProperties.mem')));
+    }
+
+    const leaf = reference.name.substring(reference.name.indexOf('.') + 1);
+    const project = definitions.get(reference.project);
+    graph.sharedProperties.push({ ...reference, definition: project === null ? null : project.get(leaf.toLowerCase()) || null, projectLoaded: project !== null });
+  }
+}
+
+/** SharedProperties.mem: lower-case name -> { attributes (name -> value), defaultValue }; null when not readable. */
+function parseSharedProperties(text) {
+  const document = text === null ? null : tryParseXml(text);
+
+  if (!document || !document.documentElement) {
+    return null;
+  }
+
+  const result = new Map();
+
+  for (const property of MiiXml.children(document.documentElement, 'Property')) {
+    result.set(property.getAttribute('Name').toLowerCase(), {
+      attributes: property.attributes.map((attribute) => [attribute.name, attribute.value]),
+      defaultValue: MiiXml.ownText(MiiXml.child(property, 'DefaultValue')),
+    });
+  }
+
+  return result;
+}
+
+return { webFilePath, fileReferenceValue, referencedFiles, referencedSharedProperties, loadStaticContent };
 });
 __define('translator.js', () => {
 // MII expressions as C#. Known types use native operators; anything else goes through the Mii.* helpers, which take

@@ -104,6 +104,7 @@ export class MiiTransaction {
     this.path = path;
     this.description = '';
     this.throwOnLinkError = ''; // the transaction attribute; false or 0: a failing link does not stop the run
+    this.attributes = []; // [name, value] of every transaction attribute, in file order
     this.inputs = [];
     this.outputs = [];
     this.locals = [];
@@ -142,6 +143,7 @@ export class MiiQuery {
     this.text = '';
     this.rowCount = ''; // RowCount of the template: MII returns at most this many rows
     this.typedParameters = false; // UseTypedParams
+    this.attributes = []; // [name, value] of every template setting (root attributes), in file order
     this.url = '';
     this.parameters = []; // { slot, description, type, defaultValue }
     this.xacuteTransaction = '';
@@ -171,6 +173,10 @@ export const ObjectReader = {
     const transaction = new MiiTransaction(path);
     transaction.description = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'Description');
     transaction.throwOnLinkError = readAttribute(MiiXml.child(root, 'TransactionAttributes'), 'ThrowOnLinkError').trim();
+
+    for (const item of MiiXml.children(MiiXml.child(root, 'TransactionAttributes'), 'ContextItem')) {
+      transaction.attributes.push([MiiXml.childText(item, 'Name'), MiiXml.ownText(MiiXml.child(item, 'Value')).trim()]);
+    }
 
     for (const item of MiiXml.children(MiiXml.child(root, 'Context'), 'ContextItem')) {
       const parameter = readParameter(item);
@@ -206,6 +212,7 @@ export const ObjectReader = {
     query.rowCount = root.getAttribute('RowCount').trim();
     // Use Typed Parameters: the values are bound as statement parameters instead of replacing [Param.N] as text
     query.typedParameters = /^(t|true)$/i.test(root.getAttribute('UseTypedParams').trim());
+    query.attributes = root.attributes.map((attribute) => [attribute.name, attribute.value]);
 
     switch (root.localName) {
       case 'SQLQuery':

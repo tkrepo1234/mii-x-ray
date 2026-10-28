@@ -9,6 +9,7 @@ import { ObjectPath } from '../src/sources.js';
 import { FolderSource } from './folder-source.js';
 import { DependencyResolver } from '../src/resolver.js';
 import { generateCode } from '../src/codefile.js';
+import { loadStaticContent } from '../src/staticfiles.js';
 
 const args = process.argv.slice(2);
 const compile = !args.includes('--no-compile');
@@ -55,6 +56,7 @@ async function run(kind, path, resolveGraph) {
     return;
   }
 
+  await loadStaticContent(graph, source, () => {});
   const result = generateCode(graph, 'export folder ' + exportFolder, runtime, new Date());
   const file = join(workFolder, kind + '-' + String(++index).padStart(4, '0') + '-' + result.rootName + '.xray.cs');
   writeFileSync(file, '\uFEFF' + result.code);

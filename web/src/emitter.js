@@ -8,10 +8,11 @@ import { MiiXml, MiiQueryKind } from './model.js';
 import { literalLinkedValue, linkedExpression } from './resolver.js';
 import { parseExpression, ExpressionError, referenceScope, referenceMember } from './expressions.js';
 import { ContractFactory } from './rowset.js';
-import { ContractBuilder } from './contracts.js';
+import { ContractBuilder, declarationComment } from './contracts.js';
 import { ExpressionTranslator, convertTo, toStringCode } from './translator.js';
 import { CsType, TypeKind, TypedCode, Precedence, Naming, CsLiteral } from './types.js';
 import { placeDeclarations, withMiiName } from './placer.js';
+import { webFilePath } from './staticfiles.js';
 
 const ActionKind = {
   None: 'None', TransactionCall: 'TransactionCall', Query: 'Query', QueryCommand: 'QueryCommand', Xacute: 'Xacute',
@@ -43,7 +44,19 @@ const NOISE_PROPERTIES = [
   'XmlContent', 'document', 'QueryParameters', 'SQLTransaction', 'Request', 'Success', 'TextOutput', 'Existed', 'Valid', 'Messages',
 ];
 
-const TRIVIAL_VALUES = ['', 'INHERIT', 'false', '0', '-1', '-9223372036854775808', 'NEVER', 'Never'];
+/** Actions whose settings are flow structure or the state of the last design-time run, shown by the code itself. */
+const STRUCTURAL_ACTIONS = ['Assignment', 'CatchAction', 'ConditionalAction', 'RepeaterAction', 'IteratorAction', 'ForNextRepeaterAction', 'SwitcherAction'];
+
+/** Action properties that hold what the last design-time run produced, not configuration. */
+const RUN_CACHES = [
+  'Results', 'ResultsAsString', 'ResultSet', 'QueryStartDate', 'QueryEndDate', 'Output', 'Response', 'LastErrorMessage',
+  'ItemCount', 'CurrentItem', 'Success', 'TextOutput', 'Existed', 'Valid', 'Messages', 'XmlContent', 'Item', 'document',
+];
+
+/** Settings that name a web file. */
+const FILE_SETTINGS = ['Transform', 'SourceUrl', 'XSDURL'];
+
+const TRIVIAL_VALUES =['', 'INHERIT', 'false', '0', '-1', '-9223372036854775808', 'NEVER', 'Never'];
 
 /** Every physical line indented, so raw string literals (closing quotes at the start of a line) keep their value. */
 export function indent(lines) {
@@ -382,20 +395,26 @@ export class TransactionEmitter {
       }
     }
 
+    const attributes = this._transaction.attributes.filter(([name, value]) => name !== 'Description' && value.length > 0);
+
+    if (attributes.length > 0) {
+      lines.push('/// MII transaction attributes: ' + xmlText(attributes.map(([name, value]) => name + ' = ' + oneLine(value)).join(', ')));
+    }
+
     lines.push('/// </summary>');
     lines.push(...this._signature(isPublic));
     lines.push('{');
 
     // outputs live for the whole method (they are returned); locals and action results move to where they are set
-    const body = this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', 'Transaction.' + output.miiName));
+    const body = this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', declarationComment('Transaction.', output)));
     const candidates = [];
     const configuration = [];
 
     for (const local of this._contract.locals) {
       if (local.initializer === ContractBuilder.emptyValue(local.type)) {
-        candidates.push({ type: local.type.name, name: local.name, miiName: 'Local.' + local.miiName, initializer: local.initializer, isCatch: false });
+        candidates.push({ type: local.type.name, name: local.name, miiName: declarationComment('Local.', local), initializer: local.initializer, isCatch: false });
       } else {
-        configuration.push(...withMiiName(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';', 'Local.' + local.miiName));
+        configuration.push(...withMiiName(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';', declarationComment('Local.', local)));
       }
     }
 
@@ -439,8 +458,20 @@ export class TransactionEmitter {
       return [head + ')'];
     }
 
-    return [head].concat(inputs.map((input, index) => '    ' + input.type.name + ' ' + input.name + ' = default'
-      + (index < inputs.length - 1 ? ',' : ')') + ' // Transaction.' + input.miiName));
+    const lines = [head];
+
+    inputs.forEach((input, index) => {
+      const declaration = '    ' + input.type.name + ' ' + input.name + ' = default' + (index < inputs.length - 1 ? ',' : ')');
+      const comment = declarationComment('Transaction.', input);
+
+      if (comment.length === 1) {
+        lines.push(declaration + ' // ' + comment[0]);
+      } else {
+        lines.push(...comment.map((text) => '    // ' + text), declaration);
+      }
+    });
+
+    return lines;
   }
 
   /** Steps in order; a Catch wraps everything before it (including the lines passed in) in a try block. */
@@ -936,7 +967,7 @@ export class TransactionEmitter {
     }
 
     const symbol = this._actions.get(use.name);
-    const lines = ['// ' + use.name];
+    const lines = ['// ' + use.name, ...this._settingsComment(use)];
 
     switch (use.definition.actionType) {
       case 'Assignment':
@@ -981,6 +1012,59 @@ export class TransactionEmitter {
 
     lines.push(...this._emitOutgoing(use));
     return lines;
+  }
+
+  /** Every configured setting of the action as MII stores it (linked ones marked), without the caches of the last
+   * design-time run; a setting that names a loaded web file points to its constant. */
+  _settingsComment(use) {
+    const definition = use.definition;
+
+    if (STRUCTURAL_ACTIONS.includes(definition.actionType)) {
+      return [];
+    }
+
+    const linked = new Set(use.incoming.map((link) => linkTarget(link.to).property));
+    const lines = [];
+    const empty = [];
+
+    for (const property of MiiXml.childElements(definition.value)) {
+      const name = property.localName;
+
+      if (RUN_CACHES.includes(name)) {
+        continue;
+      }
+
+      const mark = linked.has(name) ? ' (linked)' : '';
+      let value = MiiXml.ownText(property);
+
+      if (MiiXml.childElements(property).some((child) => child.localName !== 'ReferenceDocumentSource')) {
+        value = MiiXml.childElements(property).map((child) => child.outerXml).join('');
+      }
+
+      if (value.trim().length === 0) {
+        empty.push(name + mark);
+        continue;
+      }
+
+      if (SECRET.test(name)) {
+        value = '***';
+      }
+
+      const constant = FILE_SETTINGS.includes(name) ? this._context.fileConstant(webFilePath(value)) : null;
+      const valueLines = value.replace(/\r\n?/g, '\n').split('\n');
+
+      if (valueLines.length === 1) {
+        lines.push('//   ' + name + mark + ' = ' + valueLines[0] + (constant ? ' (content: ' + constant + ')' : ''));
+      } else {
+        lines.push('//   ' + name + mark + ' =', ...valueLines.map((line) => '//     ' + line));
+      }
+    }
+
+    if (empty.length > 0) {
+      lines.push('//   empty: ' + empty.join(', '));
+    }
+
+    return lines.length > 0 ? ['// MII settings (' + definition.actionType + '):', ...lines] : [];
   }
 
   _messageOf(use, property) {
@@ -1039,7 +1123,13 @@ export class TransactionEmitter {
       stylesheetCode = stylesheet.code;
     } else {
       const path = this._inputValue(use, 'Transform', CsType.String) || TypedCode.primary('""', CsType.String);
-      stylesheetCode = 'plugins.LoadResource(' + path.code + ')';
+      const file = path.isLiteral ? webFilePath(path.literalText) : null;
+      const constant = this._context.fileConstant(file);
+      stylesheetCode = constant !== null ? constant : 'plugins.LoadResource(' + path.code + ')';
+
+      if (file !== null && constant === null) {
+        this.note('the stylesheet ' + file + ' was not found on the server');
+      }
     }
 
     return [assign(symbol, 'Mii.XslTransform(' + input.code + ', ' + stylesheetCode + ')')];

@@ -14,6 +14,9 @@ export class PropertySpec {
     this.type = type;
     this.initializer = null;
     this.description = description;
+    this.miiType = ''; // the MII data type (string, int, xml, list, map, ...)
+    this.defaultText = ''; // the MII default value as stored
+    this.defaultInCode = false; // the initializer already holds the full default value
   }
 }
 
@@ -118,7 +121,7 @@ export class QueryContract {
   }
 }
 
-const RUNTIME_TYPE_NAMES = ['Mii', 'MiiRow', 'MiiRows', 'Query', 'IQueryService', 'IPluginService', 'PluginResult', 'MiiException', 'TransactionTerminatedException'];
+const RUNTIME_TYPE_NAMES = ['MiiFiles', 'Mii','MiiRow', 'MiiRows', 'Query', 'IQueryService', 'IPluginService', 'PluginResult', 'MiiException', 'TransactionTerminatedException'];
 
 /** Shared state of one generation run. */
 export class GenerationContext {
@@ -131,7 +134,23 @@ export class GenerationContext {
     this.contracts = [];
     this.notes = [];
     this.className = null;
+    this.fileConstants = new Map(); // Catalog path of a loaded web file -> constant name in MiiFiles
+    this._fileNames = new UniqueNames();
     RUNTIME_TYPE_NAMES.forEach((name) => this.typeNames.reserve(name));
+  }
+
+  /** The constant (MiiFiles.Name) with the content of a loaded web file; null when the path is null or the file was
+   * not loaded. */
+  fileConstant(path) {
+    if (path === null || !this.graph.files || typeof this.graph.files.get(path) !== 'string') {
+      return null;
+    }
+
+    if (!this.fileConstants.has(path)) {
+      this.fileConstants.set(path, this._fileNames.claim(Naming.pascal(ObjectPath.leaf(path).replace(/\./g, '_')).replace(/^@/, '')));
+    }
+
+    return 'MiiFiles.' + this.fileConstants.get(path);
   }
 
   note(where, message) {
@@ -281,9 +300,9 @@ function buildInterface(context, contract) {
     const local = property(context, contract, parameter);
     // a local the flow never replaces as a whole is configuration or a template: it keeps its MII value
     const configuration = !written.has(parameter.name) && local.type.kind !== TypeKind.Rowset && parameter.defaultText.trim().length > 0;
-    local.initializer = configuration
-      ? ContractBuilder.initializer(local.type, local.type.kind === TypeKind.Xml ? shrinkXmlSample(parameter.defaultText) : parameter.defaultText)
-      : ContractBuilder.emptyValue(local.type);
+    const shown = configuration && local.type.kind === TypeKind.Xml ? shrinkXmlSample(parameter.defaultText) : parameter.defaultText;
+    local.initializer = configuration ? ContractBuilder.initializer(local.type, shown) : ContractBuilder.emptyValue(local.type);
+    local.defaultInCode = configuration && shown === parameter.defaultText;
     contract.locals.push(local);
   }
 }
@@ -313,7 +332,24 @@ function writtenLocals(transaction) {
 const WHOLE_WRITES = ['Assign', 'AssignXml', 'ReplaceXml'];
 
 function property(context, contract, parameter) {
-  return new PropertySpec(parameter.name, contract.localNames.claim(Naming.camel(parameter.name)), typeOf(context, contract, parameter), parameter.description);
+  const spec = new PropertySpec(parameter.name, contract.localNames.claim(Naming.camel(parameter.name)), typeOf(context, contract, parameter), parameter.description);
+  spec.miiType = parameter.type;
+  spec.defaultText = parameter.defaultText;
+  return spec;
+}
+
+/** The comment at a declaration: exact MII name and type, and the MII default value unless the code already
+ * initializes with it (a multi-line value follows on lines of its own). */
+export function declarationComment(prefix, spec) {
+  const head = prefix + spec.miiName + ' (' + (spec.miiType || 'no type') + ')';
+  const value = spec.defaultInCode ? '' : spec.defaultText || '';
+
+  if (value.trim().length === 0) {
+    return [head];
+  }
+
+  const lines = value.replace(/\r\n?/g, '\n').split('\n');
+  return lines.length === 1 ? [head + ', default: ' + lines[0]] : [head + ', default:'].concat(lines.map((line) => '  ' + line));
 }
 
 function typeOf(context, contract, parameter) {

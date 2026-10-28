@@ -211,25 +211,6 @@ export class CatalogSource {
     return answer && answer.documentElement.localName === 'Rowsets' && descendants(answer, 'FatalError').length > 0 ? null : text;
   }
 
-  /** The running values of a project's shared properties (Catalog GetRuntimePropertyList, unverified mode); null when
-   * the server gives no XML answer or reports an error. */
-  async loadRuntimeProperties(project) {
-    let text;
-
-    try {
-      text = await this._post({ Mode: 'GetRuntimePropertyList', Project: project, 'Content-Type': 'text/xml', _: String(Date.now()) });
-    } catch (error) {
-      if (error instanceof SourceError) {
-        return null;
-      }
-
-      throw error;
-    }
-
-    const answer = tryParseXml(text);
-    return answer && answer.documentElement && descendants(answer, 'FatalError').length === 0 ? text : null;
-  }
-
   async findSimilar(objectPath, maximum) {
     let folder = ObjectPath.folder(objectPath);
     let candidates = [];

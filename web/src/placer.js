@@ -55,18 +55,21 @@ function tryPlace(flow, variable) {
   return true;
 }
 
-/** A declaration with the exact MII name as a comment: at the end of a one-line statement, else on the line above
- * (nothing may follow the opening quotes of a raw string). */
-export function withMiiName(line, miiName) {
-  if (!miiName) {
+/** A declaration with its MII comment (one text or several lines): one line at the end of a one-line statement,
+ * else above it (nothing may follow the opening quotes of a raw string). */
+export function withMiiName(line, comment) {
+  const comments = comment ? [].concat(comment) : [];
+
+  if (comments.length === 0) {
     return [line];
   }
 
-  if (!line.includes('\n') && line.trimEnd().endsWith(';')) {
-    return [line + ' // ' + miiName];
+  if (comments.length === 1 && !line.includes('\n') && line.trimEnd().endsWith(';')) {
+    return [line + ' // ' + comments[0]];
   }
 
-  return [line.substring(0, line.length - line.trimStart().length) + '// ' + miiName, line];
+  const indentation = line.substring(0, line.length - line.trimStart().length);
+  return comments.map((text) => indentation + '// ' + text).concat([line]);
 }
 
 /** "catch (Exception xError) ... x = xError;" becomes "catch (Exception x)". */

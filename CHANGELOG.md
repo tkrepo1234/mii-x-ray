@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.5.0 - 2026-10-28
+
+Tim: no export of MII objects; what a rebuild needs goes into the `.xray.cs`.
+
+- The **Raw ZIP** of 2.3.0 is gone again (button, ZIP writer, test).
+- Declarations: MII type and the **full MII default value** next to the exact name (`// Transaction.Site (string),
+  default: M`; multi-line values such as XML documents on comment lines above). The code still starts from empty
+  values; a local the code already initializes with its full value shows no second copy.
+- **MII settings** of every action (except assignments, conditions, loops and catches): each configured property as
+  MII stores it, linked ones marked, empty ones in one line, passwords as `***`, caches of the last test run left out.
+- Each method lists the **transaction attributes** (ThrowOnActionError, FormatXMLOnConversion, ...); the query
+  overview the **template settings** (Mode, Server, DateFormat, ...) and **parameter defaults**.
+- **Web files** the transactions name (XSLT, XmlLoader source, XSD, XML query URL) are loaded from the server and
+  stand as constants in `MiiFiles`; an XSL transformation with a known stylesheet uses the constant instead of
+  `plugins.LoadResource(...)`.
+- **Shared properties** the transactions use (`Inline.X`, `Persistent.X`): definition and default value from
+  `SharedProperties.mem` in the header.
+- `web/test/staticfiles.mjs` checks web files and shared properties with a fixture.
+
 ## 2.4.0 - 2026-10-28
 
 - **Exact MII names** at every declaration, as MII spells them: `// Transaction.X` at each input (one parameter per
