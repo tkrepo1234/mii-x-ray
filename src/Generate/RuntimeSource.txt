@@ -89,6 +89,29 @@ public sealed class TransactionTerminatedException(string transactionPath, strin
     public string TransactionPath { get; } = transactionPath;
 }
 
+/// <summary>A value that keeps the MII document it was read from (all rowsets, all columns, MII's text).</summary>
+public interface IMiiDocument
+{
+    /// <summary>The document, or null when the value has changed since it was read.</summary>
+    XmlDocument MiiDocument { get; }
+}
+
+/// <summary>Row records read from an MII document: the rows of every rowset, and the document itself, so that
+/// XPaths such as /Rowsets/Rowset[2]/Row and columns the record does not know still see what MII returned.</summary>
+public sealed class MiiRowList<T> : List<T>, IMiiDocument where T : MiiRow
+{
+    private readonly XmlDocument document;
+    private readonly int count;
+
+    public MiiRowList(IEnumerable<T> rows, XmlDocument document) : base(rows)
+    {
+        this.document = document;
+        count = Count;
+    }
+
+    public XmlDocument MiiDocument => Count == count ? document : null;
+}
+
 /// <summary>Base of the row records: one property per column of an MII rowset document.</summary>
 public abstract record MiiRow
 {
@@ -163,7 +186,8 @@ public static class Mii
 
         if (value is DateTime)
         {
-            return ((DateTime)value).ToString("yyyy-MM-dd'T'HH:mm:ss", Invariant);
+            // no time (a NULL date of a query, an unset dateTime): MII's text TimeUnavailable
+            return (DateTime)value == DateTime.MinValue ? "TimeUnavailable" : ((DateTime)value).ToString("yyyy-MM-dd'T'HH:mm:ss", Invariant);
         }
 
         if (value is double)
@@ -180,6 +204,11 @@ public static class Mii
         if (value is XmlNode)
         {
             return ((XmlNode)value).OuterXml;
+        }
+
+        if (value is IMiiDocument carrier && carrier.MiiDocument != null && carrier.MiiDocument.DocumentElement != null)
+        {
+            return carrier.MiiDocument.DocumentElement.OuterXml;
         }
 
         if (value is IEnumerable<MiiRow> rows)
@@ -356,6 +385,11 @@ public static class Mii
             return document;
         }
 
+        if (value is IMiiDocument carrier && carrier.MiiDocument != null)
+        {
+            return (XmlDocument)carrier.MiiDocument.CloneNode(true);
+        }
+
         if (value is IEnumerable<MiiRow> rows)
         {
             return RowsetDocument(rows, value.GetType());
@@ -489,7 +523,8 @@ public static class Mii
             rows.Add(row);
         }
 
-        return rows;
+        // the rows keep the document: columns the record does not know and further rowsets stay readable
+        return new MiiRowList<T>(rows, value is XmlDocument ? (XmlDocument)document.CloneNode(true) : document);
     }
 
     /// <summary>Row records as an MII rowset document (Rowsets/Rowset with Columns and Row elements).</summary>
@@ -776,12 +811,14 @@ public static class Mii
     /// <summary>Append XML link: the source root element becomes the last child of the selected node.</summary>
     public static XmlDocument AppendXml(XmlDocument document, string xpath, object source)
     {
-        XmlDocument sourceDocument = ToXml(source);
         XmlNode node = FindOrCreate(document, xpath);
 
-        if (node != null && sourceDocument.DocumentElement != null)
+        foreach (XmlElement element in SourceElements(source))
         {
-            node.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
+            if (node != null)
+            {
+                node.AppendChild(document.ImportNode(element, true));
+            }
         }
 
         return document;
@@ -790,15 +827,46 @@ public static class Mii
     /// <summary>Append After XML link: the source root element is inserted after the selected node.</summary>
     public static XmlDocument AppendAfterXml(XmlDocument document, string xpath, object source)
     {
-        XmlDocument sourceDocument = ToXml(source);
         XmlNode node = FindOrCreate(document, xpath);
 
-        if (node != null && node.ParentNode != null && sourceDocument.DocumentElement != null)
+        foreach (XmlElement element in SourceElements(source))
         {
-            node.ParentNode.InsertAfter(document.ImportNode(sourceDocument.DocumentElement, true), node);
+            if (node != null && node.ParentNode != null)
+            {
+                node = node.ParentNode.InsertAfter(document.ImportNode(element, true), node);
+            }
         }
 
         return document;
+    }
+
+    /// <summary>The elements an XML link appends: the root of the source, or each node an XPath selected
+    /// (Doc{xpath} as the source of Append XML).</summary>
+    private static List<XmlElement> SourceElements(object source)
+    {
+        List<XmlElement> elements = new List<XmlElement>();
+
+        if (source is IEnumerable<XmlDocument> nodes)
+        {
+            foreach (XmlDocument item in nodes)
+            {
+                if (item.DocumentElement != null)
+                {
+                    elements.Add(item.DocumentElement);
+                }
+            }
+
+            return elements;
+        }
+
+        XmlDocument sourceDocument = ToXml(source);
+
+        if (sourceDocument.DocumentElement != null)
+        {
+            elements.Add(sourceDocument.DocumentElement);
+        }
+
+        return elements;
     }
 
     /// <summary>Replace XML link: the children of the selected node are replaced by the source root element.</summary>
@@ -976,7 +1044,21 @@ public static class Mii
 
         if (node is XmlElement)
         {
-            document.AppendChild(document.ImportNode(node, true));
+            XmlElement copy = (XmlElement)document.AppendChild(document.ImportNode(node, true));
+
+            // the namespace declarations in scope of the node go with it (a repeater item keeps its prefixes)
+            foreach (KeyValuePair<string, string> scope in node.CreateNavigator().GetNamespacesInScope(System.Xml.XmlNamespaceScope.ExcludeXml))
+            {
+                string name = scope.Key.Length == 0 ? "xmlns" : "xmlns:" + scope.Key;
+
+                if (scope.Value.Length > 0 && !copy.HasAttribute(name))
+                {
+                    XmlAttribute declaration = document.CreateAttribute(name, "http://www.w3.org/2000/xmlns/");
+                    declaration.Value = scope.Value;
+                    copy.Attributes.Append(declaration);
+                }
+            }
+
             return document;
         }
 
@@ -1399,14 +1481,17 @@ public static class Mii
         return value.Substring(begin, Math.Max(0, Math.Min(value.Length - begin, ToInt(length))));
     }
 
+    /// <summary>stringindexof counts from 1 and gives 0 when the part is missing (measured on MII:
+    /// stringindexof("football", "ball") = 5).</summary>
     public static int StringIndexOf(object text, object part)
     {
-        return ToStr(text).IndexOf(ToStr(part), StringComparison.Ordinal);
+        return ToStr(text).IndexOf(ToStr(part), StringComparison.Ordinal) + 1;
     }
 
+    /// <summary>stringlastindexof counts from 1 and gives 0 when the part is missing (as stringindexof).</summary>
     public static int StringLastIndexOf(object text, object part)
     {
-        return ToStr(text).LastIndexOf(ToStr(part), StringComparison.Ordinal);
+        return ToStr(text).LastIndexOf(ToStr(part), StringComparison.Ordinal) + 1;
     }
 
     /// <summary>stringreplace replaces every occurrence (literal text).</summary>

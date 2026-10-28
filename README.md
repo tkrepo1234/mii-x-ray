@@ -79,7 +79,7 @@ var outputs = MiiSim.Run(new ProductionProcessLogic(simulation), "ME/ProductionP
 
 Hooks: `IQueryService.Execute(SimQuery)` gets template path, kind, mode, typed flag, RowCount, every slot (name, slot,
 type, set or default, text, value) and the statement as MII sends it (text parameters replaced, typed ones as `?` with
-`Values` in order); it returns rows as column name to text (null for a database null). `IPluginService.Invoke` gets
+`Values` in order); it returns every result set (`SimQueryResult.Rowsets`: columns with database type, rows as column name to text, null for a database null). `IPluginService.Invoke` gets
 every configured setting of the action with the linked values put in (`Request`: the request document);
 `IPluginService.CallExternal(path, inputs)` runs transactions that are not in the file (and those `ExternalPaths`
 names). `MiiSim.Diagnostics` lists the errors MII swallows.

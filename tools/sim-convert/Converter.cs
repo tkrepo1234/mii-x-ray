@@ -43,7 +43,7 @@ public sealed class Template
 /// <summary>Turns a default-mode X-Ray into the simulation mode (see SimulationRuntime.txt for what it emulates).</summary>
 public sealed class Converter(List<MetadataReference> references)
 {
-    public const string ToolVersion = "2.6.1";
+    public const string ToolVersion = "2.6.2";
 
     private const string ServicesRegion = "#region Services (implement these to run the code)";
 
@@ -717,10 +717,28 @@ public sealed class Converter(List<MetadataReference> references)
             }
 
             file.ActionVariables = actionVariables.Keys.ToHashSet();
+
+            foreach (Parameter parameter in method.Parameters)
+            {
+                variablesByKey["Transaction." + MiiName(parameter)] = (parameter.Name, parameter.Type);
+            }
+
+            foreach ((LocalDeclarationStatementSyntax statement, Declaration declaration) in method.TopDeclarations)
+            {
+                variablesByKey[declaration.Key] = (statement.Declaration.Variables[0].Identifier.Text, statement.Declaration.Type.ToString());
+            }
+
+            foreach ((string name, string type, Declaration declaration) in hoisted)
+            {
+                variablesByKey[declaration.Key] = (name, type);
+            }
+
             WrapReads();
             ConvertStatements();
             ResolveQuerySettings();
             WrapRegexPatterns();
+            ConvertXmlSources();
+            WrapDynamicLiterals();
 
             // the start: enter, external call, inputs
             List<string> head = [indent + "var " + frame + " = " + file.Simulation + ".Enter(" + Comments.Literal(method.Path) + ", "
@@ -924,6 +942,96 @@ public sealed class Converter(List<MetadataReference> references)
             }
         }
 
+        /// <summary>C# name and type of each Transaction.X, Local.X and "action X" of the method.</summary>
+        private readonly Dictionary<string, (string Name, string Type)> variablesByKey = [];
+
+        /// <summary>Append XML of Doc{xpath}: the default file reads the text of the first node (Mii.XPath); MII appends
+        /// the selected nodes. A stylesheet the file does not hold goes through frame.LoadResource (a clear error).</summary>
+        private void ConvertXmlSources()
+        {
+            foreach (InvocationExpressionSyntax invocation in method.Flow.SelectMany((item) => item.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()))
+            {
+                string called = invocation.Expression.ToString();
+
+                if ((called == "Mii.AppendXml" || called == "Mii.AppendAfterXml") && invocation.ArgumentList.Arguments.Count == 3
+                    && invocation.ArgumentList.Arguments[2].Expression is InvocationExpressionSyntax source && source.Expression.ToString() == "Mii.XPath")
+                {
+                    file.Replace(source.Expression.Span, "Mii.SelectNodes");
+                }
+
+                if (called == "plugins.LoadResource")
+                {
+                    file.Replace(invocation.Expression.Span, frame + ".LoadResource");
+                }
+            }
+        }
+
+        private static readonly Regex DynamicReference = new Regex(@"#((?:Transaction|Local)\.[A-Za-z_]\w*)(?:\{[^{}#]*\}|\{\{[^{}#]*\}\})?#");
+
+        /// <summary>#Transaction.X# / #Local.X# in a literal (XPath, regular expression, text): MII puts the value in at
+        /// runtime (MiiSim.Dynamic).</summary>
+        private void WrapDynamicLiterals()
+        {
+            foreach (ExpressionSyntax literal in method.Flow.SelectMany((item) => item.DescendantNodesAndSelf())
+                .Where((node) => node.IsKind(SyntaxKind.StringLiteralExpression) || node is InterpolatedStringExpressionSyntax).Cast<ExpressionSyntax>())
+            {
+                if (literal.Ancestors().Any((node) => node is InterpolatedStringExpressionSyntax))
+                {
+                    continue;
+                }
+
+                List<string> references = DynamicReference.Matches(literal.ToString()).Select((match) => match.Groups[1].Value).Distinct().ToList();
+                List<string> known = references.Where((reference) => variablesByKey.ContainsKey(reference)).ToList();
+
+                if (known.Count == 0 || (literal.Parent is ArgumentSyntax argument && argument.Parent?.Parent is InvocationExpressionSyntax owner
+                    && (owner.Expression.ToString() == "Mii.Unresolved" || owner.Expression.ToString() == "Mii.Evaluate")))
+                {
+                    continue;
+                }
+
+                string values = string.Join(", ", known.Select((reference) => "(" + Comments.Literal(reference) + ", (object)" + variablesByKey[reference].Name + ")"));
+                file.Insert(literal.SpanStart, "MiiSim.Dynamic(", 105);
+                file.Insert(literal.Span.End, ", " + values + ")", 5);
+            }
+        }
+
+        /// <summary>A configured setting of a plugin action that MII evaluates as a reference (Distinct ValueSource,
+        /// GenericSortFilter Source): the C# value, or null when the reference is not one of this method.</summary>
+        public string ReferenceCode(string reference)
+        {
+            Match match = Regex.Match(reference.Trim(), @"^([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?:\{(.*)\})?$", RegexOptions.Singleline);
+
+            if (!match.Success)
+            {
+                return null;
+            }
+
+            string scope = match.Groups[1].Value;
+            string member = match.Groups[2].Value;
+            string code = null;
+
+            if ((scope == "Transaction" || scope == "Local") && variablesByKey.TryGetValue(scope + "." + member, out (string Name, string Type) variable))
+            {
+                code = variable.Name;
+            }
+            else
+            {
+                KeyValuePair<string, string> action = actionVariables.FirstOrDefault((pair) => pair.Value == scope);
+
+                if (action.Key != null && variablesByKey.TryGetValue("action " + scope, out (string Name, string Type) result))
+                {
+                    code = frame + ".Read(" + Comments.Literal(scope) + ", " + action.Key + ")" + (result.Type == "PluginResult" ? ".Get(" + Comments.Literal(member) + ")" : "");
+                }
+            }
+
+            if (code == null)
+            {
+                return null;
+            }
+
+            return match.Groups[3].Success ? "MiiSim.Nodes(" + code + ", " + Comments.Literal(match.Groups[3].Value.Trim()) + ")" : code;
+        }
+
         /// <summary>Patterns of the Regex calls the X-Ray writes for match() are Java patterns: Mii.JavaPattern.</summary>
         private void WrapRegexPatterns()
         {
@@ -1092,6 +1200,16 @@ public sealed class Converter(List<MetadataReference> references)
                 {
                     string key = entry.Left is ImplicitElementAccessSyntax access && access.ArgumentList.Arguments.Count == 1
                         && access.ArgumentList.Arguments[0].Expression is LiteralExpressionSyntax keyLiteral ? keyLiteral.Token.ValueText : "?";
+                    string reference = key.EndsWith("Source", StringComparison.Ordinal) && entry.Right is LiteralExpressionSyntax configuredReference
+                        ? ReferenceCode(configuredReference.Token.ValueText) : null;
+
+                    if (reference != null)
+                    {
+                        // MII evaluates the configured reference (Local.X{/path}, Action.Output) when the action runs
+                        file.Replace(entry.Right.Span, reference);
+                        continue;
+                    }
+
                     file.WrapIncoming(frame, entry.Right, "object", actionName + "." + key, "null");
                 }
             }

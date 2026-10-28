@@ -1,5 +1,42 @@
 # Changelog
 
+## 2.6.2 - 2026-10-28
+
+Gaps the simulation harness found running 205 scenarios of today's objects against the rebuilt package.
+
+Runtime (both modes):
+
+- `stringindexof` / `stringlastindexof` count from 1 and give 0 for a missing part (measured on MII 28.10.2026:
+  `stringindexof("football", "ball")` = 5); before they were .NET's 0-based index with -1.
+- Row records read from an MII document (`Mii.ToRows`) keep the document (`MiiRowList`, `IMiiDocument`): XPaths,
+  `Mii.ToXml` and the text of the rows see every rowset and every column, also the ones the record does not know
+  (two spellings of a column, a reference document with fewer columns). Adding rows drops the document.
+- `DateTime.MinValue` (a NULL date, an unset dateTime) is the text `TimeUnavailable`, as MII writes a NULL date
+  (assumed for an unset dateTime property).
+- A repeater item (and any node taken out of its document) keeps the namespace declarations in scope.
+- Append XML / Append After XML of several nodes appends each.
+
+Simulation:
+
+- `IQueryService.Execute` returns `SimQueryResult`: every result set of the statement (`Rowsets`, each with
+  `Columns` name/database type and `Rows`). The runtime builds MII's document with one Rowset per result set
+  (`/Rowsets/Rowset[2]/Row` works), a NULL date is `TimeUnavailable`, a NULL number `NA`, a NULL text `---`;
+  NumberFormat applies to floating-point columns by their database type. The typed rows are the rows of all
+  rowsets (as the XPath /Rowsets/Rowset/Row selects them). Breaking change against 2.6.0/2.6.1
+  (`IList<IDictionary<string,string>>`); `SimQueryResult.Of(rows)` for one result set without types.
+- Append XML / Append After XML of `Doc{xpath}` appends the selected nodes (the default file reads the text of the
+  first node).
+- Plugin settings that MII evaluates as references (`...Source`: Distinct ValueSource, GenericSortFilter Source,
+  Joiner ParentSource/ChildSource) get the value (`Local.X{/path}`: the selected nodes, `Action.Output`).
+- `#Transaction.X#` and `#Local.X#` (also `{key}` / `{xpath}`) in a literal (XPath, regular expression, text) are
+  put in at runtime (`MiiSim.Dynamic`); other `#...#` stay as they are.
+- An XSL transformation without a stylesheet (Transform and InputXSL empty) or with a web file the service does not
+  give fails with a message that says so (MII fails the action).
+- `NA` linked into a number gives 0 (assumed: the null of a number; MII's conversion is not documented);
+  `TimeUnavailable` linked into a dateTime is the empty date.
+- `web/test/simrun.mjs`: 51 checks (several rowsets, NULL date, count in getlistfromxpath, reference document rows,
+  repeater namespaces, Append XML of nodes, Distinct and Joiner sources, `#Local.X#`, missing stylesheet, NA, index).
+
 ## 2.6.1 - 2026-10-28
 
 Runtime gaps the simulation harness (`C:\Claude\pp\sim`) found on today's ME/ProductionProcess objects.

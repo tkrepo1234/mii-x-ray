@@ -121,7 +121,7 @@ export class QueryContract {
   }
 }
 
-const RUNTIME_TYPE_NAMES = ['MiiFiles', 'Mii','MiiRow', 'MiiRows', 'Query', 'IQueryService', 'IPluginService', 'PluginResult', 'MiiException', 'TransactionTerminatedException'];
+const RUNTIME_TYPE_NAMES = ['MiiFiles', 'Mii','MiiRow', 'MiiRows', 'MiiRowList', 'IMiiDocument', 'Query', 'IQueryService', 'IPluginService', 'PluginResult', 'MiiException', 'TransactionTerminatedException'];
 
 /** Shared state of one generation run. */
 export class GenerationContext {

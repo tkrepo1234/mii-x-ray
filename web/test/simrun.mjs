@@ -28,7 +28,7 @@ function property(name, type, value, output) {
 }
 
 function links(list) {
-  return list.map(([to, from]) => '<Assign xsi:type="Assign"><Name/><Description/><To>' + escape(to) + '</To><From>' + escape(from) + '</From></Assign>').join('');
+  return list.map(([to, from, kind = 'Assign']) => '<Assign xsi:type="' + kind + '"><Name/><Description/><To>' + escape(to) + '</To><From>' + escape(from) + '</From></Assign>').join('');
 }
 
 function step(type, name, action, children = []) {
@@ -143,12 +143,13 @@ const objects = {
     })],
   }),
   'SIM/trxRegex.trx': trx({
-    outputs: [['R1', 'string', ''], ['R2', 'boolean', 'false'], ['R3', 'string', ''], ['R4', 'boolean', 'false']],
+    outputs: [['R1', 'string', ''], ['R2', 'boolean', 'false'], ['R3', 'string', ''], ['R4', 'boolean', 'false'], ['I1', 'integer', '9'], ['I2', 'integer', '9'], ['I3', 'integer', '9']],
     actions: [['Work', 'Assignment', {}]],
     steps: [step('ActionSequence', 'Sequence_1', {
       name: 'Work',
       outgoing: [['Transaction.R1', 'stringreplaceall("ResourceBO:M,X", ":.*+$", "")'], ['Transaction.R2', 'match("ab", "^\\\\p{Lower}+$")'],
-        ['Transaction.R3', 'stringreplaceall("a.b*c", "\\\\Q.b*\\\\E", "-")'], ['Transaction.R4', 'match("a_b", "^[a-z\\\\_]+$")']],
+        ['Transaction.R3', 'stringreplaceall("a.b*c", "\\\\Q.b*\\\\E", "-")'], ['Transaction.R4', 'match("a_b", "^[a-z\\\\_]+$")'],
+        ['Transaction.I1', 'stringindexof("football", "ball")'], ['Transaction.I2', 'stringindexof("football", "x")'], ['Transaction.I3', 'stringlastindexof("a;b;c", ";")']],
     })],
   }),
   'SIM/trxFormats.trx': trx({
@@ -168,6 +169,59 @@ const objects = {
       step('ActionSequence', 'Sequence_3', { name: 'Number2', outgoing: [['Transaction.F2', 'Number2.Results{/Rowsets/Rowset/Row/F}']] }),
     ],
   }),
+  'SIM/trxMulti.trx': trx({
+    outputs: [['M1', 'string', ''], ['M2', 'string', ''], ['D1', 'string', ''], ['NB', 'boolean', 'false'], ['CT', 'boolean', 'false'], ['RC', 'string', '']],
+    actions: [['Multi', 'IlluminatorSQLQueryObject', { QueryTemplate: 'SIM/sqlMulti' }], ['Tools', 'IlluminatorSQLQueryObject', { QueryTemplate: 'SIM/sqlTools' }],
+      ['CallRows', 'TransactionCall', { TransactionName: 'SIM/trxRows', ResetState: 'true' }]],
+    steps: [
+      step('ActionSequence', 'Sequence_1', {
+        name: 'Multi',
+        outgoing: [['Transaction.M1', 'Multi.Results{count(/Rowsets/Rowset[2]/Row)}'], ['Transaction.M2', 'Multi.Results{/Rowsets/Rowset[2]/Row[2]/B}'],
+          ['Transaction.D1', 'Multi.Results{/Rowsets/Rowset[1]/Row[1]/END}'], ['Transaction.NB', 'Multi.Results{/Rowsets/Rowset[1]/Row/END} == "TimeUnavailable"']],
+      }),
+      step('ActionSequence', 'Sequence_2', {
+        name: 'Tools',
+        outgoing: [['Transaction.CT', 'first(getlistfromxpath(Tools.Results, "count(/Rowsets/Rowset/Row[TOOL_NUMBER = \'T2\'])")) > 0']],
+      }),
+      step('ActionSequence', 'Sequence_3', {
+        name: 'CallRows',
+        incoming: [['CallRows.Rows', '"<Rowsets><Rowset><Row><A>1</A><Z>9</Z></Row></Rowset></Rowsets>"']],
+        outgoing: [['Transaction.RC', 'CallRows.Count']],
+      }),
+    ],
+  }),
+  'SIM/trxRows.trx': trx({
+    inputs: [['Rows', 'xml', '<Rowsets><Rowset><Row><A>a</A></Row></Rowset></Rowsets>']],
+    outputs: [['Count', 'string', '']],
+    actions: [['Read', 'Assignment', {}]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Read', outgoing: [['Transaction.Count', 'Transaction.Rows{count(/Rowsets/Rowset/Row/Z)}']] })],
+  }),
+  'SIM/trxXml.trx': trx({
+    outputs: [['Sum', 'string', ''], ['Appended', 'string', ''], ['DY', 'string', ''], ['Num', 'double', '5']],
+    locals: [['Doc', 'xml', '<p:root xmlns:p="urn:p"><p:item><p:v>1</p:v></p:item><p:item><p:v>2</p:v></p:item></p:root>'],
+      ['Src', 'xml', '<r><i>1</i><i>2</i></r>'], ['Target', 'xml', '<list/>'], ['Name', 'string', 'ab'], ['NaText', 'string', 'NA']],
+    actions: [['Rep', 'RepeaterAction', {}], ['AddItem', 'Assignment', {}], ['Append', 'Assignment', {}], ['Unique', 'Distinct', { ValueSource: 'Local.Src{/r/i}' }],
+      ['Dyn', 'Assignment', {}], ['Join', 'Joiner', { ParentSource: 'Local.Src', ChildSource: 'Local.Target' }]],
+    steps: [
+      step('Repeater', 'Sequence_1', { name: 'Rep', incoming: [['Rep.Source', 'Local.Doc{/p:root/p:item}']] },
+        [step('ActionSequence', 'Sequence_2', { name: 'AddItem', outgoing: [['Transaction.Sum', 'Transaction.Sum & Rep.Output{/p:item/p:v}']] })]),
+      step('ActionSequence', 'Sequence_3', {
+        name: 'Append',
+        outgoing: [['Local.Target{/list}', 'Local.Src{/r/i}', 'AppendXml'], ['Transaction.Appended', 'Local.Target{count(/list/i)}']],
+      }),
+      step('ActionSequence', 'Sequence_4', { name: 'Unique' }),
+      step('ActionSequence', 'Sequence_5', { name: 'Dyn', outgoing: [['Transaction.DY', 'stringreplaceall("x-ab-y", "#Local.Name#", "Z")'], ['Transaction.Num', 'Local.NaText']] }),
+      step('ActionSequence', 'Sequence_6', { name: 'Join' }),
+    ],
+  }),
+  'SIM/trxXslMissing.trx': trx({
+    outputs: [['Out', 'string', '']],
+    locals: [['Src', 'xml', '<r/>']],
+    actions: [['Tx', 'XSLTransform', { Transform: '', InputXSL: '' }]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Tx', incoming: [['Tx.Input', 'Local.Src']], outgoing: [['Transaction.Out', 'Tx.Output']] })],
+  }),
+  'SIM/sqlMulti.tqsq': sql('do begin select A, END from X; select B from Y; end', { UseTypedParams: 'F' }),
+  'SIM/sqlTools.tqsq': sql('select TOOL_NUMBER from TOOLS', { UseTypedParams: 'F' }),
   'SIM/sqlDate.tqsq': sql('select D from T', { UseTypedParams: 'F', DateFormat: 'dd.MM.yyyy HH:mm:ss' }),
   'SIM/sqlNumber.tqsq': sql('select F, G, I from T', { UseTypedParams: 'F', NumberFormat: '0.00' }),
   'SIM/sqlText.tqsq': sql("select '[Param.1]' as A, '[Param.2]' as B, '[Param.3]' as C, N from DUMMY", { UseTypedParams: 'F', 'Param.2': 'dflt', 'Param.3': '' }),
@@ -198,6 +252,9 @@ public static class Harness
         Run("xpath", "SIM/trxXPath", []);
         Run("regex", "SIM/trxRegex", []);
         Run("formats", "SIM/trxFormats", []);
+        Run("multi", "SIM/trxMulti", []);
+        Run("xml", "SIM/trxXml", []);
+        Run("xsl", "SIM/trxXslMissing", []);
     }
 
     private static void Run(string label, string path, Dictionary<string, string> inputs)
@@ -226,21 +283,38 @@ public static class Harness
 
     private sealed class Queries(string label) : IQueryService
     {
-        public IList<IDictionary<string, string>> Execute(SimQuery query)
+        public SimQueryResult Execute(SimQuery query)
         {
             Console.WriteLine(label + " SQL " + query.Sql + " VALUES " + string.Join(",", query.Values.Select((value) => value == null ? "null" : value.GetType().Name + ":" + value)));
+
             if (query.TemplatePath == "SIM/sqlDate")
             {
-                return [new Dictionary<string, string> { ["D"] = "28.10.2026 10:00:00" }];
+                return SimQueryResult.Of([new Dictionary<string, string> { ["D"] = "28.10.2026 10:00:00" }]);
             }
 
             if (query.TemplatePath == "SIM/sqlNumber")
             {
                 Console.WriteLine(label + " NUMBERFORMAT " + query.NumberFormat);
-                return [new Dictionary<string, string> { ["F"] = "2.675", ["G"] = "1.005", ["I"] = "12" }];
+                return SimQueryResult.Of([new Dictionary<string, string> { ["F"] = "2.675", ["G"] = "1.005", ["I"] = "12" }]);
             }
 
-            return [new Dictionary<string, string> { ["A"] = "r1  ", ["N"] = null }];
+            if (query.TemplatePath == "SIM/sqlMulti")
+            {
+                // a SQLScript block with two result sets; END is a NULL timestamp
+                SimRowset first = new SimRowset { Columns = [new SimColumn { Name = "A", Type = "NVARCHAR" }, new SimColumn { Name = "END", Type = "TIMESTAMP" }] };
+                first.Rows.Add(new Dictionary<string, string> { ["A"] = "1", ["END"] = null });
+                SimRowset second = new SimRowset { Columns = [new SimColumn { Name = "B", Type = "NVARCHAR" }] };
+                second.Rows.Add(new Dictionary<string, string> { ["B"] = "x" });
+                second.Rows.Add(new Dictionary<string, string> { ["B"] = "y" });
+                return new SimQueryResult { Rowsets = [first, second] };
+            }
+
+            if (query.TemplatePath == "SIM/sqlTools")
+            {
+                return SimQueryResult.Of([new Dictionary<string, string> { ["TOOL_NUMBER"] = "T1" }, new Dictionary<string, string> { ["TOOL_NUMBER"] = "T2" }]);
+            }
+
+            return SimQueryResult.Of([new Dictionary<string, string> { ["A"] = "r1  ", ["N"] = null }]);
         }
     }
 
@@ -248,7 +322,7 @@ public static class Harness
     {
         public PluginResult Invoke(string actionType, string actionName, Dictionary<string, object> settings)
         {
-            Console.WriteLine(label + " PLUGIN " + actionType + " " + actionName + " " + string.Join(",", settings.Select((pair) => pair.Key + "=" + pair.Value)));
+            Console.WriteLine(label + " PLUGIN " + actionType + " " + actionName + " " + string.Join(",", settings.Select((pair) => pair.Key + "=" + Mii.ToStr(pair.Value))));
 
             if (actionType == "FailingAction")
             {
@@ -372,12 +446,28 @@ has('xpath C3=0.75', 'XPath: a number result as text');
 has('regex R1=ResourceBO', 'Java regex: possessive quantifier :.*+$');
 has('regex R2=true', 'Java regex: POSIX class \\p{Lower}');
 has('regex R3=a-c', 'Java regex: \\Q...\\E');
-has('regex R4=true', 'Java regex: a backslash before _ quotes it (.NET refuses \\_)');
+has('regex I1=5', 'stringindexof counts from 1 (stringindexof("football", "ball") = 5, measured on MII)');
+has('regex I2=0', 'stringindexof gives 0 for a missing part');
+has('regex I3=4', 'stringlastindexof counts from 1');
+has('regex R4=true','Java regex: a backslash before _ quotes it (.NET refuses \\_)');
 has('formats D=2026-10-28T10:00:00', 'Query.DateFormat is the template DateFormat (not unresolved)');
 has('formats DT=2026-10-28T10:00:00', 'a date link into a dateTime output converts');
 has('formats F=2.68', 'NumberFormat 0.00 rounds half-even (2.675 -> 2.68)');
 has('formats G=1.00', 'NumberFormat 0.00 rounds half-even (1.005 -> 1.00)');
 has('formats I=12', 'NumberFormat leaves integer values');
-has('formats F2=2.7', 'the action XmlNumberFormat 0.0 wins over the template NumberFormat');
+has('multi M1=2', 'several result sets: one Rowset each (count(/Rowsets/Rowset[2]/Row))');
+has('multi M2=y', 'several result sets: a value of the second Rowset');
+has('multi D1=TimeUnavailable', 'a NULL date column is TimeUnavailable');
+has('multi NB=true', 'END_DATE_TIME == "TimeUnavailable" holds for a NULL date');
+has('multi CT=true', 'first(getlistfromxpath(rows, "count(...)")) > 0 compares the count as a number');
+has('multi RC=1', 'rows typed by a reference document keep the columns the record does not know');
+has('xml Sum=12', 'a repeater item keeps the namespace declarations in scope (p:)');
+has('xml Appended=2', 'Append XML of Doc{xpath} appends the selected nodes');
+matches(/^xml PLUGIN Distinct Unique .*ValueSource=<Nodes><i>1<\/i><i>2<\/i><\/Nodes>/, 'Distinct gets the value of its ValueSource reference, not the text');
+has('xml Num=0', 'NA (the null of a number) linked into a double gives 0 (assumed)');
+matches(/^xml PLUGIN Joiner Join .*ParentSource=<r><i>1<\/i>/,'Joiner gets the value of its ParentSource reference');
+has('xml DY=x-Z-y', '#Local.Name# in a regular expression is the value of the local');
+matches(/^xsl ERROR .*without a stylesheet/, 'an XSL transformation without a stylesheet fails with a clear message');
+has('formats F2=2.7','the action XmlNumberFormat 0.0 wins over the template NumberFormat');
 console.log(failures === 0 ? 'OK (' + simulationFile + ')' : failures + ' failure(s), see ' + join(workFolder, 'output.txt'));
 process.exit(failures === 0 ? 0 : 1);

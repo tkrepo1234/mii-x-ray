@@ -1,12 +1,43 @@
 #region Services (simulation mode: implement these to run the code)
 
 /// <summary>Runs the queries of the simulation. Execute gets the template, the parameters and the statement as MII
-/// sends it (text parameters replaced, typed ones as ? with Values in order) and returns the rows as column name to
-/// text, null for a database null. The runtime turns them into MII values: a null text is "---", a null number "NA",
-/// trailing blanks of a text are cut, RowCount cuts the rows. For a Command the rows are not read.</summary>
+/// sends it (text parameters replaced, typed ones as ? with Values in order) and returns every result set of the
+/// statement (a SQLScript block may return several: MII answers one Rowset each) with the database column types and
+/// the rows as column name to text, null for a database null. The runtime turns them into MII's document: a null text
+/// is "---", a null number "NA", a null date "TimeUnavailable", trailing blanks of a text are cut, NumberFormat applies
+/// to floating-point columns, RowCount cuts the rows. For a Command the result is not read.</summary>
 public interface IQueryService
 {
-    IList<IDictionary<string, string>> Execute(SimQuery query);
+    SimQueryResult Execute(SimQuery query);
+}
+
+/// <summary>The result sets of a query, in the order the statement returns them.</summary>
+public sealed class SimQueryResult
+{
+    public List<SimRowset> Rowsets { get; set; } = [];
+
+    /// <summary>A result of one result set without column types (types then come from the row records).</summary>
+    public static SimQueryResult Of(IEnumerable<IDictionary<string, string>> rows)
+    {
+        SimRowset rowset = new SimRowset();
+        rowset.Rows.AddRange(rows.Select((row) => new Dictionary<string, string>(row)));
+        return new SimQueryResult { Rowsets = [rowset] };
+    }
+}
+
+/// <summary>One result set: its columns (name and database type such as NVARCHAR, DECIMAL, TIMESTAMP) and rows.</summary>
+public sealed class SimRowset
+{
+    public List<SimColumn> Columns { get; set; } = [];
+
+    public List<Dictionary<string, string>> Rows { get; set; } = [];
+}
+
+public sealed class SimColumn
+{
+    public string Name { get; set; }
+
+    public string Type { get; set; }
 }
 
 /// <summary>One query as MII runs it.</summary>
@@ -355,6 +386,60 @@ public sealed class MiiSim
     /// <summary>A value as MII text (XML as its text).</summary>
     public static string ToText(object value) => Mii.ToStr(value);
 
+    private static readonly Regex DynamicReference = new Regex(@"#((?:Transaction|Local)\.[A-Za-z_][\w]*)(?:\{([^{}#]*)\})?#");
+
+    /// <summary>#Transaction.X# and #Local.X# (also #Local.X{key}# and #Local.X{xpath}#) in a literal: MII puts the value
+    /// in at runtime. Other #...# stay as they are.</summary>
+    public static string Dynamic(string text, params (string Reference, object Value)[] values)
+    {
+        return DynamicReference.Replace(text ?? "", (match) =>
+        {
+            foreach ((string reference, object value) in values)
+            {
+                if (reference != match.Groups[1].Value)
+                {
+                    continue;
+                }
+
+                if (!match.Groups[2].Success)
+                {
+                    return Mii.ToStr(value);
+                }
+
+                string selector = match.Groups[2].Value.Trim().Trim('"');
+                return value is IDictionary<string, string> ? Mii.GetValueFromMap(value, selector) : Mii.XPath(value, selector);
+            }
+
+            return match.Value;
+        });
+    }
+
+    /// <summary>Doc{xpath} as the source document of an action (Distinct ValueSource, GenericSortFilter Source): the
+    /// selected nodes in one document (a single selected element as it is).</summary>
+    public static XmlDocument Nodes(object source, string xpath)
+    {
+        List<XmlDocument> nodes = Mii.SelectNodes(source, xpath);
+
+        if (nodes.Count == 1)
+        {
+            return nodes[0];
+        }
+
+        XmlDocument document = new XmlDocument();
+        XmlElement root = document.CreateElement("Nodes");
+        document.AppendChild(root);
+
+        foreach (XmlDocument node in nodes)
+        {
+            if (node.DocumentElement != null)
+            {
+                root.AppendChild(document.ImportNode(node.DocumentElement, true));
+            }
+        }
+
+        return document;
+    }
+
     /// <summary>The settings of a plugin action: the configured ones, the linked ones put over them.</summary>
     public static Dictionary<string, object> Settings(Dictionary<string, object> configured, Dictionary<string, object> linked)
     {
@@ -393,7 +478,7 @@ public sealed class MiiSim
 
         DateTime result = Mii.ToDateTime(value);
 
-        if (result == DateTime.MinValue && StrictLinkConversions && !Mii.ToStr(value).Trim().StartsWith("0001-01-01"))
+        if (result == DateTime.MinValue && StrictLinkConversions && !Mii.ToStr(value).Trim().StartsWith("0001-01-01") && Mii.ToStr(value).Trim() != "TimeUnavailable")
         {
             throw new FormatException("Conversion Exception: \"" + Mii.ToStr(value) + "\" is no dateTime");
         }
@@ -410,7 +495,8 @@ public sealed class MiiSim
 
         string text = Mii.ToStr(value).Trim();
 
-        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double number) || !StrictLinkConversions)
+        // NA is the null of a number (query result, calculation with a null): taken as 0 (assumed)
+        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double number) || !StrictLinkConversions || text == "NA")
         {
             return number;
         }
@@ -639,6 +725,26 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         return result;
     }
 
+    /// <summary>The stylesheet of an XSL transformation that the file does not hold (no MiiFiles constant): an empty
+    /// path means the action has neither Transform nor InputXSL, which fails in MII; a file the service does not have
+    /// fails with its name.</summary>
+    public string LoadResource(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            throw new MiiException("XSL transformation without a stylesheet: Transform and InputXSL are empty (" + Path + ")", "", "XSLTransform");
+        }
+
+        string text = Simulation.Plugins.LoadResource(path);
+
+        if (string.IsNullOrEmpty(text))
+        {
+            throw new MiiException("The web file " + path + " is not available in the simulation (not in MiiFiles, not given by IPluginService.LoadResource)", "", "XSLTransform");
+        }
+
+        return text;
+    }
+
     /// <summary>This transaction through IPluginService.CallExternal (MiiSim.ExternalPaths): the linked inputs as text.</summary>
     public IDictionary<string, string> CallExternal(Dictionary<string, object> inputs)
     {
@@ -718,35 +824,117 @@ public sealed class MiiSimQueries(MiiSim simulation)
     public List<T> Execute<T>(Query query) where T : MiiRow, new()
     {
         SimQuery request = Build(query);
-        IList<IDictionary<string, string>> rows = simulation.QueryService.Execute(request) ?? new List<IDictionary<string, string>>();
-        List<T> result = [];
+        SimQueryResult answer = simulation.QueryService.Execute(request) ?? new SimQueryResult();
+        XmlDocument document = new XmlDocument();
+        XmlElement root = document.CreateElement("Rowsets");
+        document.AppendChild(root);
+        List<T> records = [];
 
-        foreach (IDictionary<string, string> row in rows)
+        foreach (SimRowset rowset in answer.Rowsets ?? [])
         {
-            if (request.RowCount > 0 && result.Count >= request.RowCount)
+            XmlElement rowsetElement = (XmlElement)root.AppendChild(document.CreateElement("Rowset"));
+            XmlElement columnsElement = (XmlElement)rowsetElement.AppendChild(document.CreateElement("Columns"));
+            Dictionary<string, string> types = new Dictionary<string, string>();
+            List<string> names = [];
+
+            foreach (SimColumn column in rowset.Columns ?? [])
             {
-                break;
+                names.Add(column.Name);
+                types[column.Name] = (column.Type ?? "").ToUpperInvariant();
             }
 
-            T record = new T();
-
-            foreach (KeyValuePair<string, string> cell in row)
+            foreach (Dictionary<string, string> row in rowset.Rows ?? [])
             {
-                string text = cell.Value;
+                names.AddRange(row.Keys.Where((key) => !names.Contains(key)));
+            }
 
-                if (text != null && !string.IsNullOrEmpty(request.NumberFormat)
-                    && (request.FloatColumns != null ? request.FloatColumns.Contains(cell.Key) : FloatText.IsMatch(text)))
+            foreach (string name in names)
+            {
+                XmlElement column = (XmlElement)columnsElement.AppendChild(document.CreateElement("Column"));
+                column.SetAttribute("Name", name);
+
+                if (types.TryGetValue(name, out string type) && type.Length > 0)
                 {
-                    text = Mii.JavaDecimalFormat(text, request.NumberFormat);
+                    column.SetAttribute("SQLDataType", type);
+                }
+            }
+
+            int count = 0;
+
+            foreach (Dictionary<string, string> row in rowset.Rows ?? [])
+            {
+                if (request.RowCount > 0 && count++ >= request.RowCount)
+                {
+                    break;
                 }
 
-                SetColumn(record, cell.Key, text);
-            }
+                XmlElement rowElement = (XmlElement)rowsetElement.AppendChild(document.CreateElement("Row"));
+                T record = new T();
 
-            result.Add(record);
+                foreach (string name in names)
+                {
+                    row.TryGetValue(name, out string text);
+                    text = CellText(request, record, name, types.TryGetValue(name, out string type) ? type : "", text);
+                    rowElement.AppendChild(document.CreateElement(XmlConvert.EncodeLocalName(name))).InnerText = text;
+                    SetColumn(record, name, text);
+                }
+
+                records.Add(record);
+            }
         }
 
-        return result;
+        return new MiiRowList<T>(records, document);
+    }
+
+    private static readonly string[] DateTypes = ["TIMESTAMP", "SECONDDATE", "DATE", "TIME", "DATETIME", "LONGDATE"];
+
+    private static readonly string[] FloatTypes = ["DOUBLE", "REAL", "FLOAT", "DECIMAL", "SMALLDECIMAL", "NUMERIC"];
+
+    private static readonly string[] NumberTypes = ["INTEGER", "BIGINT", "SMALLINT", "TINYINT", "INT", "DOUBLE", "REAL", "FLOAT", "DECIMAL", "SMALLDECIMAL", "NUMERIC"];
+
+    /// <summary>A value as MII writes it into the result document (column type from the service, else from the
+    /// row record).</summary>
+    private static string CellText(SimQuery request, MiiRow record, string column, string type, string text)
+    {
+        PropertyInfo property = FindProperty(record, column);
+        Type propertyType = property?.PropertyType;
+        bool known = type.Length > 0;
+        bool date = known ? DateTypes.Contains(type) : propertyType == typeof(DateTime);
+        bool number = known ? NumberTypes.Contains(type) : propertyType == typeof(int) || propertyType == typeof(long) || propertyType == typeof(double) || propertyType == typeof(decimal);
+
+        if (text == null)
+        {
+            return date ? "TimeUnavailable" : number ? "NA" : "---";
+        }
+
+        bool floating = known ? FloatTypes.Contains(type) : request.FloatColumns != null ? request.FloatColumns.Contains(column) : !date && FloatText.IsMatch(text);
+
+        if (floating && !string.IsNullOrEmpty(request.NumberFormat))
+        {
+            return Mii.JavaDecimalFormat(text, request.NumberFormat);
+        }
+
+        return number || date ? text : text.TrimEnd(' ');
+    }
+
+    private static PropertyInfo FindProperty(MiiRow row, string column)
+    {
+        PropertyInfo property = null;
+
+        foreach (PropertyInfo candidate in Mii.ColumnsOf(row.GetType()))
+        {
+            if (candidate.Name == column)
+            {
+                return candidate;
+            }
+
+            if (property == null && string.Equals(Simple(candidate.Name), Simple(column), StringComparison.Ordinal))
+            {
+                property = candidate;
+            }
+        }
+
+        return property;
     }
 
     public void ExecuteCommand(Query query) => simulation.QueryService.Execute(Build(query));
@@ -858,42 +1046,16 @@ public sealed class MiiSimQueries(MiiSim simulation)
         }
     }
 
+    /// <summary>A cell of the result document into the row record (a column the record does not know stays in the
+    /// document only).</summary>
     private static void SetColumn(MiiRow row, string column, string text)
     {
-        PropertyInfo property = null;
+        PropertyInfo property = FindProperty(row, column);
 
-        foreach (PropertyInfo candidate in Mii.ColumnsOf(row.GetType()))
+        if (property != null)
         {
-            if (candidate.Name == column)
-            {
-                property = candidate;
-                break;
-            }
-
-            if (property == null && string.Equals(Simple(candidate.Name), Simple(column), StringComparison.Ordinal))
-            {
-                property = candidate;
-            }
+            property.SetValue(row, property.PropertyType == typeof(string) ? text : MiiSim.FromText(property.PropertyType, text), null);
         }
-
-        if (property == null)
-        {
-            return;
-        }
-
-        Type type = property.PropertyType;
-        bool numeric = type == typeof(int) || type == typeof(long) || type == typeof(double) || type == typeof(decimal);
-
-        if (text == null)
-        {
-            text = numeric ? "NA" : "---";
-        }
-        else if (!numeric)
-        {
-            text = text.TrimEnd(' ');
-        }
-
-        property.SetValue(row, type == typeof(string) ? text : MiiSim.FromText(type, text), null);
     }
 
     private static string Simple(string name) => new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
