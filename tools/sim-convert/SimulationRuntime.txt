@@ -386,32 +386,55 @@ public sealed class MiiSim
     /// <summary>A value as MII text (XML as its text).</summary>
     public static string ToText(object value) => Mii.ToStr(value);
 
-    private static readonly Regex DynamicReference = new Regex(@"#((?:Transaction|Local)\.[A-Za-z_][\w]*)(?:\{([^{}#]*)\})?#");
+    private static readonly Regex DynamicReference = new Regex(@"#([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?:\{([^{}#]*)\})?#");
 
-    /// <summary>#Transaction.X# and #Local.X# (also #Local.X{key}# and #Local.X{xpath}#) in a literal: MII puts the value
-    /// in at runtime. Other #...# stay as they are.</summary>
+    /// <summary>#Scope.Member# (also with {key} or {xpath}) in a literal: MII puts the value in at runtime. Scope is
+    /// Transaction, Local, an action (its member: a plugin output, an output of a called transaction, else the
+    /// result itself) or a loop (Item, Output, CurrentItem: the item). A reference not given stays as it is.</summary>
     public static string Dynamic(string text, params (string Reference, object Value)[] values)
     {
         return DynamicReference.Replace(text ?? "", (match) =>
         {
-            foreach ((string reference, object value) in values)
+            string key = match.Groups[1].Value + "." + match.Groups[2].Value;
+
+            foreach ((string reference, object found) in values)
             {
-                if (reference != match.Groups[1].Value)
+                if (reference != key)
                 {
                     continue;
                 }
 
-                if (!match.Groups[2].Success)
+                object value = match.Groups[1].Value == "Transaction" || match.Groups[1].Value == "Local" ? found : Member(found, match.Groups[2].Value);
+
+                if (!match.Groups[3].Success)
                 {
                     return Mii.ToStr(value);
                 }
 
-                string selector = match.Groups[2].Value.Trim().Trim('"');
+                string selector = match.Groups[3].Value.Trim().Trim('"');
                 return value is IDictionary<string, string> ? Mii.GetValueFromMap(value, selector) : Mii.XPath(value, selector);
             }
 
             return match.Value;
         });
+    }
+
+    /// <summary>A member of an action result: a plugin output, a property of a result record, else the value.</summary>
+    private static object Member(object value, string member)
+    {
+        if (value is PluginResult plugin)
+        {
+            return plugin.Get(member);
+        }
+
+        if (value == null || value is string || value is XmlDocument || value is MiiRow || value is System.Collections.IEnumerable)
+        {
+            return value;
+        }
+
+        PropertyInfo property = value.GetType().GetProperties()
+            .FirstOrDefault((candidate) => string.Equals(candidate.Name, member, StringComparison.OrdinalIgnoreCase));
+        return property != null ? property.GetValue(value) : value;
     }
 
     /// <summary>Doc{xpath} as the source document of an action (Distinct ValueSource, GenericSortFilter Source): the
@@ -570,6 +593,12 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
     public IDisposable OnExit(System.Action keep) => new Exit(keep);
 
     public void Keep(string key, object value) => Values[key] = value;
+
+    /// <summary>The item of a loop, kept for a reference after the loop (MII keeps the last item).</summary>
+    public void KeepLoopItem(string loop, object item) => Values["loop " + loop] = item;
+
+    /// <summary>The last item of a loop that has ended; "Invalid variable" when it has not run.</summary>
+    public object LoopItem(string loop) => Values.TryGetValue("loop " + loop, out object item) ? item : throw new MiiLinkException(this, "Invalid variable: " + loop + ".Item (the loop has not run) in " + Path, loop);
 
     // ------------------------------------------------------------------ links
 
@@ -879,6 +908,7 @@ public sealed class MiiSimQueries(MiiSim simulation)
                     SetColumn(record, name, text);
                 }
 
+                Mii.KeepRowSource(record, rowElement);
                 records.Add(record);
             }
         }

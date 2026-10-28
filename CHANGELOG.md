@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.6.3 - 2026-10-28
+
+- A row record read from an MII document (query result, `Mii.ToRows`) stands for the Row it was read from: its text,
+  `Mii.ToXml` and a repeater item over the rows keep every column, also when the record has none (`select *`).
+  A column the code changes afterwards wins over the text read.
+- Checked, no change: XPath expressions with line breaks between tokens run (simrun). The Z_RETRY_MODE expression of
+  trxPhaseIncreaseQtyMultiple / trxPhaseProductiveMultiple fails because its predicate is not closed
+  (`count(//Row/Value[Key = 'Z_RETRY_MODE' and (...))` has no `]`); Java's XPath refuses that as well, so the
+  simulation raises the error as MII would (a defect of the object, not of the runtime).
+- Dynamic expressions in literals also for actions and loops: `#Action.Property#`, `#Action.Property{xpath}#`,
+  `#Repeater.Item{xpath}#`, `#Iterator.CurrentItem#` (the item of the enclosing loop; an action that has not run is
+  "Invalid variable"). A loop item read after its loop is the last item ("Invalid variable" when the loop has not run).
+- `web/test/simrun.mjs`: 57 checks.
+
 ## 2.6.2 - 2026-10-28
 
 Gaps the simulation harness found running 205 scenarios of today's objects against the rebuilt package.

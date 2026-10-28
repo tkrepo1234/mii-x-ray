@@ -520,6 +520,7 @@ public static class Mii
         {
             T row = new T();
             FillRow(row, node);
+            KeepRowSource(row, (XmlElement)node);
             rows.Add(row);
         }
 
@@ -1141,8 +1142,43 @@ public static class Mii
         return property == null ? null : property.GetValue(row, null);
     }
 
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, XmlElement> RowSources = new System.Runtime.CompilerServices.ConditionalWeakTable<object, XmlElement>();
+
+    /// <summary>The Row element a record was read from: the record stands for it (columns the record does not know,
+    /// e.g. of select *, included).</summary>
+    public static void KeepRowSource(MiiRow row, XmlElement element)
+    {
+        RowSources.AddOrUpdate(row, element);
+    }
+
     public static XmlElement RowElement(XmlDocument document, object row)
     {
+        XmlElement source;
+
+        if (RowSources.TryGetValue(row, out source))
+        {
+            XmlElement copy = (XmlElement)document.ImportNode(source, true);
+
+            // a column the code changed after reading wins over the text read
+            foreach (PropertyInfo property in ColumnsOf(row.GetType()))
+            {
+                XmlNode cell = copy.SelectSingleNode(property.Name);
+                object value = property.GetValue(row, null);
+
+                if (cell == null && copy.ChildNodes.Cast<XmlNode>().Any((child) => Simplify(child.LocalName) == Simplify(property.Name)))
+                {
+                    continue;
+                }
+
+                if (cell == null ? !string.IsNullOrEmpty(ToStr(value)) : !Equals(ConvertTo(cell.InnerText, property.PropertyType), value))
+                {
+                    (cell ?? copy.AppendChild(document.CreateElement(property.Name))).InnerText = ToStr(value);
+                }
+            }
+
+            return copy;
+        }
+
         XmlElement element = document.CreateElement("Row");
 
         foreach (PropertyInfo property in ColumnsOf(row.GetType()))

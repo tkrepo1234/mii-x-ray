@@ -43,7 +43,7 @@ public sealed class Template
 /// <summary>Turns a default-mode X-Ray into the simulation mode (see SimulationRuntime.txt for what it emulates).</summary>
 public sealed class Converter(List<MetadataReference> references)
 {
-    public const string ToolVersion = "2.6.2";
+    public const string ToolVersion = "2.6.3";
 
     private const string ServicesRegion = "#region Services (implement these to run the code)";
 
@@ -966,33 +966,80 @@ public sealed class Converter(List<MetadataReference> references)
             }
         }
 
-        private static readonly Regex DynamicReference = new Regex(@"#((?:Transaction|Local)\.[A-Za-z_]\w*)(?:\{[^{}#]*\}|\{\{[^{}#]*\}\})?#");
+        private readonly HashSet<ForEachStatementSyntax> keptLoops = [];
 
-        /// <summary>#Transaction.X# / #Local.X# in a literal (XPath, regular expression, text): MII puts the value in at
-        /// runtime (MiiSim.Dynamic).</summary>
+        private static readonly Regex DynamicReference = new Regex(@"#([A-Za-z_]\w*)\.([A-Za-z_]\w*)(?:\{[^{}#]*\}|\{\{[^{}#]*\}\})?#");
+
+        /// <summary>#Transaction.X#, #Local.X#, #Action.Property#, #Repeater.Item{xpath}#, #Iterator.CurrentItem# in a
+        /// literal (XPath, regular expression, text): MII puts the value in at runtime (MiiSim.Dynamic).</summary>
         private void WrapDynamicLiterals()
         {
             foreach (ExpressionSyntax literal in method.Flow.SelectMany((item) => item.DescendantNodesAndSelf())
                 .Where((node) => node.IsKind(SyntaxKind.StringLiteralExpression) || node is InterpolatedStringExpressionSyntax).Cast<ExpressionSyntax>())
             {
-                if (literal.Ancestors().Any((node) => node is InterpolatedStringExpressionSyntax))
+                if (literal.Ancestors().Any((node) => node is InterpolatedStringExpressionSyntax)
+                    || (literal.Parent is ArgumentSyntax argument && argument.Parent?.Parent is InvocationExpressionSyntax owner
+                        && (owner.Expression.ToString() == "Mii.Unresolved" || owner.Expression.ToString() == "Mii.Evaluate")))
                 {
                     continue;
                 }
 
-                List<string> references = DynamicReference.Matches(literal.ToString()).Select((match) => match.Groups[1].Value).Distinct().ToList();
-                List<string> known = references.Where((reference) => variablesByKey.ContainsKey(reference)).ToList();
+                List<string> values = [];
 
-                if (known.Count == 0 || (literal.Parent is ArgumentSyntax argument && argument.Parent?.Parent is InvocationExpressionSyntax owner
-                    && (owner.Expression.ToString() == "Mii.Unresolved" || owner.Expression.ToString() == "Mii.Evaluate")))
+                foreach (Match match in DynamicReference.Matches(literal.ToString()))
                 {
-                    continue;
+                    string key = match.Groups[1].Value + "." + match.Groups[2].Value;
+                    string code = DynamicValue(literal, match.Groups[1].Value, match.Groups[2].Value);
+                    string pair = code == null ? null : "(" + Comments.Literal(key) + ", (object)" + code + ")";
+
+                    if (pair != null && !values.Contains(pair))
+                    {
+                        values.Add(pair);
+                    }
                 }
 
-                string values = string.Join(", ", known.Select((reference) => "(" + Comments.Literal(reference) + ", (object)" + variablesByKey[reference].Name + ")"));
-                file.Insert(literal.SpanStart, "MiiSim.Dynamic(", 105);
-                file.Insert(literal.Span.End, ", " + values + ")", 5);
+                if (values.Count > 0)
+                {
+                    file.Insert(literal.SpanStart, "MiiSim.Dynamic(", 105);
+                    file.Insert(literal.Span.End, ", " + string.Join(", ", values) + ")", 5);
+                }
             }
+        }
+
+        /// <summary>The C# value of Scope.Member at a literal: a transaction property or local, an action's result (its
+        /// member is resolved at runtime), the item of an enclosing loop; null when unknown.</summary>
+        private string DynamicValue(SyntaxNode at, string scope, string member)
+        {
+            if (scope == "Transaction" || scope == "Local")
+            {
+                return variablesByKey.TryGetValue(scope + "." + member, out (string Name, string Type) variable) ? variable.Name : null;
+            }
+
+            // an enclosing loop (foreach over the items, the item variable is <loop>Item)
+            ForEachStatementSyntax loop = at.Ancestors().OfType<ForEachStatementSyntax>()
+                .FirstOrDefault((item) => Simple(item.Identifier.ValueText) == Simple(scope + "Item"));
+
+            if (loop != null)
+            {
+                return member == "Item" || member == "Output" || member == "CurrentItem" ? loop.Identifier.Text : null;
+            }
+
+            // a loop of the method that has ended: MII keeps its last item (frame.LoopItem, "Invalid variable" before)
+            ForEachStatementSyntax ended = method.Flow.SelectMany((item) => item.DescendantNodesAndSelf()).OfType<ForEachStatementSyntax>()
+                .FirstOrDefault((item) => Simple(item.Identifier.ValueText) == Simple(scope + "Item"));
+
+            if (ended != null && ended.Statement is BlockSyntax body && (member == "Item" || member == "Output" || member == "CurrentItem"))
+            {
+                if (keptLoops.Add(ended))
+                {
+                    file.Insert(body.OpenBraceToken.Span.End, " " + frame + ".KeepLoopItem(" + Comments.Literal(scope) + ", " + ended.Identifier.Text + ");", 100);
+                }
+
+                return frame + ".LoopItem(" + Comments.Literal(scope) + ")";
+            }
+
+            KeyValuePair<string, string> action = actionVariables.FirstOrDefault((pair) => pair.Value == scope);
+            return action.Key != null ? frame + ".Read(" + Comments.Literal(scope) + ", " + action.Key + ")" : null;
         }
 
         /// <summary>A configured setting of a plugin action that MII evaluates as a reference (Distinct ValueSource,

@@ -133,13 +133,13 @@ const objects = {
     ],
   }),
   'SIM/trxXPath.trx': trx({
-    outputs: [['C1', 'string', ''], ['C2', 'string', ''], ['C3', 'string', '']],
+    outputs: [['C1', 'string', ''], ['C2', 'string', ''], ['C3', 'string', ''], ['C4', 'string', '']],
     locals: [['Doc', 'xml', '<Rowsets><Rowset><Row><A>1</A></Row><Row><A>2</A></Row></Rowset></Rowsets>']],
     actions: [['Read', 'Assignment', {}]],
     steps: [step('ActionSequence', 'Sequence_1', {
       name: 'Read',
       outgoing: [['Transaction.C1', 'Local.Doc{count(/Rowsets/Rowset/Row/)}'], ['Transaction.C2', 'first(getlistfromxpath(Local.Doc, "count(//Row[A=\'1\'])"))'],
-        ['Transaction.C3', 'Local.Doc{sum(//A) div 4}']],
+        ['Transaction.C3', 'Local.Doc{sum(//A) div 4}'], ['Transaction.C4', 'Local.Doc{count(//Row[  A = \'1\'\n    or\n  A = \'2\'\n])}']],
     })],
   }),
   'SIM/trxRegex.trx': trx({
@@ -221,6 +221,24 @@ const objects = {
     steps: [step('ActionSequence', 'Sequence_1', { name: 'Tx', incoming: [['Tx.Input', 'Local.Src']], outgoing: [['Transaction.Out', 'Tx.Output']] })],
   }),
   'SIM/sqlMulti.tqsq': sql('do begin select A, END from X; select B from Y; end', { UseTypedParams: 'F' }),
+  'SIM/trxStar.trx': trx({
+    outputs: [['Txt', 'string', ''], ['Dyn1', 'string', ''], ['Dyn2', 'string', ''], ['Dyn3', 'string', ''], ['Dyn4', 'string', '']],
+    locals: [['Letters', 'list', '[[string:a],[string:b]]']],
+    actions: [['Star', 'IlluminatorSQLQueryObject', { QueryTemplate: 'SIM/sqlStar' }], ['Rep', 'RepeaterAction', {}], ['Add', 'Assignment', {}],
+      ['It', 'IteratorAction', {}], ['Collect', 'Assignment', {}]],
+    steps: [
+      step('ActionSequence', 'Sequence_1', { name: 'Star' }),
+      step('Repeater', 'Sequence_2', { name: 'Rep', incoming: [['Rep.Source', 'Star.Results{/Rowsets/Rowset/Row}']] },
+        [step('ActionSequence', 'Sequence_3', {
+          name: 'Add',
+          outgoing: [['Transaction.Txt', 'Rep.Output'], ['Transaction.Dyn1', '"id:#Rep.Item{/Row/INVENTORY_ID}#"'],
+            ['Transaction.Dyn2', '"q:#Star.Results{/Rowsets/Rowset/Row/QTY_ON_HAND}#"']],
+        })]),
+      step('Iterator', 'Sequence_4', { name: 'It', incoming: [['It.Source', 'Local.Letters']] },
+        [step('ActionSequence', 'Sequence_5', { name: 'Collect', outgoing: [['Transaction.Dyn3', 'Transaction.Dyn3 & "#It.CurrentItem#"'], ['Transaction.Dyn4', '"last:#Rep.Item{/Row/INVENTORY_ID}#"']] })]),
+    ],
+  }),
+  'SIM/sqlStar.tqsq': sql('select * from INVENTORY', { UseTypedParams: 'F' }),
   'SIM/sqlTools.tqsq': sql('select TOOL_NUMBER from TOOLS', { UseTypedParams: 'F' }),
   'SIM/sqlDate.tqsq': sql('select D from T', { UseTypedParams: 'F', DateFormat: 'dd.MM.yyyy HH:mm:ss' }),
   'SIM/sqlNumber.tqsq': sql('select F, G, I from T', { UseTypedParams: 'F', NumberFormat: '0.00' }),
@@ -255,6 +273,7 @@ public static class Harness
         Run("multi", "SIM/trxMulti", []);
         Run("xml", "SIM/trxXml", []);
         Run("xsl", "SIM/trxXslMissing", []);
+        Run("star", "SIM/trxStar", []);
     }
 
     private static void Run(string label, string path, Dictionary<string, string> inputs)
@@ -307,6 +326,11 @@ public static class Harness
                 second.Rows.Add(new Dictionary<string, string> { ["B"] = "x" });
                 second.Rows.Add(new Dictionary<string, string> { ["B"] = "y" });
                 return new SimQueryResult { Rowsets = [first, second] };
+            }
+
+            if (query.TemplatePath == "SIM/sqlStar")
+            {
+                return SimQueryResult.Of([new Dictionary<string, string> { ["INVENTORY_ID"] = "I1", ["QTY_ON_HAND"] = "5" }]);
             }
 
             if (query.TemplatePath == "SIM/sqlTools")
@@ -443,6 +467,12 @@ has('query N=---', 'a null text column is ---');
 has('xpath C1=2', 'XPath: a location path ending with "/" counts the rows (count(/Rowsets/Rowset/Row/))');
 has('xpath C2=1', 'getlistfromxpath with count(): one element with the number');
 has('xpath C3=0.75', 'XPath: a number result as text');
+has('xpath C4=2', 'XPath: line breaks between tokens');
+has('star Dyn1=id:I1', '#Repeater.Item{xpath}# is the value of the loop item');
+has('star Dyn2=q:5', '#Action.Results{xpath}# is the value of the action result');
+has('star Dyn4=last:I1', '#Repeater.Item# after its loop is the last item');
+has('star Dyn3=ab', '#Iterator.CurrentItem# is the current element');
+has('star Txt=<Row><INVENTORY_ID>I1</INVENTORY_ID><QTY_ON_HAND>5</QTY_ON_HAND></Row>', 'select *: the row record without columns stands for the Row read (repeater item)');
 has('regex R1=ResourceBO', 'Java regex: possessive quantifier :.*+$');
 has('regex R2=true', 'Java regex: POSIX class \\p{Lower}');
 has('regex R3=a-c', 'Java regex: \\Q...\\E');
