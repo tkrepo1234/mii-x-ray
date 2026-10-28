@@ -1,0 +1,870 @@
+#region Services (simulation mode: implement these to run the code)
+
+/// <summary>Runs the queries of the simulation. Execute gets the template, the parameters and the statement as MII
+/// sends it (text parameters replaced, typed ones as ? with Values in order) and returns the rows as column name to
+/// text, null for a database null. The runtime turns them into MII values: a null text is "---", a null number "NA",
+/// trailing blanks of a text are cut, RowCount cuts the rows. For a Command the rows are not read.</summary>
+public interface IQueryService
+{
+    IList<IDictionary<string, string>> Execute(SimQuery query);
+}
+
+/// <summary>One query as MII runs it.</summary>
+public sealed class SimQuery
+{
+    /// <summary>The Catalog path of the query template.</summary>
+    public string TemplatePath { get; set; }
+
+    /// <summary>SQLQuery, MDOQuery (the root element of the template).</summary>
+    public string Kind { get; set; }
+
+    /// <summary>The template mode (FixedQuery, Command, FixedQueryWithOutput, ...).</summary>
+    public string Mode { get; set; }
+
+    /// <summary>Use Typed Parameters of the template.</summary>
+    public bool Typed { get; set; }
+
+    /// <summary>MII's RowCount (0: not set).</summary>
+    public int RowCount { get; set; }
+
+    /// <summary>The template text before any parameter was put in.</summary>
+    public string TemplateText { get; set; }
+
+    /// <summary>Every slot the text names or a caller set, in slot order.</summary>
+    public List<SimQueryParameter> Parameters { get; } = [];
+
+    /// <summary>The statement: text parameters replaced, typed ones as ?.</summary>
+    public string Sql { get; set; }
+
+    /// <summary>The values of the ? in Sql, in order (string, long, double, bool, DateTime or null).</summary>
+    public List<object> Values { get; } = [];
+}
+
+/// <summary>One parameter slot of a query.</summary>
+public sealed class SimQueryParameter
+{
+    public int Slot { get; set; }
+
+    public string Name { get; set; }
+
+    /// <summary>ParamType.N of a typed template (String, Integer, Timestamp, Boolean) or "".</summary>
+    public string Type { get; set; }
+
+    public bool Typed { get; set; }
+
+    /// <summary>True when the action set the slot; else the template's Param.N (or "") is used.</summary>
+    public bool IsSet { get; set; }
+
+    /// <summary>The value MII uses as text.</summary>
+    public string Text { get; set; }
+
+    /// <summary>The value bound for a typed slot.</summary>
+    public object Value { get; set; }
+}
+
+/// <summary>Everything MII does that has no plain C# equivalent: SAP ME PAPI calls, web services, HTTP, mail, files,
+/// sort/filter actions, logging, shared properties, and transactions outside this file.</summary>
+public interface IPluginService
+{
+    /// <summary>Runs an MII action: actionType is the MII action class (e.g. SAPMEPAPIInterface), actionName the action
+    /// in the transaction, settings every configured setting of the action with the linked values put in (Request: the
+    /// request document).</summary>
+    PluginResult Invoke(string actionType, string actionName, Dictionary<string, object> settings);
+
+    /// <summary>Tracer and Event Logger.</summary>
+    void Log(string level, string message);
+
+    /// <summary>Loads a web resource of the MII server (e.g. an XSLT stylesheet) as text.</summary>
+    string LoadResource(string path);
+
+    /// <summary>Reads a shared or global property of the MII server (Inline.X, Persistent.X, Global.X).</summary>
+    object GetProperty(string name);
+
+    /// <summary>Writes a shared property of the MII server.</summary>
+    void SetProperty(string name, object value);
+
+    /// <summary>Runs a transaction that is not in this file (or one MiiSim.ExternalPaths names): the inputs the caller
+    /// links as MII text; returns the outputs as MII text.</summary>
+    IDictionary<string, string> CallExternal(string path, IDictionary<string, string> inputs);
+}
+
+/// <summary>The outputs of a plugin call by MII property name ("" for an output that is not set).</summary>
+public sealed class PluginResult
+{
+    public Dictionary<string, object> Values { get; } = [];
+
+    public object Get(string name) => Values.TryGetValue(name, out var value) ? value : string.Empty;
+}
+
+/// <summary>A query of a transaction: the template and the parameters the action sets.</summary>
+public sealed class Query(string templatePath, string text)
+{
+    public string TemplatePath { get; } = templatePath;
+
+    public string Text { get; } = text;
+
+    /// <summary>MII's RowCount (0: not set).</summary>
+    public int RowCount { get; set; }
+
+    public SortedDictionary<int, SimQueryParameter> Slots { get; } = [];
+
+    /// <summary>A text parameter; null (a link that failed) leaves the slot unset.</summary>
+    public void SetParameter(int slot, string name, object value) => Set(slot, name, "", false, value);
+
+    /// <summary>A typed parameter; null (a link that failed) leaves the slot unset.</summary>
+    public void SetTypedParameter(int slot, string name, string type, object value) => Set(slot, name, type, true, value);
+
+    private void Set(int slot, string name, string type, bool typed, object value)
+    {
+        if (value == null)
+        {
+            return;
+        }
+
+        Slots[slot] = new SimQueryParameter { Slot = slot, Name = name, Type = type, Typed = typed, IsSet = true, Value = value, Text = Mii.ToStr(value) };
+    }
+}
+
+#endregion
+
+#region MII simulation
+
+/// <summary>A query template as the file header describes it.</summary>
+public sealed record MiiSimTemplate(string Kind, string Mode, bool Typed, Dictionary<int, string> Defaults, Dictionary<int, string> Types, Dictionary<int, string> Names);
+
+/// <summary>The logic class of a simulation-mode file.</summary>
+public interface IMiiSimLogic
+{
+    MiiSim Simulation { get; }
+
+    /// <summary>Runs a transaction of this file by its MII path with the inputs as MII text; false when the file does not
+    /// contain it.</summary>
+    bool TryRun(string path, IDictionary<string, string> inputs, out IDictionary<string, string> outputs);
+}
+
+/// <summary>A link that failed (MII "Invalid variable", "Conversion Exception", an expression error).</summary>
+public sealed class MiiLinkException(MiiSimFrame frame, string message, string actionName) : MiiException(message, actionName, "Link")
+{
+    public MiiSimFrame Frame { get; } = frame;
+}
+
+/// <summary>A call of a transaction that the callee has not entered yet.</summary>
+public sealed class MiiSimCall(MiiSimFrame caller, string actionName, bool resetState, bool xacute, HashSet<string> linked)
+{
+    public MiiSimFrame Caller { get; } = caller;
+
+    public string ActionName { get; } = actionName;
+
+    public bool ResetState { get; } = resetState;
+
+    public bool Xacute { get; } = xacute;
+
+    /// <summary>The inputs the caller linked (null: all).</summary>
+    public HashSet<string> Linked { get; } = linked;
+}
+
+/// <summary>The simulation: services, the transactions treated as external, the record of swallowed errors.
+/// MII rules it follows (SAP Manufacturing Suite Definitive Guide, verified behaviour):
+///   - ThrowOnLinkError 1: a failing link raises an exception; 0: the link leaves its target unchanged, the run goes on.
+///   - ThrowOnActionError 1: a failing action raises an exception; 0: Success is false, the run goes on.
+///   - A link to an output of an action that has not run fails with "Invalid variable".
+///   - ResetState false: a call action keeps the callee's transaction, local and action properties of its previous call
+///     in the same run of the caller (also an unlinked input); true: every call starts from the defaults.
+///   - An input the caller does not link gets the callee's default; an Xacute query passes every input (unmapped: empty).
+///   - Locals and outputs start with their defaults; an unset query parameter uses the template's Param.N.</summary>
+public sealed class MiiSim
+{
+    private MiiSimCall pending;
+
+    public MiiSim(IQueryService queryService, IPluginService plugins)
+    {
+        QueryService = queryService;
+        Plugins = plugins;
+        Queries = new MiiSimQueries(this);
+    }
+
+    public IQueryService QueryService { get; }
+
+    public IPluginService Plugins { get; }
+
+    public MiiSimQueries Queries { get; }
+
+    /// <summary>Transactions run through IPluginService.CallExternal although the file contains them: a full path, or a
+    /// folder ending with "/".</summary>
+    public List<string> ExternalPaths { get; } = [];
+
+    /// <summary>Errors MII swallows (ThrowOnLinkError or ThrowOnActionError 0, asynchronous calls), in order.</summary>
+    public List<string> Diagnostics { get; } = [];
+
+    public IMiiSimLogic Logic { get; private set; }
+
+    /// <summary>Runs a transaction of the file as an entry point (Runner): inputs not given get their defaults.</summary>
+    public static IDictionary<string, string> Run(IMiiSimLogic logic, string path, IDictionary<string, string> inputs)
+    {
+        MiiSim simulation = logic.Simulation;
+        simulation.Logic = logic;
+        inputs ??= new Dictionary<string, string>();
+        simulation.pending = new MiiSimCall(null, "", true, false, new HashSet<string>(inputs.Keys));
+
+        if (!logic.TryRun(path, inputs, out IDictionary<string, string> outputs))
+        {
+            simulation.pending = null;
+            throw new ArgumentException("The transaction " + path + " is not in this file.");
+        }
+
+        return outputs;
+    }
+
+    public bool IsExternal(string path)
+    {
+        foreach (string external in ExternalPaths)
+        {
+            if (string.Equals(path, external, StringComparison.OrdinalIgnoreCase)
+                || (external.EndsWith("/") && path.StartsWith(external, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The start of a transaction: its state, new or kept from the previous call (ResetState false).</summary>
+    public MiiSimFrame Enter(string path, bool throwOnLinkError, bool throwOnActionError)
+    {
+        MiiSimCall call = pending ?? new MiiSimCall(null, "", true, false, null);
+        pending = null;
+        MiiSimFrame frame;
+
+        if (call.Caller != null && !call.ResetState && call.Caller.Children.TryGetValue(call.ActionName, out MiiSimFrame previous) && previous.Path == path)
+        {
+            frame = previous;
+            frame.Reused = true;
+        }
+        else
+        {
+            frame = new MiiSimFrame(this, path);
+
+            if (call.Caller != null)
+            {
+                call.Caller.Children[call.ActionName] = frame;
+            }
+        }
+
+        frame.ThrowOnLinkError = throwOnLinkError;
+        frame.ThrowOnActionError = throwOnActionError;
+        frame.Linked = call.Linked;
+        frame.Xacute = call.Xacute;
+        frame.External = IsExternal(path);
+        return frame;
+    }
+
+    internal void Expect(MiiSimCall call) => pending = call;
+
+    internal MiiSimCall Pending => pending;
+
+    // ------------------------------------------------------------------ MII text <-> C# values
+
+    /// <summary>An input as MII text (missing: the C# default, the callee then uses its own default).</summary>
+    public static T FromText<T>(IDictionary<string, string> values, string name)
+    {
+        return values != null && values.TryGetValue(name, out string text) ? FromText<T>(text) : default;
+    }
+
+    /// <summary>MII text to a value of the property's type: numbers that are no numbers give 0, booleans are true for
+    /// true, 1 or yes (verified for Runner inputs), XML is parsed, lists and maps in MII's text form.</summary>
+    public static T FromText<T>(string text) => (T)FromText(typeof(T), text ?? "");
+
+    public static object FromText(Type type, string text)
+    {
+        if (type == typeof(string) || type == typeof(object))
+        {
+            return text;
+        }
+
+        if (type == typeof(bool))
+        {
+            return Regex.IsMatch(text, @"^\s*(true|1|yes)\s*$", RegexOptions.IgnoreCase);
+        }
+
+        if (type == typeof(int) || type == typeof(long) || type == typeof(double) || type == typeof(decimal))
+        {
+            double number;
+            double.TryParse(text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out number);
+            return type == typeof(int) ? Mii.ToInt(number) : type == typeof(long) ? (long)number : type == typeof(decimal) ? Mii.ToDecimal(number) : (object)number;
+        }
+
+        if (type == typeof(DateTime))
+        {
+            return Mii.ToDateTime(text);
+        }
+
+        if (type == typeof(XmlDocument))
+        {
+            try
+            {
+                return text.Trim().StartsWith("<") ? Mii.ParseXml(text.Trim()) : new XmlDocument();
+            }
+            catch (XmlException)
+            {
+                return new XmlDocument();
+            }
+        }
+
+        if (type == typeof(List<string>))
+        {
+            return Mii.ToList(text);
+        }
+
+        if (type == typeof(Dictionary<string, string>))
+        {
+            return Mii.ToMap(text);
+        }
+
+        if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>) && typeof(MiiRow).IsAssignableFrom(type.GetGenericArguments()[0]))
+        {
+            return typeof(Mii).GetMethod("ToRows").MakeGenericMethod(type.GetGenericArguments()[0]).Invoke(null, [text]);
+        }
+
+        if (typeof(MiiRow).IsAssignableFrom(type))
+        {
+            return typeof(Mii).GetMethod("ToRow").MakeGenericMethod(type).Invoke(null, [text]);
+        }
+
+        return type.IsValueType ? Activator.CreateInstance(type) : null;
+    }
+
+    /// <summary>The empty value of a type (an unmapped Xacute input: text "", number 0, boolean false).</summary>
+    public static T Empty<T>() => FromText<T>("");
+
+    /// <summary>A value as MII text (XML as its text).</summary>
+    public static string ToText(object value) => Mii.ToStr(value);
+
+    /// <summary>The settings of a plugin action: the configured ones, the linked ones put over them.</summary>
+    public static Dictionary<string, object> Settings(Dictionary<string, object> configured, Dictionary<string, object> linked)
+    {
+        Dictionary<string, object> result = new Dictionary<string, object>(configured);
+
+        foreach (KeyValuePair<string, object> pair in linked)
+        {
+            result[pair.Key] = pair.Value;
+        }
+
+        return result;
+    }
+
+    // ------------------------------------------------------------------ conversions of a link into a number or date
+
+    /// <summary>True (the guide: "a failed conversion is a link error"; verified for "" into an integer input): a link of
+    /// text that is no number (also "") into a number, or no date into a dateTime, fails with "Conversion Exception".
+    /// False: such a link gives 0 (DateTime.MinValue), as the default-mode runtime does.</summary>
+    public static bool StrictLinkConversions { get; set; } = true;
+
+    /// <summary>A link into an integer (see StrictLinkConversions); a fraction is cut.</summary>
+    public static int LinkToInt(object value) => Mii.ToInt(LinkNumber(value, true));
+
+    public static long LinkToLong(object value) => (long)LinkNumber(value, true);
+
+    public static double LinkToDouble(object value) => LinkNumber(value, false);
+
+    public static decimal LinkToDecimal(object value) => Mii.ToDecimal(LinkNumber(value, false));
+
+    public static DateTime LinkToDateTime(object value)
+    {
+        if (value is DateTime)
+        {
+            return (DateTime)value;
+        }
+
+        DateTime result = Mii.ToDateTime(value);
+
+        if (result == DateTime.MinValue && StrictLinkConversions)
+        {
+            throw new FormatException("Conversion Exception: \"" + Mii.ToStr(value) + "\" is no dateTime");
+        }
+
+        return result;
+    }
+
+    private static double LinkNumber(object value, bool integer)
+    {
+        if (value is double || value is int || value is long || value is decimal || value is float || value is bool)
+        {
+            return Mii.ToDouble(value);
+        }
+
+        string text = Mii.ToStr(value).Trim();
+
+        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double number) || !StrictLinkConversions)
+        {
+            return number;
+        }
+
+        throw new FormatException("Conversion Exception: \"" + text + "\" is no " + (integer ? "integer" : "number"));
+    }
+}
+
+/// <summary>One run of one transaction: its properties, which actions ran, the state of its call actions.</summary>
+public sealed class MiiSimFrame(MiiSim simulation, string path)
+{
+    private static readonly string[] CallSettings = ["TransactionName", "ResetState", "Persist", "Async", "LogLevel", "LogType", "StoreTransactionOutput", "Expiration", "Site"];
+
+    public MiiSim Simulation { get; } = simulation;
+
+    public string Path { get; } = path;
+
+    public bool ThrowOnLinkError { get; set; }
+
+    public bool ThrowOnActionError { get; set; }
+
+    /// <summary>Kept from the previous call of the same call action (ResetState false).</summary>
+    public bool Reused { get; set; }
+
+    /// <summary>Runs through IPluginService.CallExternal.</summary>
+    public bool External { get; set; }
+
+    public bool Xacute { get; set; }
+
+    /// <summary>The inputs the caller linked (null: all).</summary>
+    public HashSet<string> Linked { get; set; }
+
+    public Dictionary<string, object> Values { get; } = [];
+
+    public HashSet<string> Ran { get; } = [];
+
+    public Dictionary<string, string> Errors { get; } = [];
+
+    public Dictionary<string, MiiSimFrame> Children { get; } = [];
+
+    // ------------------------------------------------------------------ properties
+
+    /// <summary>An input: the linked value, else (ResetState false) the value of the previous call, else the default.</summary>
+    public T Input<T>(string name, T passed, string defaultText)
+    {
+        if (Linked == null || Linked.Contains(name))
+        {
+            return passed;
+        }
+
+        if (Xacute)
+        {
+            return MiiSim.Empty<T>();
+        }
+
+        if (Reused && Values.TryGetValue("Transaction." + name, out object kept))
+        {
+            return (T)kept;
+        }
+
+        return MiiSim.FromText<T>(defaultText);
+    }
+
+    /// <summary>A property at the start: its value of the previous call (ResetState false) or the given value.</summary>
+    public T Init<T>(string key, T value) => Reused && Values.TryGetValue(key, out object kept) ? (T)kept : value;
+
+    /// <summary>A property at the start: its value of the previous call (ResetState false) or its MII default.</summary>
+    public T InitText<T>(string key, string defaultText) => Reused && Values.TryGetValue(key, out object kept) ? (T)kept : MiiSim.FromText<T>(defaultText);
+
+    /// <summary>Stores the properties when the transaction ends (for a call with ResetState false).</summary>
+    public IDisposable OnExit(System.Action keep) => new Exit(keep);
+
+    public void Keep(string key, object value) => Values[key] = value;
+
+    // ------------------------------------------------------------------ links
+
+    /// <summary>An outgoing link: a failure leaves the target unchanged (ThrowOnLinkError 0) or raises the exception.</summary>
+    public void Link(string actionName, System.Action write)
+    {
+        try
+        {
+            write();
+        }
+        catch (Exception exception)
+        {
+            LinkFailed(actionName, exception);
+        }
+    }
+
+    /// <summary>An incoming link into an action property: on a failure (ThrowOnLinkError 0) the property keeps its
+    /// configured value.</summary>
+    public T In<T>(string target, Func<T> value, T configured)
+    {
+        try
+        {
+            return value();
+        }
+        catch (Exception exception)
+        {
+            LinkFailed(target, exception);
+            return configured;
+        }
+    }
+
+    /// <summary>A link into an input of a called transaction: the input counts as linked unless the link fails.</summary>
+    public T Arg<T>(string input, Func<T> value)
+    {
+        try
+        {
+            T result = value();
+            Simulation.Pending?.Linked?.Add(input);
+            return result;
+        }
+        catch (Exception exception)
+        {
+            LinkFailed((Simulation.Pending != null ? Simulation.Pending.ActionName + "." : "") + input, exception);
+            return default;
+        }
+    }
+
+    /// <summary>The output of an action: "Invalid variable" when the action has not run.</summary>
+    public T Read<T>(string actionName, T value)
+    {
+        if (!Ran.Contains(actionName))
+        {
+            throw new MiiLinkException(this, "Invalid variable: " + actionName + " has not run in " + Path, actionName);
+        }
+
+        return value;
+    }
+
+    /// <summary>Success of an action ("Invalid variable" when it has not run).</summary>
+    public bool Success(string actionName) => Read(actionName, !Errors.ContainsKey(actionName));
+
+    /// <summary>LastErrorMessage of an action.</summary>
+    public string LastError(string actionName) => Read(actionName, Errors.TryGetValue(actionName, out string message) ? message : "");
+
+    private void LinkFailed(string target, Exception exception)
+    {
+        if (exception is MiiLinkException link && link.Frame != this)
+        {
+            throw exception;
+        }
+
+        string actionName = target.Contains('.') ? target.Substring(0, target.IndexOf('.')) : target;
+
+        if (ThrowOnLinkError)
+        {
+            if (exception is MiiLinkException)
+            {
+                throw exception;
+            }
+
+            throw new MiiLinkException(this, exception.Message, actionName);
+        }
+
+        Simulation.Diagnostics.Add(Path + ": link " + target + " failed and was skipped (ThrowOnLinkError 0): " + exception.Message);
+    }
+
+    // ------------------------------------------------------------------ actions
+
+    /// <summary>An action: a failure raises an exception (ThrowOnActionError 1) or sets Success false.</summary>
+    public void Action(string actionName, string actionType, System.Action run) => RunAction(actionName, actionType, false, run);
+
+    /// <summary>A Transaction Call (or Xacute query) of a transaction of this file.</summary>
+    public void Transaction(string actionName, bool resetState, bool async, bool xacute, System.Action call)
+    {
+        RunAction(actionName, xacute ? "XacuteQuery" : "TransactionCall", async, () =>
+        {
+            Simulation.Expect(new MiiSimCall(this, actionName, resetState || xacute, xacute, []));
+
+            try
+            {
+                call();
+            }
+            finally
+            {
+                Simulation.Expect(null);
+            }
+        });
+    }
+
+    /// <summary>A Transaction Call whose callee is not in the file or is chosen at runtime: runs it from this file when
+    /// it is there, else through IPluginService.CallExternal. Only linked inputs are passed (the stored ones are not).</summary>
+    public PluginResult CallTransaction(string actionName, bool resetState, Dictionary<string, object> configured, Dictionary<string, object> linked)
+    {
+        object name = linked.TryGetValue("TransactionName", out object linkedName) ? linkedName : configured.TryGetValue("TransactionName", out object configuredName) ? configuredName : "";
+        string callee = Mii.ToStr(name).Trim();
+        Dictionary<string, string> inputs = [];
+
+        foreach (KeyValuePair<string, object> pair in linked)
+        {
+            if (Array.IndexOf(CallSettings, pair.Key) < 0)
+            {
+                inputs[pair.Key] = MiiSim.ToText(pair.Value);
+            }
+        }
+
+        IDictionary<string, string> outputs = null;
+
+        if (Simulation.Logic != null && !Simulation.IsExternal(callee))
+        {
+            Simulation.Expect(new MiiSimCall(this, actionName, resetState, false, new HashSet<string>(inputs.Keys)));
+
+            try
+            {
+                if (!Simulation.Logic.TryRun(callee, inputs, out outputs))
+                {
+                    outputs = null;
+                }
+            }
+            finally
+            {
+                Simulation.Expect(null);
+            }
+        }
+
+        outputs ??= Simulation.Plugins.CallExternal(callee, inputs);
+        PluginResult result = new PluginResult();
+
+        foreach (KeyValuePair<string, string> pair in outputs ?? new Dictionary<string, string>())
+        {
+            result.Values[pair.Key] = pair.Value;
+        }
+
+        return result;
+    }
+
+    /// <summary>This transaction through IPluginService.CallExternal (MiiSim.ExternalPaths): the linked inputs as text.</summary>
+    public IDictionary<string, string> CallExternal(Dictionary<string, object> inputs)
+    {
+        Dictionary<string, string> texts = [];
+
+        foreach (KeyValuePair<string, object> pair in inputs)
+        {
+            if (Linked == null || Linked.Contains(pair.Key))
+            {
+                texts[pair.Key] = MiiSim.ToText(pair.Value);
+            }
+        }
+
+        return Simulation.Plugins.CallExternal(Path, texts) ?? new Dictionary<string, string>();
+    }
+
+    private void RunAction(string actionName, string actionType, bool async, System.Action run)
+    {
+        try
+        {
+            run();
+            Errors.Remove(actionName);
+        }
+        catch (MiiLinkException exception) when (exception.Frame == this)
+        {
+            if (ThrowOnLinkError)
+            {
+                throw;
+            }
+
+            Simulation.Diagnostics.Add(Path + ": a link of " + actionName + " failed, the action was skipped (ThrowOnLinkError 0): " + exception.Message);
+        }
+        catch (Exception exception) when (async)
+        {
+            Simulation.Diagnostics.Add(Path + ": the asynchronous call " + actionName + " failed: " + exception.Message);
+        }
+        catch (Exception exception)
+        {
+            if (ThrowOnActionError)
+            {
+                if (exception is MiiException)
+                {
+                    throw;
+                }
+
+                throw new MiiException(exception.Message, actionName, actionType);
+            }
+
+            Errors[actionName] = exception.Message;
+            Simulation.Diagnostics.Add(Path + ": the action " + actionName + " failed, the run goes on (ThrowOnActionError 0): " + exception.Message);
+        }
+        finally
+        {
+            Ran.Add(actionName);
+        }
+    }
+
+    private sealed class Exit(System.Action keep) : IDisposable
+    {
+        public void Dispose() => keep();
+    }
+}
+
+/// <summary>The queries of a simulation-mode file: builds the statement as MII does and maps the rows.</summary>
+public sealed class MiiSimQueries(MiiSim simulation)
+{
+    private static readonly Regex Placeholder = new Regex(@"('?)\[Param\.(\d+)\]('?)");
+
+    public List<T> Execute<T>(Query query) where T : MiiRow, new()
+    {
+        SimQuery request = Build(query);
+        IList<IDictionary<string, string>> rows = simulation.QueryService.Execute(request) ?? new List<IDictionary<string, string>>();
+        List<T> result = [];
+
+        foreach (IDictionary<string, string> row in rows)
+        {
+            if (request.RowCount > 0 && result.Count >= request.RowCount)
+            {
+                break;
+            }
+
+            T record = new T();
+
+            foreach (KeyValuePair<string, string> cell in row)
+            {
+                SetColumn(record, cell.Key, cell.Value);
+            }
+
+            result.Add(record);
+        }
+
+        return result;
+    }
+
+    public void ExecuteCommand(Query query) => simulation.QueryService.Execute(Build(query));
+
+    /// <summary>The statement as MII sends it: an unset slot takes the template's Param.N, else "" (an empty value);
+    /// a typed slot becomes ?, a typed slot in quotes stays literal text (as the X-Ray reads it, unverified).</summary>
+    public static SimQuery Build(Query query)
+    {
+        MiiSimTemplates.All.TryGetValue(query.TemplatePath ?? "", out MiiSimTemplate template);
+        bool typed = template != null ? template.Typed : query.Slots.Values.Any((slot) => slot.Typed);
+        SimQuery request = new SimQuery
+        {
+            TemplatePath = query.TemplatePath,
+            Kind = template?.Kind ?? "",
+            Mode = template?.Mode ?? "",
+            Typed = typed,
+            RowCount = query.RowCount,
+            TemplateText = query.Text,
+        };
+        SortedDictionary<int, SimQueryParameter> slots = new SortedDictionary<int, SimQueryParameter>(query.Slots);
+
+        foreach (Match match in Placeholder.Matches(query.Text ?? ""))
+        {
+            int slot = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+
+            if (!slots.ContainsKey(slot))
+            {
+                string text = template != null && template.Defaults.TryGetValue(slot, out string saved) ? saved : "";
+                slots[slot] = new SimQueryParameter { Slot = slot, Name = template != null && template.Names.TryGetValue(slot, out string name) ? name : "Param" + slot, IsSet = false, Text = text, Value = text };
+            }
+        }
+
+        foreach (SimQueryParameter parameter in slots.Values)
+        {
+            parameter.Typed = typed;
+
+            if (typed && string.IsNullOrEmpty(parameter.Type) && template != null && template.Types.TryGetValue(parameter.Slot, out string type))
+            {
+                parameter.Type = type;
+            }
+
+            parameter.Type ??= "";
+
+            if (typed)
+            {
+                parameter.Value = TypedValue(parameter);
+            }
+
+            request.Parameters.Add(parameter);
+        }
+
+        request.Sql = Placeholder.Replace(query.Text ?? "", (match) =>
+        {
+            SimQueryParameter parameter = slots[int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture)];
+
+            if (!typed)
+            {
+                return match.Groups[1].Value + parameter.Text + match.Groups[3].Value;
+            }
+
+            if (match.Groups[1].Value.Length > 0 && match.Groups[3].Value.Length > 0)
+            {
+                return match.Value;
+            }
+
+            request.Values.Add(parameter.Value);
+            return match.Groups[1].Value + "?" + match.Groups[3].Value;
+        });
+        return request;
+    }
+
+    /// <summary>A typed value: Integer and Timestamp fail on text that does not fit (MII checks before the query runs);
+    /// an empty value is null (assumed).</summary>
+    private static object TypedValue(SimQueryParameter parameter)
+    {
+        string text = parameter.Text ?? "";
+
+        switch ((parameter.Type ?? "").ToLowerInvariant())
+        {
+            case "integer":
+            case "long":
+                if (text.Trim().Length == 0)
+                {
+                    return null;
+                }
+
+                if (parameter.Value is int || parameter.Value is long || parameter.Value is double)
+                {
+                    return Mii.ToLong(parameter.Value);
+                }
+
+                if (long.TryParse(text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long number))
+                {
+                    return number;
+                }
+
+                throw new MiiException("Failed to set the parameter " + parameter.Slot + " of the statement: \"" + text + "\" is no Integer", "", "Query");
+            case "double":
+            case "number":
+                return text.Trim().Length == 0 ? null : MiiSim.LinkToDouble(parameter.Value);
+            case "timestamp":
+            case "datetime":
+                return parameter.Value is DateTime ? parameter.Value : text.Trim().Length == 0 ? null : MiiSim.LinkToDateTime(text);
+            case "boolean":
+                return text.Trim().Length == 0 ? null : Mii.ToBool(parameter.Value);
+            default:
+                return text;
+        }
+    }
+
+    private static void SetColumn(MiiRow row, string column, string text)
+    {
+        PropertyInfo property = null;
+
+        foreach (PropertyInfo candidate in Mii.ColumnsOf(row.GetType()))
+        {
+            if (candidate.Name == column)
+            {
+                property = candidate;
+                break;
+            }
+
+            if (property == null && string.Equals(Simple(candidate.Name), Simple(column), StringComparison.Ordinal))
+            {
+                property = candidate;
+            }
+        }
+
+        if (property == null)
+        {
+            return;
+        }
+
+        Type type = property.PropertyType;
+        bool numeric = type == typeof(int) || type == typeof(long) || type == typeof(double) || type == typeof(decimal);
+
+        if (text == null)
+        {
+            text = numeric ? "NA" : "---";
+        }
+        else if (!numeric)
+        {
+            text = text.TrimEnd(' ');
+        }
+
+        property.SetValue(row, type == typeof(string) ? text : MiiSim.FromText(type, text), null);
+    }
+
+    private static string Simple(string name) => new string(name.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
+}
+
+#endregion

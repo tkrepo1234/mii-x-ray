@@ -1,6 +1,7 @@
 // The regression check of the leading (JavaScript) generator: X-Rays every transaction and every folder of an export
-// folder and compiles each generated file on its own as C# 12 against the .NET 8 reference assemblies.
-//   node web/test/corpus.mjs <export folder> <work folder> [--no-compile]
+// folder and compiles each generated file on its own as C# 12 against the .NET 8 reference assemblies. With
+// --simulation every file is converted into the simulation mode (web/test/simulation.mjs) and that one is compiled.
+//   node web/test/corpus.mjs <export folder> <work folder> [--no-compile] [--simulation]
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join, relative, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,13 +11,15 @@ import { FolderSource } from './folder-source.js';
 import { DependencyResolver } from '../src/resolver.js';
 import { generateCode } from '../src/codefile.js';
 import { loadStaticContent } from '../src/staticfiles.js';
+import { convertToSimulation } from './simulation.mjs';
 
 const args = process.argv.slice(2);
 const compile = !args.includes('--no-compile');
+const simulation = args.includes('--simulation');
 const [exportFolder, workFolder] = args.filter((arg) => !arg.startsWith('--')).map((path) => resolve(path));
 
 if (!exportFolder || !workFolder) {
-  console.error('usage: node web/test/corpus.mjs <export folder> <work folder> [--no-compile]');
+  console.error('usage: node web/test/corpus.mjs <export folder> <work folder> [--no-compile] [--simulation]');
   process.exit(2);
 }
 
@@ -73,6 +76,14 @@ for (const folder of folders) {
 
 console.log(generated.filter((item) => item.kind === 'trx').length + ' transactions and ' + generated.filter((item) => item.kind === 'folder').length + ' folders X-rayed, ' + problems.length + ' not resolved');
 problems.slice(0, 10).forEach((problem) => console.log('  ' + problem));
+
+if (simulation) {
+  const pairs = generated.map((item) => [item.file, item.file.replace(/\.xray\.cs$/, '.sim.cs')]);
+  console.log(convertToSimulation(pairs).trim().split(/\r?\n/).slice(-20).join('\n'));
+  generated.forEach((item, position) => {
+    item.file = pairs[position][1];
+  });
+}
 
 if (!compile) {
   process.exit(problems.length === 0 ? 0 : 1);

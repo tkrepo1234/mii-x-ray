@@ -54,6 +54,51 @@ The sources in `web/src` are plain ES modules without dependencies (own XML pars
 the one source of it) into the single page. Not yet tried on a real MII server: whether it asks for a CSRF token on
 Catalog POSTs (the page fetches one when the server answers 403 with `X-CSRF-Token: Required`).
 
+## Simulation mode (2.6.0)
+
+The default file shows what the logic does; the **simulation mode** runs it the way MII runs it, to prove by
+simulation what otherwise only an MII run proves (e.g. that a rebuilt package leaves the same footprint as today's
+objects). It is made from a default-mode file by `tools/sim-convert` (Roslyn of the .NET SDK, no packages), so a file
+X-rayed on the MII server with the page and one generated here give the same simulation code:
+
+```
+node web/test/simulation.mjs <in.xray.cs> <out.sim.cs>           convert a default-mode file (2.5 or later)
+node web/test/corpus.mjs <export folder> <work folder> --simulation  every corpus file converted and compiled
+node web/test/simrun.mjs <work folder>                             runs small transactions on .NET, checks each rule
+```
+
+The page has no simulation switch: X-Ray on MII as usual (default mode), convert the `.xray.cs` locally.
+
+Run a transaction by its MII path with inputs and outputs as MII text:
+
+```csharp
+var simulation = new MiiSim(queries, plugins);             // IQueryService, IPluginService (simulation versions)
+simulation.ExternalPaths.Add("BB_BUILDINGBLOCK/");          // optional: run these through plugins.CallExternal
+var outputs = MiiSim.Run(new ProductionProcessLogic(simulation), "ME/ProductionProcess/trxPhaseProductive", inputs);
+```
+
+Hooks: `IQueryService.Execute(SimQuery)` gets template path, kind, mode, typed flag, RowCount, every slot (name, slot,
+type, set or default, text, value) and the statement as MII sends it (text parameters replaced, typed ones as `?` with
+`Values` in order); it returns rows as column name to text (null for a database null). `IPluginService.Invoke` gets
+every configured setting of the action with the linked values put in (`Request`: the request document);
+`IPluginService.CallExternal(path, inputs)` runs transactions that are not in the file (and those `ExternalPaths`
+names). `MiiSim.Diagnostics` lists the errors MII swallows.
+
+What the simulation emulates (CHANGELOG 2.6.0 lists what is assumed):
+
+- `ThrowOnLinkError` 1: a failing link raises the exception; 0: the link leaves its target unchanged, the run goes on.
+  A failing link into a call input leaves the input unlinked (callee default). `ThrowOnActionError` likewise.
+- A link to an output of an action that has not run fails with "Invalid variable".
+- `ResetState` false: the call action keeps the callee's inputs, locals, outputs and action results of its previous
+  call in the same run of the caller; true: each call starts from the defaults.
+- Defaults: an input the caller does not link gets the callee's default (not the stored snapshot); Runner inputs not
+  given get their default; locals and outputs start with their defaults; an unset query parameter takes the
+  template's `Param.N`, an unset slot without one is empty text.
+- Values cross the boundaries as MII text and MII types: a number input given `abc` arrives as 0, a link of text that
+  is no number into a number fails ("Conversion Exception", switch: `MiiSim.StrictLinkConversions`), query nulls are
+  `---` / `NA`, trailing blanks of text columns are cut, RowCount cuts the rows.
+- Catch, Throw and Terminate as in the default runtime.
+
 ## Build (console)
 
 ```
@@ -138,7 +183,8 @@ ThrowOnLinkError off are marked.
 
 - **A faulty transaction gives faulty C#, as is.** Links to inputs or actions that no longer exist, references to
   undeclared properties and the like are kept and listed under *Notes* in the file header; X-Ray does not repair.
-- Inputs a caller does not link stay empty (`null`); in MII they would get the callee's default value.
+- Inputs a caller does not link stay empty (`null`); in MII they would get the callee's default value (the
+  simulation mode does that).
 - `#expr#` (an expression built at runtime) and `getvalue(name)` cannot be translated; they become `Mii.Evaluate`
   and `Mii.GetValue` and are listed in the notes.
 - A Catch handles what precedes it **in its parent** (a lexical `try`). In MII it also catches exceptions from
@@ -147,7 +193,7 @@ ThrowOnLinkError off are marked.
 - Java date patterns, Java regular expressions and Java time zone ids are mapped to .NET as far as they match
   (.NET `\w` and `\d` also match non-ASCII letters and digits, Java's do not).
 - A call with ResetState false keeps the callee's state between calls in MII; the C# marks such calls in loops but
-  runs each call fresh. An asynchronous call is marked, the C# still runs it in line.
+  runs each call fresh (the simulation mode keeps it). An asynchronous call is marked, the C# still runs it in line.
 
 ## Development
 
@@ -162,6 +208,8 @@ src/Cli          guided console and the one-shot run
 tests            test runner without packages, unit tests and an end-to-end test that compiles a result as C# 12
                  and runs it on .NET 8 (needs a .NET SDK with the .NET 8 reference pack, else it is skipped)
 tools            corpus-check.ps1: X-Ray every transaction of an export folder and compile each file as C# 12
+tools/sim-convert  default mode -> simulation mode (C# 12, Roslyn from the SDK) and the simulation runtime
+                 (SimulationRuntime.txt: the services region it replaces and the region "MII simulation")
 ```
 
 `tools\corpus-check.ps1 -ExportFolder <folder>` is the regression check: every generated file must compile (Roslyn

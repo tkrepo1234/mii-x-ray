@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.6.0 - 2026-10-28
+
+Simulation mode (Tim: "Du musst nur TRX-Eigenschaften mit emulieren"): the X-Ray runs the way MII runs the
+transactions, so today's objects and a rebuild can be run side by side on the same scenarios.
+
+- `tools/sim-convert` turns a default-mode file (2.5 or later) into the simulation mode: Roslyn from the .NET SDK reads
+  the generated C# and its comments (attributes, MII names and defaults, action settings, the query overview) and
+  wraps links, calls and reads; `SimulationRuntime.txt` replaces the services region and adds the region
+  "MII simulation". Generating in simulation mode is the same step (`web/test/simulation.mjs`), so a file X-rayed on
+  MII and one generated locally give the same code. The page has no switch; the default output is unchanged.
+- Hooks: `MiiSim.Run(logic, path, inputs)` with inputs and outputs as MII text; `IQueryService.Execute(SimQuery)` with
+  template, mode, typed flag, RowCount, the slots and the statement as MII sends it (typed slots as `?` with their
+  values); `IPluginService.Invoke` with every configured setting and the linked values; `IPluginService.CallExternal`
+  for transactions outside the file and those `MiiSim.ExternalPaths` names; `MiiSim.Diagnostics` for errors MII swallows.
+- Emulated: ThrowOnLinkError 0/1 and ThrowOnActionError 0/1; "Invalid variable" for a link to an output of an action
+  that has not run; ResetState false/true (the callee keeps inputs, locals, outputs and action results of the previous
+  call of the same call action in the caller's run); callee defaults for unlinked inputs, Runner defaults, local and
+  output defaults; the template's Param.N for unset query parameters; MII text and types at the boundaries (number
+  input `abc` = 0, query nulls `---`/`NA`, trailing blanks cut, RowCount); Catch, Throw, Terminate as before.
+- `web/test/simrun.mjs` runs small transactions on .NET and checks each rule; `web/test/corpus.mjs --simulation`
+  converts and compiles the corpus. `C:\Claude\pp\tools\xray.mjs` got `--simulation`.
+
+Assumed (not documented or not verified on MII; the simulation follows the guide's verified behaviour where there is
+one):
+
+- A transaction without ThrowOnLinkError / ThrowOnActionError counts as 1.
+- ResetState: the configured value of the call action decides. The default-mode file only marks a ResetState link
+  ("linked"), not its value; a literal link that differs from the configuration (verified to win, C1) is not seen. No
+  value: false.
+- ThrowOnLinkError 0 is exact for links that are single statements or values: outgoing links and Assignment links,
+  call inputs, query parameters, plugin settings, Tracer messages. A failing reference inside a condition, a loop
+  source, an XSLT or Throw/Terminate input still raises the exception; inside a call statement it skips the action.
+- ThrowOnActionError 0: the failed action counts as run and its outgoing links run (MII's link evaluation order; not
+  documented). `Success` / `LastErrorMessage` read by links keep the design-time values the default file shows.
+- A link of text that is no number (also `""`) into a number, or of no date into a dateTime, fails with "Conversion
+  Exception" (verified only for `""` into an integer call input); `MiiSim.StrictLinkConversions = false` switches it off.
+- Booleans from text are true for `true`, `1`, `yes` (verified V2); other text and `""` are false.
+- An unset text `[Param.N]` without a saved `Param.N` becomes empty text; a typed one null. A typed `[Param.N]` in
+  quotes stays literal text (as the X-Ray notes say). Typed Integer slots refuse text that is no number before the
+  query runs; Timestamp is read without the template's DateFormat. The saved `Param.N` comes from the header overview,
+  which shows multi-line values on one line.
+- Xacute query calls pass every input: unmapped ones and mapped ones the action does not set arrive empty (the
+  template's `Param.N` for a mapped unsent slot is not applied).
+- Asynchronous calls run in line; their failure does not reach the caller.
+- Columns a query returns that the row record does not know are dropped (the record holds the columns the X-Ray
+  found in the statement and in the last test run).
+- A loop's Break set inside a callee is not kept across calls with ResetState false.
+
 ## 2.5.1 - 2026-10-28
 
 - The query overview leaves out the template setting `TempTableList` (the table list the query editor offered, not a

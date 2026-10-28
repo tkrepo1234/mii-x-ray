@@ -8,7 +8,7 @@ import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.5.1';
+export const TOOL_VERSION = '2.6.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
