@@ -63,6 +63,33 @@ export function literalLinkedValue(owner, actionName, property) {
   return null;
 }
 
+/** The transaction or query template an action uses as { path, type }; null when it uses none or names it at runtime. */
+function referenceOf(owner, action) {
+  if (action.actionType === 'TransactionCall') {
+    // a literal link to TransactionName wins over the configured name; an expression leaves the callee open
+    const linked = linkedExpression(owner, action.name, 'TransactionName');
+    const name = linked === null ? action.static('TransactionName') : literalLinkedValue(owner, action.name, 'TransactionName') || '';
+    return name.length > 0 ? { path: name, type: 'Transaction' } : null;
+  }
+
+  if (action.actionType === 'DynamicTransactionCall') {
+    const name = literalLinkedValue(owner, action.name, 'TransactionName');
+    return name !== null ? { path: name, type: 'Transaction' } : null;
+  }
+
+  if (action.hasProperty('QueryTemplate')) {
+    let name = action.static('QueryTemplate');
+
+    if (name.length === 0) {
+      name = literalLinkedValue(owner, action.name, 'QueryTemplate');
+    }
+
+    return name ? { path: name, type: 'QueryTemplate' } : null;
+  }
+
+  return null;
+}
+
 export class DependencyResolver {
   constructor(source, progress) {
     this._source = source;
@@ -94,6 +121,7 @@ export class DependencyResolver {
     this._graph.folder = ObjectPath.normalize(folder);
     this._graph.roots = [];
     this._graph.folderQueries = [];
+    await this._prefetch(sorted);
 
     for (const entry of sorted.filter((item) => item.type === 'Transaction')) {
       const transaction = await this._loadTransaction(entry.path);
@@ -121,49 +149,40 @@ export class DependencyResolver {
     return this._graph;
   }
 
+  /** Wave by wave: the references of all pending transactions are fetched together, then followed in order. */
   async _followPending() {
     while (this._pending.length > 0) {
-      const transaction = this._pending.shift();
+      const wave = this._pending.splice(0);
+      await this._prefetch(wave.flatMap((transaction) => [...transaction.actions.values()].map((action) => referenceOf(transaction, action)).filter(Boolean)));
 
-      for (const action of transaction.actions.values()) {
-        await this._followAction(transaction, action);
+      for (const transaction of wave) {
+        for (const action of transaction.actions.values()) {
+          const reference = referenceOf(transaction, action);
+
+          if (reference && reference.type === 'Transaction') {
+            await this._loadTransaction(reference.path);
+          } else if (reference) {
+            await this._loadQuery(reference.path);
+          }
+        }
       }
     }
   }
 
-  async _followAction(owner, action) {
-    if (action.actionType === 'TransactionCall') {
-      // a literal link to TransactionName wins over the configured name; an expression leaves the callee open
-      const linked = linkedExpression(owner, action.name, 'TransactionName');
-      const name = linked === null ? action.static('TransactionName') : literalLinkedValue(owner, action.name, 'TransactionName') || '';
-
-      if (name.length > 0) {
-        await this._loadTransaction(name);
-      }
-
+  /** Lets a source that can load in batches fetch the objects not known yet. */
+  async _prefetch(references) {
+    if (typeof this._source.prefetch !== 'function') {
       return;
     }
 
-    if (action.actionType === 'DynamicTransactionCall') {
-      const name = literalLinkedValue(owner, action.name, 'TransactionName');
+    const unknown = references.filter((reference) => {
+      const key = ObjectPath.normalize(reference.path);
+      const lower = key.toLowerCase();
+      return key.length > 0 && !this._graph.transactionsByReference.has(lower) && !this._graph.queriesByReference.has(lower) && !this._graph.missing.includes(key);
+    });
 
-      if (name !== null) {
-        await this._loadTransaction(name);
-      }
-
-      return;
-    }
-
-    if (action.hasProperty('QueryTemplate')) {
-      let name = action.static('QueryTemplate');
-
-      if (name.length === 0) {
-        name = literalLinkedValue(owner, action.name, 'QueryTemplate');
-      }
-
-      if (name) {
-        await this._loadQuery(name);
-      }
+    if (unknown.length > 0) {
+      await this._source.prefetch(unknown);
     }
   }
 

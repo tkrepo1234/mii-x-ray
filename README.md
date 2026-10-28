@@ -26,7 +26,8 @@ and a call tree per entry point.
 Deploy: in the MII Workbench, open the **Web** tab of a project, import `mii-x-ray.html` into a folder and open
 `https://<mii-server>/XMII/CM/<Project>/<Folder>/mii-x-ray.html`. The page reads transactions through the Catalog
 service with the signed-in user's session (the user needs access to the Catalog service, e.g. SAP_XMII_Developer);
-nothing is installed and no password is stored. The page only reads the MII server it comes from; opened as a local
+nothing is installed and no password is stored. Transactions are loaded in batches (LoadMultipleObjects,
+which MII supports only for Class=Transaction); query templates one by one. The page only reads the MII server it comes from; opened as a local
 file it does nothing. The last transactions are kept in the browser (local storage).
 
 ```

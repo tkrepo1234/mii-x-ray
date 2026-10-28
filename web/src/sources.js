@@ -103,6 +103,8 @@ export class CatalogSource {
   constructor(baseUrl) {
     this._url = (baseUrl || '').replace(/\/+$/, '') + '/XMII/Catalog';
     this._csrfToken = null;
+    this._loaded = new Map(); // lower-case path -> text, filled by prefetch
+    this._listed = new Set(); // lower-case paths a folder listing has shown: they exist
     this.description = 'MII ' + (baseUrl || location.origin);
   }
 
@@ -110,10 +112,78 @@ export class CatalogSource {
     await this._exists('MiiXRay/ConnectionCheck/doesNotExist');
   }
 
+  /** Loads the transactions among items ({ path, type }) with few requests (Catalog LoadMultipleObjects, which works
+   * only for Class=Transaction). Class n belongs to ObjectName n. One missing object makes MII answer a FatalError and
+   * load nothing, lists of different length give an empty Files document: such a batch is simply left out, and load()
+   * reads its objects one by one. */
+  async prefetch(items) {
+    const wanted = [];
+
+    for (const item of items) {
+      const path = ObjectPath.normalize(item.path);
+      const key = path.toLowerCase();
+
+      // LoadMultipleObjects works only for Class=Transaction (Tim, 2026-10-28); query templates load one by one
+      if (path.length > 0 && !path.includes(',') && item.type === 'Transaction' && !this._loaded.has(key) && !wanted.some((other) => other.key === key)) {
+        wanted.push({ path, key, type: item.type });
+      }
+    }
+
+    for (let start = 0; start < wanted.length; start += PREFETCH_BATCH) {
+      await this._loadBatch(wanted.slice(start, start + PREFETCH_BATCH));
+    }
+  }
+
+  /** One LoadMultipleObjects call; after a FatalError (an object is missing) each half is tried again, so the missing
+   * object ends up alone and only it is left to load(). */
+  async _loadBatch(batch) {
+    const text = await this._post({
+      Mode: 'LoadMultipleObjects',
+      Class: batch.map((item) => item.type).join(','),
+      ObjectName: batch.map((item) => item.path).join(','),
+      TemporaryFile: 'false',
+      _: String(Date.now()),
+    });
+    const answer = tryParseXml(text);
+
+    if (!answer) {
+      return;
+    }
+
+    if (answer.documentElement.localName === 'Rowsets') {
+      if (batch.length > 1) {
+        const half = Math.ceil(batch.length / 2);
+        await this._loadBatch(batch.slice(0, half));
+        await this._loadBatch(batch.slice(half));
+      }
+
+      return;
+    }
+
+    const files = answer.documentElement.localName === 'Files' ? MiiXml.children(answer.documentElement, 'File') : [];
+
+    if (files.length !== batch.length) {
+      return;
+    }
+
+    batch.forEach((item, index) => {
+      const content = decodeBase64(files[index].innerText.trim());
+
+      if (content.trim().length > 0) {
+        this._loaded.set(item.key, content);
+      }
+    });
+  }
+
   async load(objectPath) {
     const path = ObjectPath.normalize(objectPath);
+    const prefetched = this._loaded.get(path.toLowerCase());
 
-    if (path.length === 0 || !(await this._exists(path))) {
+    if (prefetched !== undefined) {
+      return { canonicalPath: path, text: prefetched };
+    }
+
+    if (path.length === 0 || (!this._listed.has(path.toLowerCase()) && !(await this._exists(path)))) {
       return null;
     }
 
@@ -169,6 +239,7 @@ export class CatalogSource {
 
       if (objectName.length > 0) {
         const type = MiiXml.childText(row, 'Type').trim();
+        this._listed.add(ObjectPath.normalize(filePath.length > 0 ? filePath + '/' + objectName : objectName).toLowerCase());
         result.push({ path: ObjectPath.normalize(filePath.length > 0 ? filePath + '/' + objectName : objectName), type: type.length > 0 ? type : typeOfName(objectName) });
       }
     }
@@ -218,6 +289,20 @@ export class CatalogSource {
 
     return response.text();
   }
+}
+
+const PREFETCH_BATCH = 40;
+
+/** Base64 of UTF-8 bytes as text. */
+function decodeBase64(text) {
+  const binary = atob(text.replace(/\s+/g, ''));
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index++) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return new TextDecoder('utf-8').decode(bytes).replace(/^﻿/, '');
 }
 
 /** The object type by file extension, for answers without a Type column. */
