@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.1 - 2026-10-28
+
+- The query overview leaves out the template setting `TempTableList` (the table list the query editor offered, not a
+  setting of the query).
+
 ## 2.5.0 - 2026-10-28
 
 Tim: no export of MII objects; what a rebuild needs goes into the `.xray.cs`.

@@ -8,7 +8,7 @@ import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.5.0';
+export const TOOL_VERSION = '2.5.1';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -360,7 +360,7 @@ function queryOverview(contract) {
       + (contract.parameterMode === 'typed' ? ' ' + (p.type || '(no type)') : '')).join(', '));
   }
 
-  const settings = query.attributes.filter(([name, value]) => value.trim().length > 0 && name !== 'Query' && !/^Param(Description|Type)?\.\d+$/.test(name));
+  const settings = query.attributes.filter(([name, value]) => value.trim().length > 0 && name !== 'Query' && name !== 'TempTableList' && !/^Param(Description|Type)?\.\d+$/.test(name));
   const defaults = query.attributes.filter(([name, value]) => value.length > 0 && /^Param\.\d+$/.test(name));
 
   if (settings.length > 0) {
