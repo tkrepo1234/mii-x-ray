@@ -14,7 +14,9 @@ const dll = join(project, 'bin', 'Release', 'net9.0', 'SimConvert.dll');
 
 /** Builds the converter when it is missing or older than its sources. */
 export function buildConverter() {
-  const newest = Math.max(...readdirSync(project).filter((name) => /\.(cs|txt|csproj)$/.test(name)).map((name) => statSync(join(project, name)).mtimeMs));
+  const sources = readdirSync(project).filter((name) => /\.(cs|txt|csproj)$/.test(name)).map((name) => join(project, name))
+    .concat([join(project, '..', '..', 'src', 'Generate', 'RuntimeSource.txt')]);
+  const newest = Math.max(...sources.map((file) => statSync(file).mtimeMs));
 
   if (!existsSync(dll) || statSync(dll).mtimeMs < newest) {
     execFileSync(dotnet, ['build', join(project, 'SimConvert.csproj'), '-c', 'Release', '-nologo', '-v', 'q'], { stdio: 'pipe' });

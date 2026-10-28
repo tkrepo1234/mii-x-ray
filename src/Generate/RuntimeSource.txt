@@ -619,7 +619,7 @@ public static class Mii
             return string.Empty;
         }
 
-        object result = document.CreateNavigator().Evaluate(xpath, Namespaces(document));
+        object result = EvaluateXPath(document, xpath);
         System.Xml.XPath.XPathNodeIterator nodes = result as System.Xml.XPath.XPathNodeIterator;
 
         if (nodes != null)
@@ -627,13 +627,7 @@ public static class Mii
             return nodes.MoveNext() ? nodes.Current.Value : string.Empty;
         }
 
-        if (result is double)
-        {
-            double number = (double)result;
-            return number == Math.Floor(number) && Math.Abs(number) < 1e15 ? ((long)number).ToString(Invariant) : number.ToString("R", Invariant);
-        }
-
-        return ToStr(result);
+        return XPathText(result);
     }
 
     /// <summary>Doc{xpath} used as XML: the first matching node as a document of its own.</summary>
@@ -646,8 +640,59 @@ public static class Mii
             return new XmlDocument();
         }
 
-        XmlNode node = document.SelectSingleNode(xpath, Namespaces(document));
-        return node == null ? new XmlDocument() : NodeAsDocument(node);
+        List<XmlNode> nodes = XPathNodes(EvaluateXPath(document, xpath));
+        return nodes.Count == 0 ? new XmlDocument() : NodeAsDocument(nodes[0]);
+    }
+
+    private static readonly Regex TrailingSlash = new Regex(@"(?<=[\w\]\*\)'""])/+(?=\s*(\)|\||,|$))");
+
+    /// <summary>An XPath 1.0 expression as MII evaluates it: a node-set, a number, a text or a boolean. A location path
+    /// that ends with "/" (count(/Rowsets/Rowset/Row/)) is read as the path without it (assumed: MII runs such links).</summary>
+    private static object EvaluateXPath(XmlDocument document, string xpath)
+    {
+        return document.CreateNavigator().Evaluate(TrailingSlash.Replace(xpath ?? string.Empty, string.Empty), Namespaces(document));
+    }
+
+    /// <summary>The nodes of an XPath result (none for a number, text or boolean).</summary>
+    private static List<XmlNode> XPathNodes(object result)
+    {
+        List<XmlNode> nodes = new List<XmlNode>();
+        System.Xml.XPath.XPathNodeIterator iterator = result as System.Xml.XPath.XPathNodeIterator;
+
+        while (iterator != null && iterator.MoveNext())
+        {
+            System.Xml.IHasXmlNode node = iterator.Current as System.Xml.IHasXmlNode;
+
+            if (node != null)
+            {
+                nodes.Add(node.GetNode());
+            }
+        }
+
+        return nodes;
+    }
+
+    /// <summary>A number, text or boolean result of XPath as text (Java's XPath string form: 2, 0.5, NaN, Infinity).</summary>
+    private static string XPathText(object result)
+    {
+        if (result is double)
+        {
+            double number = (double)result;
+
+            if (double.IsNaN(number))
+            {
+                return "NaN";
+            }
+
+            if (double.IsInfinity(number))
+            {
+                return number > 0 ? "Infinity" : "-Infinity";
+            }
+
+            return number == Math.Floor(number) && Math.Abs(number) < 1e15 ? ((long)number).ToString(Invariant) : number.ToString("R", Invariant);
+        }
+
+        return ToStr(result);
     }
 
     /// <summary>The nodes a repeater runs over, each as a document of its own.</summary>
@@ -661,7 +706,7 @@ public static class Mii
             return result;
         }
 
-        foreach (XmlNode node in document.SelectNodes(xpath, Namespaces(document)))
+        foreach (XmlNode node in XPathNodes(EvaluateXPath(document, xpath)))
         {
             result.Add(NodeAsDocument(node));
         }
@@ -855,7 +900,16 @@ public static class Mii
             return result;
         }
 
-        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))
+        object value = EvaluateXPath(document, ToStr(xpath));
+
+        if (!(value is System.Xml.XPath.XPathNodeIterator))
+        {
+            // getlistfromxpath(doc, "string(...)") or count(...): one element with the value
+            result.Add(XPathText(value));
+            return result;
+        }
+
+        foreach (XmlNode node in XPathNodes(value))
         {
             result.Add(node.InnerText);
         }
@@ -873,7 +927,7 @@ public static class Mii
             return result;
         }
 
-        foreach (XmlNode node in document.SelectNodes(ToStr(xpath), Namespaces(document)))
+        foreach (XmlNode node in XPathNodes(EvaluateXPath(document, ToStr(xpath))))
         {
             result[node.Name] = node.InnerText;
         }
@@ -1290,12 +1344,12 @@ public static class Mii
     public static List<string> StringToList(object text, params object[] options)
     {
         string delimiter = options.Length > 0 ? ToStr(options[0]) : ",";
-        return new List<string>(Regex.Split(ToStr(text), delimiter));
+        return new List<string>(Regex.Split(ToStr(text), JavaPattern(delimiter)));
     }
 
     public static List<string> StringToListWithLimit(object text, object delimiter, object limit)
     {
-        return new List<string>(new Regex(ToStr(delimiter)).Split(ToStr(text), Math.Max(1, ToInt(limit))));
+        return new List<string>(new Regex(JavaPattern(delimiter)).Split(ToStr(text), Math.Max(1, ToInt(limit))));
     }
 
     public static string ListToString(object list, params object[] delimiter)
@@ -1366,7 +1420,7 @@ public static class Mii
     /// text ("$1 " inserts the group only).</summary>
     public static string StringReplaceAll(object text, object pattern, object replacement)
     {
-        return Regex.Replace(ToStr(text), ToStr(pattern), ToStr(replacement).Replace(" ", string.Empty));
+        return Regex.Replace(ToStr(text), JavaPattern(pattern), ToStr(replacement).Replace(" ", string.Empty));
     }
 
     /// <summary>MII's empty check: null, "", blanks, the text "null" or "---" (any case), as match(x, "(?i)^\s*(null|---)?\s*$").</summary>
@@ -1384,14 +1438,227 @@ public static class Mii
     /// <summary>match(text, pattern) with more arguments than usual; case-sensitive like on the system.</summary>
     public static bool Match(object text, object pattern, params object[] ignored)
     {
-        return Regex.IsMatch(ToStr(text), ToStr(pattern));
+        return Regex.IsMatch(ToStr(text), JavaPattern(pattern));
     }
 
     /// <summary>match2(text, pattern, caseSensitive).</summary>
     public static bool Match2(object text, object pattern, params object[] caseSensitive)
     {
         bool sensitive = caseSensitive.Length == 0 || ToBool(caseSensitive[0]);
-        return Regex.IsMatch(ToStr(text), ToStr(pattern), sensitive ? RegexOptions.None : RegexOptions.IgnoreCase);
+        return Regex.IsMatch(ToStr(text), JavaPattern(pattern), sensitive ? RegexOptions.None : RegexOptions.IgnoreCase);
+    }
+
+    // ------------------------------------------------------------------ Java regular expressions
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> JavaPatterns = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+
+    private static readonly Dictionary<string, string> PosixClasses = new Dictionary<string, string>
+    {
+        ["Lower"] = "a-z", ["Upper"] = "A-Z", ["ASCII"] = @"\x00-\x7F", ["Alpha"] = "a-zA-Z", ["Digit"] = "0-9",
+        ["Alnum"] = "a-zA-Z0-9", ["Punct"] = @"!-/:-@\[-`{-~", ["Graph"] = @"!-~", ["Print"] = @" -~", ["Blank"] = @" \t",
+        ["Cntrl"] = @"\x00-\x1F\x7F", ["XDigit"] = "0-9a-fA-F", ["Space"] = @" \t\n\x0B\f\r",
+    };
+
+    private const string HorizontalSpace = @" \t  ᠎ -   　";
+
+    /// <summary>MII's regular expressions are Java patterns (java.util.regex); the Java-only forms become .NET forms:
+    /// possessive quantifiers (X*+ is the atomic group (?>X*)), \x{h..h}, \Q...\E, \h, \H, \R and the POSIX classes
+    /// \p{Lower} etc.</summary>
+    public static string JavaPattern(object pattern)
+    {
+        return JavaPatterns.GetOrAdd(ToStr(pattern), ToNetPattern);
+    }
+
+    private static string ToNetPattern(string pattern)
+    {
+        StringBuilder result = new StringBuilder();
+        Stack<int> groups = new Stack<int>();
+        int atom = -1;
+        int index = 0;
+
+        while (index < pattern.Length)
+        {
+            char c = pattern[index];
+
+            if (c == '\\' && index + 1 < pattern.Length)
+            {
+                int start = result.Length;
+                index = JavaEscape(pattern, index, result, false);
+                atom = start;
+                continue;
+            }
+
+            if (c == '[')
+            {
+                int start = result.Length;
+                index = JavaClass(pattern, index, result);
+                atom = start;
+                continue;
+            }
+
+            if (c == '(')
+            {
+                groups.Push(result.Length);
+                result.Append(c);
+                index++;
+                atom = -1;
+                continue;
+            }
+
+            if (c == ')')
+            {
+                result.Append(c);
+                index++;
+                atom = groups.Count > 0 ? groups.Pop() : -1;
+                continue;
+            }
+
+            int quantifierEnd = c == '*' || c == '+' || c == '?' ? index + 1 : c == '{' ? QuantifierEnd(pattern, index) : index;
+
+            if (quantifierEnd > index)
+            {
+                string quantifier = pattern.Substring(index, quantifierEnd - index);
+                index = quantifierEnd;
+
+                if (index < pattern.Length && pattern[index] == '+' && atom >= 0)
+                {
+                    string body = result.ToString(atom, result.Length - atom);
+                    result.Length = atom;
+                    result.Append("(?>").Append(body).Append(quantifier).Append(')');
+                    index++;
+                }
+                else
+                {
+                    result.Append(quantifier);
+
+                    if (index < pattern.Length && pattern[index] == '?')
+                    {
+                        result.Append('?');
+                        index++;
+                    }
+                }
+
+                atom = -1;
+                continue;
+            }
+
+            atom = c == '|' || c == '^' || c == '$' ? -1 : result.Length;
+            result.Append(c);
+            index++;
+        }
+
+        return result.ToString();
+    }
+
+    private static int QuantifierEnd(string pattern, int index)
+    {
+        Match match = Regex.Match(pattern.Substring(index), @"^\{\d+(,\d*)?\}");
+        return match.Success ? index + match.Length : index;
+    }
+
+    private static int JavaEscape(string pattern, int index, StringBuilder result, bool inClass)
+    {
+        char next = pattern[index + 1];
+
+        if (next == 'x' && index + 2 < pattern.Length && pattern[index + 2] == '{')
+        {
+            int close = pattern.IndexOf('}', index + 3);
+
+            if (close > 0)
+            {
+                int code = int.Parse(pattern.Substring(index + 3, close - index - 3), NumberStyles.HexNumber, Invariant);
+                string text = char.ConvertFromUtf32(code);
+
+                foreach (char unit in text)
+                {
+                    result.Append("\\u").Append(((int)unit).ToString("X4", Invariant));
+                }
+
+                return close + 1;
+            }
+        }
+
+        if (next == 'Q' && !inClass)
+        {
+            int end = pattern.IndexOf(@"\E", index + 2, StringComparison.Ordinal);
+            string text = end < 0 ? pattern.Substring(index + 2) : pattern.Substring(index + 2, end - index - 2);
+            result.Append("(?:").Append(Regex.Escape(text)).Append(')');
+            return end < 0 ? pattern.Length : end + 2;
+        }
+
+        if (next == 'h')
+        {
+            result.Append(inClass ? HorizontalSpace : "[" + HorizontalSpace + "]");
+            return index + 2;
+        }
+
+        if (next == 'H' && !inClass)
+        {
+            result.Append("[^" + HorizontalSpace + "]");
+            return index + 2;
+        }
+
+        if (next == 'R' && !inClass)
+        {
+            result.Append(@"(?:\r\n|[\n\x0B\f\r\u0085  ])");
+            return index + 2;
+        }
+
+        if ((next == 'p' || next == 'P') && index + 2 < pattern.Length && pattern[index + 2] == '{')
+        {
+            int close = pattern.IndexOf('}', index + 3);
+            string name = close < 0 ? string.Empty : pattern.Substring(index + 3, close - index - 3);
+            string set;
+
+            if (PosixClasses.TryGetValue(name, out set) && !(inClass && next == 'P'))
+            {
+                result.Append(inClass ? set : (next == 'p' ? "[" : "[^") + set + "]");
+                return close + 1;
+            }
+        }
+
+        if (next == '_' || (!char.IsLetterOrDigit(next) && next > 127))
+        {
+            // Java: a backslash before a character that is no letter quotes it (.NET refuses \_)
+            result.Append(Regex.Escape(next.ToString()));
+            return index + 2;
+        }
+
+        result.Append('\\').Append(next);
+        return index + 2;
+    }
+
+    private static int JavaClass(string pattern, int index, StringBuilder result)
+    {
+        result.Append('[');
+        index++;
+
+        if (index < pattern.Length && pattern[index] == '^')
+        {
+            result.Append('^');
+            index++;
+        }
+
+        if (index < pattern.Length && pattern[index] == ']')
+        {
+            result.Append(@"\]");
+            index++;
+        }
+
+        while (index < pattern.Length && pattern[index] != ']')
+        {
+            if (pattern[index] == '\\' && index + 1 < pattern.Length)
+            {
+                index = JavaEscape(pattern, index, result, true);
+                continue;
+            }
+
+            result.Append(pattern[index]);
+            index++;
+        }
+
+        result.Append(']');
+        return index + 1;
     }
 
     public static string Quotes(object text)
@@ -1436,9 +1703,107 @@ public static class Mii
         return ToStr(text).Replace("&lt;", "<").Replace("&gt;", ">").Replace("&quot;", "\"").Replace("&apos;", "'").Replace("&amp;", "&");
     }
 
+    /// <summary>format(number, pattern): Java's DecimalFormat (rounding half-even).</summary>
     public static string Format(object number, object pattern)
     {
-        return ToDouble(number).ToString(ToStr(pattern), Invariant);
+        return JavaDecimalFormat(number, ToStr(pattern));
+    }
+
+    /// <summary>A number in a Java DecimalFormat pattern (0, #, '.', ',', prefix and suffix, % and per mille), rounded
+    /// half-even as Java does; the value is taken as the decimal it reads as (BigDecimal). Text that is no number and
+    /// an empty pattern give the value unchanged.</summary>
+    public static string JavaDecimalFormat(object value, string pattern)
+    {
+        string text = value is double ? ((double)value).ToString("R", Invariant) : ToStr(value).Trim();
+        decimal number;
+
+        if (string.IsNullOrWhiteSpace(pattern) || !decimal.TryParse(text, NumberStyles.Float, Invariant, out number))
+        {
+            return text;
+        }
+
+        string positive = pattern;
+        bool quoted = false;
+
+        for (int position = 0; position < pattern.Length; position++)
+        {
+            if (pattern[position] == '\'')
+            {
+                quoted = !quoted;
+            }
+            else if (pattern[position] == ';' && !quoted)
+            {
+                positive = pattern.Substring(0, position);
+                break;
+            }
+        }
+
+        int first = positive.IndexOfAny("0#,.".ToCharArray());
+        int last = positive.LastIndexOfAny("0#,.".ToCharArray());
+
+        if (first < 0)
+        {
+            return text;
+        }
+
+        string prefix = positive.Substring(0, first);
+        string body = positive.Substring(first, last - first + 1);
+        string suffix = positive.Substring(last + 1);
+
+        if ((prefix + suffix).Contains("%"))
+        {
+            number *= 100;
+        }
+        else if ((prefix + suffix).Contains("‰"))
+        {
+            number *= 1000;
+        }
+
+        int dot = body.IndexOf('.');
+        string integerPart = dot < 0 ? body : body.Substring(0, dot);
+        string fractionPart = dot < 0 ? string.Empty : body.Substring(dot + 1);
+        int minimumInteger = integerPart.Count((c) => c == '0');
+        int comma = integerPart.LastIndexOf(',');
+        int grouping = comma < 0 ? 0 : integerPart.Length - comma - 1;
+        int minimumFraction = fractionPart.Count((c) => c == '0');
+        int maximumFraction = fractionPart.Count((c) => c == '0' || c == '#');
+        decimal rounded = Math.Round(Math.Abs(number), Math.Min(maximumFraction, 28), MidpointRounding.ToEven);
+        string digits = rounded.ToString("F" + maximumFraction, Invariant);
+        string whole = maximumFraction > 0 ? digits.Substring(0, digits.IndexOf('.')) : digits;
+        string fraction = maximumFraction > 0 ? digits.Substring(digits.IndexOf('.') + 1) : string.Empty;
+
+        while (fraction.Length > minimumFraction && fraction.EndsWith("0"))
+        {
+            fraction = fraction.Substring(0, fraction.Length - 1);
+        }
+
+        whole = whole.TrimStart('0').PadLeft(minimumInteger, '0');
+
+        if (whole.Length == 0 && fraction.Length == 0)
+        {
+            whole = "0";
+        }
+
+        if (grouping > 0)
+        {
+            StringBuilder grouped = new StringBuilder();
+
+            for (int position = 0; position < whole.Length; position++)
+            {
+                if (position > 0 && (whole.Length - position) % grouping == 0)
+                {
+                    grouped.Append(',');
+                }
+
+                grouped.Append(whole[position]);
+            }
+
+            whole = grouped.ToString();
+        }
+
+        string literal = (prefix + "\u0000" + suffix).Replace("''", "\u0001").Replace("'", string.Empty).Replace("\u0001", "'");
+        string[] parts = literal.Split('\u0000');
+        return (number < 0 ? "-" : string.Empty) + parts[0] + whole + (fraction.Length > 0 || body.EndsWith(".") ? "." + fraction : string.Empty) + parts[1];
     }
 
     // ------------------------------------------------------------------ dates (patterns are Java patterns as in MII)

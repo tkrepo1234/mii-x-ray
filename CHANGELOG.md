@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.6.1 - 2026-10-28
+
+Runtime gaps the simulation harness (`C:\Claude\pp\sim`) found on today's ME/ProductionProcess objects.
+
+- XPath: an expression whose result is a number, text or boolean (`count(...)`, `sum(...) div 4`, `string(...)`) gives
+  its value as text in `Doc{...}`, `getlistfromxpath` (one element) and is no error in repeaters, `getmapfromxpath`
+  and Assign XML (no nodes). NaN and infinities as Java writes them. A location path ending with `/`
+  (`count(/Rowsets/Rowset/Row/)`) is read as the path without it (assumed: such links run in production on MII;
+  Java's XPath would refuse the expression).
+- Java regular expressions (`match`, `match2`, `stringreplaceall`, `stringtolist` and the `Regex` calls the X-Ray
+  writes): possessive quantifiers (`.*+` as an atomic group), `\x{h..h}`, `\Q...\E`, `\h`, `\H`, `\R`, the POSIX
+  classes `\p{Lower}` etc., and a backslash before `_` or another non-letter that .NET refuses (`[a-z\_]`).
+- `format(number, pattern)` is Java's DecimalFormat (half-even, `0`, `#`, grouping, prefix/suffix, `%`).
+- Simulation: a query action's `DateFormat` / `NumberFormat` / `XmlDateFormat` / `XmlNumberFormat` read by a link
+  (left unresolved in the default file) is the action's setting, else the template's, else MII's default
+  (`MM/dd/yyyy HH:mm:ss`, `yyyy-MM-dd'T'HH:mm:ss`, empty). This was the cause of `"0001-01-01T00:00:00" is no
+  dateTime` in trxTimeTicketHandler; a link of `0001-01-01T00:00:00` into a dateTime is no longer refused.
+- Simulation: the template's `NumberFormat` (or the action's `XmlNumberFormat` / `NumberFormat`, which win in that
+  order: `XmlNumberFormat` of action and template, then `NumberFormat` of action and template) is applied to
+  floating-point values of the result with Java's DecimalFormat, half-even (guide: "a non-empty NumberFormat rounds
+  every floating-point value"). `SimQuery.NumberFormat` tells the query service; `SimQuery.FloatColumns` may name the
+  floating-point columns, otherwise every value with a decimal point or an exponent counts as one (assumed). The value
+  is rounded as the decimal it reads as (BigDecimal); a DOUBLE column formatted by Java from its binary value may round
+  a tie differently (assumed).
+- Simulation: the converted file runs on the current X-Ray runtime, whatever version wrote it (the runtime of a 2.5
+  file is replaced); a query service error without an action name gets the action that ran the query (Catch Source).
+- `web/test/simrun.mjs`: XPath, Java regex, query DateFormat, NumberFormat and XmlNumberFormat checks (35 in all).
+
 ## 2.6.0 - 2026-10-28
 
 Simulation mode (Tim: "Du musst nur TRX-Eigenschaften mit emulieren"): the X-Ray runs the way MII runs the

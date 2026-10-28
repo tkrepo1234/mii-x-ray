@@ -18,6 +18,7 @@
   <ItemGroup>
     <Compile Include="*.cs" />
     <EmbeddedResource Include="SimulationRuntime.txt" LogicalName="MiiXRay.SimulationRuntime.txt" />
+    <EmbeddedResource Include="..\..\src\Generate\RuntimeSource.txt" LogicalName="MiiXRay.RuntimeSource.txt" />
     <Reference Include="Microsoft.CodeAnalysis" HintPath="$(RoslynFolder)\Microsoft.CodeAnalysis.dll" Private="true" />
     <Reference Include="Microsoft.CodeAnalysis.CSharp" HintPath="$(RoslynFolder)\Microsoft.CodeAnalysis.CSharp.dll" Private="true" />
   </ItemGroup>

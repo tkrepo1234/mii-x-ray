@@ -38,6 +38,14 @@ public sealed class SimQuery
 
     /// <summary>The values of the ? in Sql, in order (string, long, double, bool, DateTime or null).</summary>
     public List<object> Values { get; } = [];
+
+    /// <summary>The number format MII applies to floating-point values of the result (the action's XmlNumberFormat or
+    /// NumberFormat, else the template's); empty: values as the database returns them.</summary>
+    public string NumberFormat { get; set; }
+
+    /// <summary>The columns that hold floating-point values (the service may fill it; null: every value with a
+    /// decimal point or an exponent counts as one).</summary>
+    public HashSet<string> FloatColumns { get; set; }
 }
 
 /// <summary>One parameter slot of a query.</summary>
@@ -106,6 +114,12 @@ public sealed class Query(string templatePath, string text)
     /// <summary>MII's RowCount (0: not set).</summary>
     public int RowCount { get; set; }
 
+    /// <summary>NumberFormat configured on the action (null: the template's).</summary>
+    public string NumberFormat { get; set; }
+
+    /// <summary>XmlNumberFormat configured on the action (null: the template's).</summary>
+    public string XmlNumberFormat { get; set; }
+
     public SortedDictionary<int, SimQueryParameter> Slots { get; } = [];
 
     /// <summary>A text parameter; null (a link that failed) leaves the slot unset.</summary>
@@ -130,7 +144,8 @@ public sealed class Query(string templatePath, string text)
 #region MII simulation
 
 /// <summary>A query template as the file header describes it.</summary>
-public sealed record MiiSimTemplate(string Kind, string Mode, bool Typed, Dictionary<int, string> Defaults, Dictionary<int, string> Types, Dictionary<int, string> Names);
+public sealed record MiiSimTemplate(string Kind, string Mode, bool Typed, Dictionary<int, string> Defaults, Dictionary<int, string> Types, Dictionary<int, string> Names,
+    string NumberFormat = "", string XmlNumberFormat = "", string DateFormat = "");
 
 /// <summary>The logic class of a simulation-mode file.</summary>
 public interface IMiiSimLogic
@@ -378,7 +393,7 @@ public sealed class MiiSim
 
         DateTime result = Mii.ToDateTime(value);
 
-        if (result == DateTime.MinValue && StrictLinkConversions)
+        if (result == DateTime.MinValue && StrictLinkConversions && !Mii.ToStr(value).Trim().StartsWith("0001-01-01"))
         {
             throw new FormatException("Conversion Exception: \"" + Mii.ToStr(value) + "\" is no dateTime");
         }
@@ -664,9 +679,15 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         {
             if (ThrowOnActionError)
             {
-                if (exception is MiiException)
+                if (exception is MiiException named && !string.IsNullOrEmpty(named.ActionName))
                 {
                     throw;
+                }
+
+                if (exception is MiiException unnamed)
+                {
+                    // a service error without an action: the action that ran it (Catch output Source)
+                    throw new MiiException(exception.Message, actionName, !string.IsNullOrEmpty(unnamed.ActionType) ? unnamed.ActionType : actionType);
                 }
 
                 throw new MiiException(exception.Message, actionName, actionType);
@@ -690,7 +711,9 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
 /// <summary>The queries of a simulation-mode file: builds the statement as MII does and maps the rows.</summary>
 public sealed class MiiSimQueries(MiiSim simulation)
 {
-    private static readonly Regex Placeholder = new Regex(@"('?)\[Param\.(\d+)\]('?)");
+    private static readonly Regex FloatText = new Regex(@"^\s*[+-]?(\d+\.\d*|\.\d+|\d+(\.\d*)?[eE][+-]?\d+)\s*$");
+
+    private static readonly Regex Placeholder =new Regex(@"('?)\[Param\.(\d+)\]('?)");
 
     public List<T> Execute<T>(Query query) where T : MiiRow, new()
     {
@@ -709,7 +732,15 @@ public sealed class MiiSimQueries(MiiSim simulation)
 
             foreach (KeyValuePair<string, string> cell in row)
             {
-                SetColumn(record, cell.Key, cell.Value);
+                string text = cell.Value;
+
+                if (text != null && !string.IsNullOrEmpty(request.NumberFormat)
+                    && (request.FloatColumns != null ? request.FloatColumns.Contains(cell.Key) : FloatText.IsMatch(text)))
+                {
+                    text = Mii.JavaDecimalFormat(text, request.NumberFormat);
+                }
+
+                SetColumn(record, cell.Key, text);
             }
 
             result.Add(record);
@@ -734,6 +765,7 @@ public sealed class MiiSimQueries(MiiSim simulation)
             Typed = typed,
             RowCount = query.RowCount,
             TemplateText = query.Text,
+            NumberFormat = new[] { query.XmlNumberFormat, template?.XmlNumberFormat, query.NumberFormat, template?.NumberFormat }.FirstOrDefault((format) => !string.IsNullOrEmpty(format)) ?? "",
         };
         SortedDictionary<int, SimQueryParameter> slots = new SortedDictionary<int, SimQueryParameter>(query.Slots);
 

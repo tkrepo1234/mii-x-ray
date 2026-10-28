@@ -33,18 +33,26 @@ public sealed class Template
     public Dictionary<int, string> Types { get; } = [];
 
     public Dictionary<int, string> Names { get; } = [];
+
+    /// <summary>The template settings of the header overview (DateFormat, NumberFormat, ...).</summary>
+    public Dictionary<string, string> Settings { get; } = [];
+
+    public string Setting(string name) => Settings.TryGetValue(name, out string value) ? value : "";
 }
 
 /// <summary>Turns a default-mode X-Ray into the simulation mode (see SimulationRuntime.txt for what it emulates).</summary>
 public sealed class Converter(List<MetadataReference> references)
 {
-    public const string ToolVersion = "2.6.0";
+    public const string ToolVersion = "2.6.1";
 
     private const string ServicesRegion = "#region Services (implement these to run the code)";
 
     private static readonly string[] StrictConversions = ["ToInt", "ToLong", "ToDouble", "ToDecimal", "ToDateTime"];
 
-    private static readonly string Runtime = LoadRuntime();
+    private static readonly string Runtime = LoadRuntime("MiiXRay.SimulationRuntime.txt");
+
+    /// <summary>The current X-Ray runtime: a converted file runs on it whatever version wrote the file.</summary>
+    private static readonly string XRayRuntime = LoadRuntime("MiiXRay.RuntimeSource.txt");
 
     public string Convert(string original)
     {
@@ -67,9 +75,9 @@ public sealed class Converter(List<MetadataReference> references)
         return Apply(text, conversion.Edits).Replace("\n", "\r\n");
     }
 
-    private static string LoadRuntime()
+    private static string LoadRuntime(string name)
     {
-        using Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("MiiXRay.SimulationRuntime.txt");
+        using Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name);
         using StreamReader reader = new StreamReader(stream, Encoding.UTF8);
         return reader.ReadToEnd().TrimStart('﻿').Replace("\r\n", "\n");
     }
@@ -210,6 +218,18 @@ public sealed class Converter(List<MetadataReference> references)
                         }
                     }
                 }
+                else if (content.StartsWith("settings: "))
+                {
+                    foreach (string item in Regex.Split(content.Substring("settings: ".Length), @", (?=[A-Za-z][\w.]* = )"))
+                    {
+                        int equals = item.IndexOf(" = ", StringComparison.Ordinal);
+
+                        if (equals > 0)
+                        {
+                            current.Settings[item.Substring(0, equals)] = item.Substring(equals + 3);
+                        }
+                    }
+                }
             }
         }
 
@@ -322,10 +342,10 @@ public sealed class Converter(List<MetadataReference> references)
         private void ConvertRuntime()
         {
             int start = text.IndexOf(ServicesRegion, StringComparison.Ordinal);
-            int end = text.IndexOf("#endregion", start, StringComparison.Ordinal) + "#endregion".Length;
             int split = Runtime.IndexOf("#region MII simulation", StringComparison.Ordinal);
-            Replace(new Microsoft.CodeAnalysis.Text.TextSpan(start, end - start), TemplatesClass() + "\n" + Runtime.Substring(0, split).TrimEnd());
-            Insert(text.Length, (text.EndsWith("\n") ? "" : "\n") + "\n" + Runtime.Substring(split).TrimEnd() + "\n", Opening);
+            int region = XRayRuntime.IndexOf("#region X-Ray runtime", StringComparison.Ordinal);
+            Replace(new Microsoft.CodeAnalysis.Text.TextSpan(start, text.Length - start), TemplatesClass() + "\n" + Runtime.Substring(0, split).TrimEnd()
+                + "\n\n" + XRayRuntime.Substring(region).TrimEnd() + "\n\n" + Runtime.Substring(split).TrimEnd() + "\n");
         }
 
         private string TemplatesClass()
@@ -340,7 +360,9 @@ public sealed class Converter(List<MetadataReference> references)
             foreach (Template template in templates.Values)
             {
                 lines.Add("        [" + Comments.Literal(template.Path) + "] = new(" + Comments.Literal(template.Kind) + ", " + Comments.Literal(template.Mode) + ", "
-                    + (template.Typed ? "true" : "false") + ", " + Slots(template.Defaults) + ", " + Slots(template.Types) + ", " + Slots(template.Names) + "),");
+                    + (template.Typed ? "true" : "false") + ", " + Slots(template.Defaults) + ", " + Slots(template.Types) + ", " + Slots(template.Names)
+                    + ", " + Comments.Literal(template.Setting("NumberFormat")) + ", " + Comments.Literal(template.Setting("XmlNumberFormat"))
+                    + ", " + Comments.Literal(template.Setting("DateFormat")) + "),");
             }
 
             lines.Add("    };");
@@ -375,7 +397,7 @@ public sealed class Converter(List<MetadataReference> references)
 
         /// <summary>new Query(text) knows its template; AddParameter / AddTypedParameter become SetParameter with the slot
         /// (and an incoming link in a transaction). Returns true when the statement was one of these.</summary>
-        public bool ConvertQueryStatement(StatementSyntax statement, string templatePath, string frame, string actionName)
+        public bool ConvertQueryStatement(StatementSyntax statement, string templatePath, string frame, string actionName, ActionContext context = null)
         {
             if (statement is LocalDeclarationStatementSyntax declaration
                 && declaration.Declaration.Variables.Count == 1
@@ -418,6 +440,22 @@ public sealed class Converter(List<MetadataReference> references)
 
                 QuerySlots[variable] = slots;
                 Insert(creation.ArgumentList.OpenParenToken.Span.End, Comments.Literal(templatePath ?? "") + ", ", Opening);
+                List<string> formats = [];
+
+                foreach (string format in new[] { "NumberFormat", "XmlNumberFormat" })
+                {
+                    (string Name, string Value, bool Linked) setting = context == null ? default : context.Settings.FirstOrDefault((item) => item.Name == format);
+
+                    if (setting.Name != null && !setting.Linked && setting.Value.Length > 0)
+                    {
+                        formats.Add(format + " = " + Comments.Literal(setting.Value));
+                    }
+                }
+
+                if (formats.Count > 0)
+                {
+                    Insert(creation.Span.End, " { " + string.Join(", ", formats) + " }", Opening);
+                }
                 return true;
             }
 
@@ -681,6 +719,8 @@ public sealed class Converter(List<MetadataReference> references)
             file.ActionVariables = actionVariables.Keys.ToHashSet();
             WrapReads();
             ConvertStatements();
+            ResolveQuerySettings();
+            WrapRegexPatterns();
 
             // the start: enter, external call, inputs
             List<string> head = [indent + "var " + frame + " = " + file.Simulation + ".Enter(" + Comments.Literal(method.Path) + ", "
@@ -828,6 +868,11 @@ public sealed class Converter(List<MetadataReference> references)
             {
                 context = Comments.Update(context, Comments.Lines(statement.GetLeadingTrivia()));
 
+                if (!string.IsNullOrWhiteSpace(context.Setting("QueryTemplate")))
+                {
+                    queryActions[context.Name] = context;
+                }
+
                 if (statement is ExpressionStatementSyntax || statement is LocalDeclarationStatementSyntax)
                 {
                     ConvertLeaf(statement, context);
@@ -835,9 +880,68 @@ public sealed class Converter(List<MetadataReference> references)
             }
         }
 
+        private readonly Dictionary<string, ActionContext> queryActions = [];
+
+        private static readonly Dictionary<string, string> FormatDefaults = new()
+        {
+            ["DateFormat"] = "MM/dd/yyyy HH:mm:ss",
+            ["XmlDateFormat"] = "yyyy-MM-dd'T'HH:mm:ss",
+            ["NumberFormat"] = "",
+            ["XmlNumberFormat"] = "",
+        };
+
+        /// <summary>Query.DateFormat and the like, which the default mode leaves unresolved: the action's setting, else the
+        /// template's, else MII's default (DateFormat MM/dd/yyyy HH:mm:ss).</summary>
+        private void ResolveQuerySettings()
+        {
+            foreach (InvocationExpressionSyntax invocation in method.Flow.SelectMany((item) => item.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()))
+            {
+                if (invocation.Expression.ToString() != "Mii.Unresolved" || invocation.ArgumentList.Arguments.Count != 1
+                    || invocation.ArgumentList.Arguments[0].Expression is not LiteralExpressionSyntax literal)
+                {
+                    continue;
+                }
+
+                string reference = literal.Token.ValueText;
+                int dot = reference.IndexOf('.');
+
+                if (dot < 0 || !queryActions.TryGetValue(reference.Substring(0, dot), out ActionContext action)
+                    || !FormatDefaults.TryGetValue(reference.Substring(dot + 1), out string fallback))
+                {
+                    continue;
+                }
+
+                string name = reference.Substring(dot + 1);
+                (string Name, string Value, bool Linked) configured = action.Settings.FirstOrDefault((item) => item.Name == name);
+                string value = configured.Name != null && configured.Value.Length > 0 ? configured.Value : "";
+
+                if (value.Length == 0 && file.Templates.TryGetValue(action.Setting("QueryTemplate").Trim(), out Template template))
+                {
+                    value = template.Setting(name);
+                }
+
+                file.Replace(invocation.Span, Comments.Literal(value.Length > 0 ? value : fallback));
+            }
+        }
+
+        /// <summary>Patterns of the Regex calls the X-Ray writes for match() are Java patterns: Mii.JavaPattern.</summary>
+        private void WrapRegexPatterns()
+        {
+            foreach (InvocationExpressionSyntax invocation in method.Flow.SelectMany((item) => item.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()))
+            {
+                if (invocation.Expression is MemberAccessExpressionSyntax member && member.Expression.ToString() == "Regex"
+                    && invocation.ArgumentList.Arguments.Count >= 2)
+                {
+                    ExpressionSyntax pattern = invocation.ArgumentList.Arguments[1].Expression;
+                    file.Insert(pattern.SpanStart, "Mii.JavaPattern(", 104);
+                    file.Insert(pattern.Span.End, ")", 6);
+                }
+            }
+        }
+
         private void ConvertLeaf(StatementSyntax statement, ActionContext context)
         {
-            if (file.ConvertQueryStatement(statement, TemplateOf(statement, context), frame, context.Name))
+            if (file.ConvertQueryStatement(statement, TemplateOf(statement, context), frame, context.Name, context))
             {
                 return;
             }

@@ -132,6 +132,44 @@ const objects = {
       step('ActionSequence', 'Sequence_2', { name: 'Typed', incoming: [['Typed.Param.1', '"5"']] }),
     ],
   }),
+  'SIM/trxXPath.trx': trx({
+    outputs: [['C1', 'string', ''], ['C2', 'string', ''], ['C3', 'string', '']],
+    locals: [['Doc', 'xml', '<Rowsets><Rowset><Row><A>1</A></Row><Row><A>2</A></Row></Rowset></Rowsets>']],
+    actions: [['Read', 'Assignment', {}]],
+    steps: [step('ActionSequence', 'Sequence_1', {
+      name: 'Read',
+      outgoing: [['Transaction.C1', 'Local.Doc{count(/Rowsets/Rowset/Row/)}'], ['Transaction.C2', 'first(getlistfromxpath(Local.Doc, "count(//Row[A=\'1\'])"))'],
+        ['Transaction.C3', 'Local.Doc{sum(//A) div 4}']],
+    })],
+  }),
+  'SIM/trxRegex.trx': trx({
+    outputs: [['R1', 'string', ''], ['R2', 'boolean', 'false'], ['R3', 'string', ''], ['R4', 'boolean', 'false']],
+    actions: [['Work', 'Assignment', {}]],
+    steps: [step('ActionSequence', 'Sequence_1', {
+      name: 'Work',
+      outgoing: [['Transaction.R1', 'stringreplaceall("ResourceBO:M,X", ":.*+$", "")'], ['Transaction.R2', 'match("ab", "^\\\\p{Lower}+$")'],
+        ['Transaction.R3', 'stringreplaceall("a.b*c", "\\\\Q.b*\\\\E", "-")'], ['Transaction.R4', 'match("a_b", "^[a-z\\\\_]+$")']],
+    })],
+  }),
+  'SIM/trxFormats.trx': trx({
+    outputs: [['D', 'string', ''], ['DT', 'dateTime', ''], ['F', 'string', ''], ['G', 'string', ''], ['I', 'string', ''], ['F2', 'string', '']],
+    actions: [['Date', 'IlluminatorSQLQueryObject', { QueryTemplate: 'SIM/sqlDate' }], ['Number', 'IlluminatorSQLQueryObject', { QueryTemplate: 'SIM/sqlNumber' }],
+      ['Number2', 'IlluminatorSQLQueryObject', { QueryTemplate: 'SIM/sqlNumber', XmlNumberFormat: '0.0' }]],
+    steps: [
+      step('ActionSequence', 'Sequence_1', {
+        name: 'Date',
+        outgoing: [['Transaction.D', 'dateformat(Date.Results{/Rowsets/Rowset/Row/D}, Date.DateFormat, "yyyy-MM-dd\'T\'HH:mm:ss")'],
+          ['Transaction.DT', 'dateformat(Date.Results{/Rowsets/Rowset/Row/D}, Date.DateFormat, "yyyy-MM-dd\'T\'HH:mm:ss")']],
+      }),
+      step('ActionSequence', 'Sequence_2', {
+        name: 'Number',
+        outgoing: [['Transaction.F', 'Number.Results{/Rowsets/Rowset/Row/F}'], ['Transaction.G', 'Number.Results{/Rowsets/Rowset/Row/G}'], ['Transaction.I', 'Number.Results{/Rowsets/Rowset/Row/I}']],
+      }),
+      step('ActionSequence', 'Sequence_3', { name: 'Number2', outgoing: [['Transaction.F2', 'Number2.Results{/Rowsets/Rowset/Row/F}']] }),
+    ],
+  }),
+  'SIM/sqlDate.tqsq': sql('select D from T', { UseTypedParams: 'F', DateFormat: 'dd.MM.yyyy HH:mm:ss' }),
+  'SIM/sqlNumber.tqsq': sql('select F, G, I from T', { UseTypedParams: 'F', NumberFormat: '0.00' }),
   'SIM/sqlText.tqsq': sql("select '[Param.1]' as A, '[Param.2]' as B, '[Param.3]' as C, N from DUMMY", { UseTypedParams: 'F', 'Param.2': 'dflt', 'Param.3': '' }),
   'SIM/sqlTyped.tqsq': sql('select A, N from T where A = [Param.1] and B = [Param.2]', { UseTypedParams: 'T', 'ParamType.1': 'Integer', 'ParamType.2': 'String', 'Param.2': 'z' }),
 };
@@ -157,6 +195,9 @@ public static class Harness
         Run("action0", "SIM/trxActionError0", []);
         Run("action1", "SIM/trxActionError1", []);
         Run("query", "SIM/trxQuery", []);
+        Run("xpath", "SIM/trxXPath", []);
+        Run("regex", "SIM/trxRegex", []);
+        Run("formats", "SIM/trxFormats", []);
     }
 
     private static void Run(string label, string path, Dictionary<string, string> inputs)
@@ -188,6 +229,17 @@ public static class Harness
         public IList<IDictionary<string, string>> Execute(SimQuery query)
         {
             Console.WriteLine(label + " SQL " + query.Sql + " VALUES " + string.Join(",", query.Values.Select((value) => value == null ? "null" : value.GetType().Name + ":" + value)));
+            if (query.TemplatePath == "SIM/sqlDate")
+            {
+                return [new Dictionary<string, string> { ["D"] = "28.10.2026 10:00:00" }];
+            }
+
+            if (query.TemplatePath == "SIM/sqlNumber")
+            {
+                Console.WriteLine(label + " NUMBERFORMAT " + query.NumberFormat);
+                return [new Dictionary<string, string> { ["F"] = "2.675", ["G"] = "1.005", ["I"] = "12" }];
+            }
+
             return [new Dictionary<string, string> { ["A"] = "r1  ", ["N"] = null }];
         }
     }
@@ -314,5 +366,18 @@ has("query SQL select 'x' as A, 'dflt' as B, '' as C, N from DUMMY VALUES ", 'te
 has('query SQL select A, N from T where A = ? and B = ? VALUES Int64:5,String:z', 'typed parameters: bound as ?, the unset slot takes the template default');
 has('query A=r1', 'trailing blanks of a text column are cut');
 has('query N=---', 'a null text column is ---');
+has('xpath C1=2', 'XPath: a location path ending with "/" counts the rows (count(/Rowsets/Rowset/Row/))');
+has('xpath C2=1', 'getlistfromxpath with count(): one element with the number');
+has('xpath C3=0.75', 'XPath: a number result as text');
+has('regex R1=ResourceBO', 'Java regex: possessive quantifier :.*+$');
+has('regex R2=true', 'Java regex: POSIX class \\p{Lower}');
+has('regex R3=a-c', 'Java regex: \\Q...\\E');
+has('regex R4=true', 'Java regex: a backslash before _ quotes it (.NET refuses \\_)');
+has('formats D=2026-10-28T10:00:00', 'Query.DateFormat is the template DateFormat (not unresolved)');
+has('formats DT=2026-10-28T10:00:00', 'a date link into a dateTime output converts');
+has('formats F=2.68', 'NumberFormat 0.00 rounds half-even (2.675 -> 2.68)');
+has('formats G=1.00', 'NumberFormat 0.00 rounds half-even (1.005 -> 1.00)');
+has('formats I=12', 'NumberFormat leaves integer values');
+has('formats F2=2.7', 'the action XmlNumberFormat 0.0 wins over the template NumberFormat');
 console.log(failures === 0 ? 'OK (' + simulationFile + ')' : failures + ' failure(s), see ' + join(workFolder, 'output.txt'));
 process.exit(failures === 0 ? 0 : 1);
