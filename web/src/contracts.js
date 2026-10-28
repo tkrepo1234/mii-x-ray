@@ -87,7 +87,9 @@ export class QueryContract {
   constructor(query) {
     this.query = query;
     this.variableName = Naming.camel(query.shortName);
-    this.parameters = []; // { slot, name }
+    this.parameters = []; // { slot, name, type }
+    // how [Param.N] gets its value: 'typed' (bound, UseTypedParams), 'text' (replaced as text) or null (other kinds)
+    this.parameterMode = query.kind === MiiQueryKind.Sql || query.kind === MiiQueryKind.Mdo ? (query.typedParameters ? 'typed' : 'text') : null;
     this.result = null;
     this.xacuteTarget = null;
     this.callers = [];
@@ -95,6 +97,24 @@ export class QueryContract {
 
   findParameter(slot) {
     return this.parameters.find((p) => p.slot === slot) || null;
+  }
+
+  /** The comment above the parameters: how [Param.N] gets its value and which name (and type) each slot has. */
+  parameterComment() {
+    const slots = this.parameters.map((p) => '[Param.' + p.slot + '] = ' + p.name + (this.parameterMode === 'typed' ? ' ' + (p.type || '(no type)') : ''));
+
+    if (this.parameterMode === 'typed') {
+      return '// typed parameters (bound as statement parameters, no quoting): ' + slots.join(', ');
+    }
+
+    return this.parameterMode === 'text' ? '// text parameters (replaced as text, callers quote and escape): ' + slots.join(', ') : '// ' + slots.join(', ');
+  }
+
+  /** The statement that sets one parameter: AddTypedParameter for a bound one, AddParameter for text. */
+  addParameterCode(variable, parameter, value) {
+    return this.parameterMode === 'typed'
+      ? variable + '.AddTypedParameter(' + CsLiteral.string(parameter.name) + ', ' + CsLiteral.string(parameter.type || '') + ', ' + value + ');'
+      : variable + '.AddParameter(' + CsLiteral.string(parameter.name) + ', ' + value + ');';
   }
 }
 
@@ -350,7 +370,16 @@ function buildQuery(context, contract) {
       baseName = query.xacuteMappedTargets.get(parameter.slot);
     }
 
-    contract.parameters.push({ slot: parameter.slot, name: names.claim(baseName) });
+    contract.parameters.push({ slot: parameter.slot, name: names.claim(baseName), type: parameter.type });
+  }
+
+  if (contract.parameterMode === 'typed') {
+    const quoted = [...new Set([...query.text.matchAll(/'\[Param\.(\d+)\]'/g)].map((match) => '[Param.' + match[1] + ']'))];
+
+    if (quoted.length > 0) {
+      context.note(query.path, 'typed parameters, but ' + quoted.join(', ') + ' stand in quotes: a bound parameter inside quotes is no parameter '
+        + '(the placeholder stays literal text; unverified on MII)');
+    }
   }
 
   if (query.kind === MiiQueryKind.Sql || query.kind === MiiQueryKind.Mdo) {

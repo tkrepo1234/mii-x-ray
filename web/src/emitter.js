@@ -11,7 +11,7 @@ import { ContractFactory } from './rowset.js';
 import { ContractBuilder } from './contracts.js';
 import { ExpressionTranslator, convertTo, toStringCode } from './translator.js';
 import { CsType, TypeKind, TypedCode, Precedence, Naming, CsLiteral } from './types.js';
-import { placeDeclarations } from './placer.js';
+import { placeDeclarations, withMiiName } from './placer.js';
 
 const ActionKind = {
   None: 'None', TransactionCall: 'TransactionCall', Query: 'Query', QueryCommand: 'QueryCommand', Xacute: 'Xacute',
@@ -387,15 +387,15 @@ export class TransactionEmitter {
     lines.push('{');
 
     // outputs live for the whole method (they are returned); locals and action results move to where they are set
-    const body = this._contract.outputs.map((output) => output.type.name + ' ' + output.name + ' = ' + output.initializer + ';');
+    const body = this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', 'Transaction.' + output.miiName));
     const candidates = [];
     const configuration = [];
 
     for (const local of this._contract.locals) {
       if (local.initializer === ContractBuilder.emptyValue(local.type)) {
-        candidates.push({ type: local.type.name, name: local.name, initializer: local.initializer, isCatch: false });
+        candidates.push({ type: local.type.name, name: local.name, miiName: 'Local.' + local.miiName, initializer: local.initializer, isCatch: false });
       } else {
-        configuration.push(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';');
+        configuration.push(...withMiiName(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';', 'Local.' + local.miiName));
       }
     }
 
@@ -403,12 +403,12 @@ export class TransactionEmitter {
       const symbol = this._actions.get(definition.name);
 
       if (symbol.variable !== null) {
-        candidates.push({ type: symbol.variableType.name, name: symbol.variable, initializer: symbol.initializer, isCatch: symbol.kind === ActionKind.Catch });
+        candidates.push({ type: symbol.variableType.name, name: symbol.variable, miiName: 'action ' + definition.name, initializer: symbol.initializer, isCatch: symbol.kind === ActionKind.Catch });
       }
     }
 
     for (const variable of placeDeclarations(flow, candidates)) {
-      body.push(variable.type + ' ' + variable.name + ' = ' + variable.initializer + ';');
+      body.push(...withMiiName(variable.type + ' ' + variable.name + ' = ' + variable.initializer + ';', variable.miiName));
     }
 
     body.push(...configuration);
@@ -429,16 +429,18 @@ export class TransactionEmitter {
     return lines;
   }
 
-  /** Every parameter is optional: a caller passes the inputs MII links, the others stay empty. */
+  /** Every parameter is optional: a caller passes the inputs MII links, the others stay empty. One parameter per line
+   * with its MII name. */
   _signature(isPublic) {
-    const parameters = this._contract.inputs.map((input) => input.type.name + ' ' + input.name + ' = default');
+    const inputs = this._contract.inputs;
     const head = (isPublic ? 'public ' : 'private ') + this._contract.returnTypeName + ' ' + this._contract.methodName + '(';
 
-    if (parameters.length <= 3) {
-      return [head + parameters.join(', ') + ')'];
+    if (inputs.length === 0) {
+      return [head + ')'];
     }
 
-    return [head].concat(parameters.map((parameter, index) => '    ' + parameter + (index < parameters.length - 1 ? ',' : ')')));
+    return [head].concat(inputs.map((input, index) => '    ' + input.type.name + ' ' + input.name + ' = default'
+      + (index < inputs.length - 1 ? ',' : ')') + ' // Transaction.' + input.miiName));
   }
 
   /** Steps in order; a Catch wraps everything before it (including the lines passed in) in a try block. */
@@ -1270,7 +1272,7 @@ export class TransactionEmitter {
     }
 
     if (query.parameters.length > 0) {
-      lines.push('// ' + query.parameters.map((p) => '[Param.' + p.slot + '] = ' + p.name).join(', '));
+      lines.push(query.parameterComment());
     }
 
     const variable = this._names.claim(query.variableName);
@@ -1284,7 +1286,7 @@ export class TransactionEmitter {
         continue;
       }
 
-      lines.push(variable + '.AddParameter(' + CsLiteral.string(parameter.name) + ', ' + args.get(number) + ');');
+      lines.push(query.addParameterCode(variable, parameter, args.get(number)));
     }
 
     if (symbol.kind !== ActionKind.QueryCommand) {

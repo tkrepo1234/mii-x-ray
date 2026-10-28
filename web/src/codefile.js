@@ -7,7 +7,7 @@ import { addBlankLines } from './placer.js';
 import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
 import { ObjectPath } from './sources.js';
 
-export const TOOL_VERSION = '2.3.0';
+export const TOOL_VERSION = '2.4.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -220,11 +220,11 @@ function queryMethod(contract, methodName) {
   const body = [];
 
   if (parameters.length > 0) {
-    body.push('// ' + parameters.map((item) => '[Param.' + item.parameter.slot + '] = ' + item.parameter.name).join(', '));
+    body.push(contract.parameterComment());
   }
 
   body.push('var ' + variable + ' = new Query(' + CsLiteral.string(query.text) + ');');
-  parameters.forEach((item) => body.push(variable + '.AddParameter(' + CsLiteral.string(item.parameter.name) + ', ' + item.name + ');'));
+  parameters.forEach((item) => body.push(contract.addParameterCode(variable, item.parameter, item.name)));
 
   if (!command && /^\s*[1-9]\d*\s*$/.test(query.rowCount)) {
     body.push(variable + '.RowCount = ' + query.rowCount.trim() + ';');
@@ -239,9 +239,13 @@ function readingRules() {
     '// How to read this file:',
     '//   - Every MII transaction is a method: its parameters are the MII inputs, its return value the MII outputs (a',
     '//     record when there are several). A caller passes the inputs it links; MII default values are not carried over.',
-    '//   - A query is a local Query variable: its text is the MII template text, AddParameter(name, value) sets a parameter;',
-    '//     the comment above it maps [Param.N] to the names. MII replaces [Param.N] by the value as text, there are no',
-    '//     bind variables; quoting and escaping are done by the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
+    '//   - A query is a local Query variable: its text is the MII template text; the comment above it maps [Param.N] to',
+    '//     the names. AddParameter(name, value): a text parameter (Use Typed Parameters off), MII replaces [Param.N] by the',
+    '//     value as text; quoting and escaping are done by the template and the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
+    '//     AddTypedParameter(name, type, value): Use Typed Parameters on, MII checks the value against the type and binds',
+    '//     it as a statement parameter; an unquoted [Param.N] is right there, a quoted one is no parameter (notes).',
+    '//   - A comment at a declaration gives the exact MII name (case as in MII): Transaction.X for an input or output,',
+    '//     Local.X, action X for the result of an action, column X for a rowset column.',
     '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
     '//   - MII rowset documents are lists of row records; FirstOrEmpty() and RowAt(n) give an empty row instead of null.',
     '//   - Conditions combine with & and |, not && and ||: MII evaluates every part (a later part is no guard).',
@@ -284,7 +288,10 @@ function queryOverview(contract) {
   const lines = ['//   ' + query.shortName + ' = ' + query.path + ' (' + kind + ')'];
 
   if (contract.parameters.length > 0) {
-    lines.push('//     parameters: ' + contract.parameters.map((p) => '[Param.' + p.slot + '] ' + p.name).join(', '));
+    const mode = contract.parameterMode === 'typed' ? ' (typed: bound as statement parameters)'
+      : contract.parameterMode === 'text' ? ' (text: replaced as text)' : '';
+    lines.push('//     parameters' + mode + ': ' + contract.parameters.map((p) => '[Param.' + p.slot + '] ' + p.name
+      + (contract.parameterMode === 'typed' ? ' ' + (p.type || '(no type)') : '')).join(', '));
   }
 
   lines.push('//     run by: ' + (contract.callers.length > 0 ? contract.callers.join('; ') : '(no action of these transactions)'));
@@ -314,7 +321,9 @@ function records(context) {
     }
 
     lines.push('', '/// <summary>The outputs of ' + xmlText(transaction.path) + '.</summary>');
-    lines.push('public sealed record ' + contract.resultRecordName + '(' + contract.outputs.map((o) => o.type.name + ' ' + o.resultName).join(', ') + ');');
+    lines.push('public sealed record ' + contract.resultRecordName + '(');
+    contract.outputs.forEach((output, index) => lines.push('    ' + output.type.name + ' ' + output.resultName
+      + (index < contract.outputs.length - 1 ? ',' : ');') + ' // Transaction.' + output.miiName));
   }
 
   for (const contract of context.contracts) {
@@ -323,11 +332,8 @@ function records(context) {
     const body = [];
 
     for (const column of contract.columns) {
-      if (column.propertyName !== column.name) {
-        body.push('/// <summary>Column ' + xmlText(column.name) + '.</summary>');
-      }
-
-      body.push('public ' + column.type.name + ' ' + column.propertyName + ' { get; set; }' + (column.type.kind === TypeKind.String ? ' = "";' : ''));
+      body.push('public ' + column.type.name + ' ' + column.propertyName + ' { get; set; }' + (column.type.kind === TypeKind.String ? ' = "";' : '')
+        + ' // column ' + column.name);
     }
 
     lines.push(...indent(body), '}');

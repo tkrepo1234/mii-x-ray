@@ -1,7 +1,8 @@
 #region Services (implement these to run the code)
 
-/// <summary>Runs queries. MII replaces every [Param.N] in the text by the parameter's value as text (no bind
-/// variables), so values that go into quotes are escaped by the callers (stringreplace "'" -> "''").</summary>
+/// <summary>Runs queries. A text parameter (AddParameter) replaces its [Param.N] in the text by the value as text, so
+/// values that go into quotes are escaped by the callers (stringreplace "'" -> "''"). A typed parameter
+/// (AddTypedParameter, MII's Use Typed Parameters) is checked against its type and bound as a statement parameter.</summary>
 public interface IQueryService
 {
     /// <summary>Runs a statement that returns rows and maps the columns to the properties of T by name.</summary>
@@ -23,7 +24,18 @@ public sealed class Query(string text)
     /// (0: not set).</summary>
     public int RowCount { get; set; }
 
+    /// <summary>The MII type (String, Integer, Timestamp, ...) of each typed parameter by name.</summary>
+    public Dictionary<string, string> ParameterTypes { get; } = [];
+
+    /// <summary>A text parameter: its [Param.N] is replaced by the value as text.</summary>
     public void AddParameter(string name, object value) => Parameters.Add(new(name, value));
+
+    /// <summary>A typed parameter: checked against the type and bound as a statement parameter.</summary>
+    public void AddTypedParameter(string name, string type, object value)
+    {
+        ParameterTypes[name] = type;
+        Parameters.Add(new(name, value));
+    }
 }
 
 /// <summary>Everything MII does that has no plain C# equivalent: SAP ME PAPI calls, web services, HTTP, mail, files,

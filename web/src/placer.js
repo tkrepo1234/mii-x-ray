@@ -51,8 +51,22 @@ function tryPlace(flow, variable) {
 
   const line = flow[assigned];
   const indentation = line.length - line.trimStart().length;
-  flow[assigned] = line.substring(0, indentation) + 'var ' + line.substring(indentation);
+  flow.splice(assigned, 1, ...withMiiName(line.substring(0, indentation) + 'var ' + line.substring(indentation), variable.miiName));
   return true;
+}
+
+/** A declaration with the exact MII name as a comment: at the end of a one-line statement, else on the line above
+ * (nothing may follow the opening quotes of a raw string). */
+export function withMiiName(line, miiName) {
+  if (!miiName) {
+    return [line];
+  }
+
+  if (!line.includes('\n') && line.trimEnd().endsWith(';')) {
+    return [line + ' // ' + miiName];
+  }
+
+  return [line.substring(0, line.length - line.trimStart().length) + '// ' + miiName, line];
 }
 
 /** "catch (Exception xError) ... x = xError;" becomes "catch (Exception x)". */

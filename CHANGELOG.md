@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.4.0 - 2026-10-28
+
+- **Exact MII names** at every declaration, as MII spells them: `// Transaction.X` at each input (one parameter per
+  line) and output (also in the result record), `// Local.X`, `// action X` for an action result, `// column X` at
+  each row property. The C# names (camelCase, PascalCase) lose the case; a rebuild needs the MII spelling.
+- **Typed parameters**: a SQL or MDO template with Use Typed Parameters sets its values with
+  `AddTypedParameter(name, type, value)` (bound as statement parameters), one without keeps `AddParameter` (replaced
+  as text). The comment above the call and the query overview name the mode and the `ParamType.N` of each slot; a
+  quoted `'[Param.N]'` in a typed template is a note. The reading rule no longer says that every parameter is text.
+
 ## 2.3.0 - 2026-10-28
 
 - **Raw ZIP** next to the C# file (`<Name>.xray.zip`): the loaded transactions and query templates exactly as the

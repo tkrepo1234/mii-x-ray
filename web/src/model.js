@@ -141,6 +141,7 @@ export class MiiQuery {
     this.mode = '';
     this.text = '';
     this.rowCount = ''; // RowCount of the template: MII returns at most this many rows
+    this.typedParameters = false; // UseTypedParams
     this.url = '';
     this.parameters = []; // { slot, description, type, defaultValue }
     this.xacuteTransaction = '';
@@ -203,6 +204,8 @@ export const ObjectReader = {
     query.rootName = root.localName;
     query.mode = root.getAttribute('Mode');
     query.rowCount = root.getAttribute('RowCount').trim();
+    // Use Typed Parameters: the values are bound as statement parameters instead of replacing [Param.N] as text
+    query.typedParameters = /^(t|true)$/i.test(root.getAttribute('UseTypedParams').trim());
 
     switch (root.localName) {
       case 'SQLQuery':
