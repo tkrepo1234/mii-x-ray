@@ -8,7 +8,7 @@ import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.6.3';
+export const TOOL_VERSION = '2.6.4';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -78,7 +78,7 @@ export function generateCode(graph, sourceDescription, runtimeText, now) {
     ...runtimeText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trimEnd().split('\n'),
   ];
 
-  const code = addBlankLines(lines).join('\n').replace(/\r\n/g, '\n');
+  const code = addBlankLines(lines.flatMap(commentContinued)).join('\n').replace(/\r\n/g, '\n');
   return {
     code: code.replace(/\n/g, '\r\n') + '\r\n',
     rootName: fileName,
@@ -315,7 +315,7 @@ function sharedPropertyOverview(property) {
   }
 
   const settings = property.definition.attributes.filter(([name, value]) => name !== 'Name' && name !== 'Project' && value.length > 0)
-    .map(([name, value]) => name + ' = ' + value);
+    .map(([name, value]) => name + ' = ' + value.replace(/\r\n?|\n/g, ' '));
   const lines = [head + ': ' + settings.join(', ')];
   const value = property.definition.defaultValue.replace(/\r\n?/g, '\n').split('\n');
 
@@ -326,6 +326,18 @@ function sharedPropertyOverview(property) {
   }
 
   return lines;
+}
+
+/** A comment line with a line break in an MII text goes on as comment lines, so the file still compiles. */
+function commentContinued(line) {
+  const match = /^(\s*)(\/\/\/?)/.exec(line);
+
+  if (match === null || !/[\r\n]/.test(line)) {
+    return [line];
+  }
+
+  const [first, ...rest] = line.split(/\r\n?|\n/);
+  return [first, ...rest.map((part) => match[1] + match[2] + '     ' + part)];
 }
 
 /** The web files as text constants. */

@@ -43,7 +43,7 @@ public sealed class Template
 /// <summary>Turns a default-mode X-Ray into the simulation mode (see SimulationRuntime.txt for what it emulates).</summary>
 public sealed class Converter(List<MetadataReference> references)
 {
-    public const string ToolVersion = "2.6.3";
+    public const string ToolVersion = "2.6.4";
 
     private const string ServicesRegion = "#region Services (implement these to run the code)";
 

@@ -1329,11 +1329,16 @@ public static class Mii
         return ToList(value).Count;
     }
 
-    /// <summary>append() works by reference in MII: the list itself gets the value.</summary>
-    public static List<string> Append(object list, object value)
+    /// <summary>append(list, value1, ...) works by reference in MII: the list itself gets the values.</summary>
+    public static List<string> Append(object list, params object[] values)
     {
         List<string> items = ToList(list);
-        items.Add(ToStr(value));
+
+        foreach (object value in values)
+        {
+            items.Add(ToStr(value));
+        }
+
         return items;
     }
 

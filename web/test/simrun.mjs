@@ -143,13 +143,14 @@ const objects = {
     })],
   }),
   'SIM/trxRegex.trx': trx({
-    outputs: [['R1', 'string', ''], ['R2', 'boolean', 'false'], ['R3', 'string', ''], ['R4', 'boolean', 'false'], ['I1', 'integer', '9'], ['I2', 'integer', '9'], ['I3', 'integer', '9']],
+    outputs: [['R1', 'string', ''], ['R2', 'boolean', 'false'], ['R3', 'string', ''], ['R4', 'boolean', 'false'], ['I1', 'integer', '9'], ['I2', 'integer', '9'], ['I3', 'integer', '9'], ['A1', 'integer', '0']],
     actions: [['Work', 'Assignment', {}]],
     steps: [step('ActionSequence', 'Sequence_1', {
       name: 'Work',
       outgoing: [['Transaction.R1', 'stringreplaceall("ResourceBO:M,X", ":.*+$", "")'], ['Transaction.R2', 'match("ab", "^\\\\p{Lower}+$")'],
         ['Transaction.R3', 'stringreplaceall("a.b*c", "\\\\Q.b*\\\\E", "-")'], ['Transaction.R4', 'match("a_b", "^[a-z\\\\_]+$")'],
-        ['Transaction.I1', 'stringindexof("football", "ball")'], ['Transaction.I2', 'stringindexof("football", "x")'], ['Transaction.I3', 'stringlastindexof("a;b;c", ";")']],
+        ['Transaction.I1', 'stringindexof("football", "ball")'], ['Transaction.I2', 'stringindexof("football", "x")'], ['Transaction.I3', 'stringlastindexof("a;b;c", ";")'],
+        ['Transaction.A1', 'size(append(list("a"), "b", "c", "d", "e"))']],
     })],
   }),
   'SIM/trxFormats.trx': trx({
@@ -479,6 +480,7 @@ has('regex R3=a-c', 'Java regex: \\Q...\\E');
 has('regex I1=5', 'stringindexof counts from 1 (stringindexof("football", "ball") = 5, measured on MII)');
 has('regex I2=0', 'stringindexof gives 0 for a missing part');
 has('regex I3=4', 'stringlastindexof counts from 1');
+has('regex A1=5', 'append(list, value1, ...) appends every value');
 has('regex R4=true','Java regex: a backslash before _ quotes it (.NET refuses \\_)');
 has('formats D=2026-10-28T10:00:00', 'Query.DateFormat is the template DateFormat (not unresolved)');
 has('formats DT=2026-10-28T10:00:00', 'a date link into a dateTime output converts');

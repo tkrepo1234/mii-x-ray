@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.6.4 - 2026-10-29
+
+Gaps found X-Raying ME_EI and ME/Production/Release (bls-project-002):
+
+- A shared property whose description (or any other setting) has a line break broke the header: the next line had
+  no `//` and the file did not compile. The settings of a shared property are one line now (line breaks as spaces,
+  as in the query overview), and every comment line of the file that still carries a line break of an MII text goes
+  on as comment lines.
+- `append(list, value1, ...)` takes any number of values (`Mii.Append` was two-argument only, CS1501 with five);
+  each value is appended to the list itself (by reference, as before).
+- `web/test/simrun.mjs`: 58 checks; `web/test/staticfiles.mjs` checks a description with a line break.
+
 ## 2.6.3 - 2026-10-28
 
 - A row record read from an MII document (query result, `Mii.ToRows`) stands for the Row it was read from: its text,

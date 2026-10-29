@@ -59,7 +59,7 @@ const trx = readFileSync(template, 'utf8')
   .replace(/<Assign xsi:type="\w+"><Name\/><Description\/><To>\w+\.InputXSL<\/To><From>[^<]*<\/From><\/Assign>/g, '')
   .replace('<IncomingLinks>', '<IncomingLinks><Assign xsi:type="Assign"><Name/><Description/><To>Local.FixtureSetting</To><From>Inline.FixtureSettings{"Mode"}</From></Assign>');
 const stylesheet = '<?xml version="1.0" encoding="UTF-8"?>\n<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"/>\n';
-const shared = '<?xml version="1.0" encoding="UTF-8"?><GlobalProperties><Property Cache="N" Name="FixtureSettings" Project="T" StorageType="0" Type="131072"><DefaultValue>{Mode=[string:fast]}</DefaultValue></Property></GlobalProperties>';
+const shared = '<?xml version="1.0" encoding="UTF-8"?><GlobalProperties><Property Cache="N" Description="first line&#10;second line" Name="FixtureSettings" Project="T" StorageType="0" Type="131072"><DefaultValue>{Mode=[string:fast]}</DefaultValue></Property></GlobalProperties>';
 const fixture = join(workFolder, 'fixture');
 rmSync(fixture, { recursive: true, force: true });
 
@@ -80,7 +80,8 @@ check(graph.files.get('T/WEB/xsl/Group.xsl') === stylesheet, 'stylesheet loaded'
 check(code.includes('//   T/WEB/xsl/Group.xsl = MiiFiles.Group_xsl'), 'web file in the header');
 check(code.includes('public const string Group_xsl = '), 'web file as constant');
 check(/Mii\.XslTransform\([^;]*MiiFiles\.Group_xsl\)/.test(code), 'stylesheet used from the constant');
-check(code.includes('//   Inline.FixtureSettings (project T): Cache = N, StorageType = 0, Type = 131072'), 'shared property in the header');
+check(code.includes('//   Inline.FixtureSettings (project T): Cache = N, Description = first line second line, StorageType = 0, Type = 131072'), 'shared property in the header');
+check(code.substring(0, code.indexOf('#nullable')).split(/\r?\n/).every((line) => line === '' || line.startsWith('//')), 'every header line is a comment (line breaks in MII texts)');
 check(code.includes('//     default: {Mode=[string:fast]}'), 'shared property default');
 console.log(failures === 0 ? 'OK (' + relative(process.cwd(), join(workFolder, 'trxXsl.xray.cs')) + ')' : failures + ' failure(s)');
 process.exit(failures === 0 ? 0 : 1);
