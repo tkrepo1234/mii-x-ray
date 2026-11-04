@@ -456,7 +456,7 @@ const { TypeKind, Naming, UniqueNames, CsLiteral, DEFAULT_LIMIT, limitedDefault 
 const { ObjectPath } = __require('sources.js');
 const { webFilePath } = __require('staticfiles.js');
 
-const TOOL_VERSION = '2.7.0';
+const TOOL_VERSION = '2.7.1';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -6502,7 +6502,7 @@ class UniqueNames {
 // ---------------------------------------------------------------------------------------------- default values
 
 /** Default values larger than this (UTF-8 bytes) are not written into the file. */
-const DEFAULT_LIMIT = 16384;
+const DEFAULT_LIMIT = 131072;
 
 /** The MII default as written into the file: the value, or "[n-bytes]" when it is larger than DEFAULT_LIMIT. */
 function limitedDefault(text) {

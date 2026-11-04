@@ -1,6 +1,6 @@
 // Checks the MII defaults in the default mode: X-Rays a small folder whose transactions have defaults of every type,
 // compiles it with a harness that calls the methods without arguments (and a caller that links one input) and checks
-// the values; a default larger than 16 KB stands as [n-bytes].
+// the values; a default larger than 128 KB stands as [n-bytes].
 //   node web/test/defaults.mjs <work folder>
 import { readFileSync, writeFileSync, mkdirSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -43,8 +43,8 @@ function trx({ inputs = [], outputs = [], locals = [], actions = [], steps = [] 
     + '<Steps>' + steps.join('') + '</Steps></Transaction>';
 }
 
-const big = 'x'.repeat(20000);
-const bigXml = '<R>' + 'y'.repeat(20000) + '</R>';
+const big = 'x'.repeat(140000);
+const bigXml = '<R>' + 'y'.repeat(140000) + '</R>';
 
 const objects = {
   'DEF/trxDefaults.trx': trx({
@@ -170,13 +170,13 @@ has('TrxDefaults OutNames=a,b', 'a list input default');
 check(lines.some((line) => /^TrxDefaults OutWhen=.*2021.*14:23/.test(line)), 'a dateTime input default');
 has('TrxDefaults OutDefault=kept', 'an output the flow does not set returns its default');
 has('TrxDefaults OutLocal=Ldef1new', 'locals start with their defaults');
-has('TrxDefaults OutBigLength=13', 'a text default larger than 16 KB is the text [20000-bytes]');
+has('TrxDefaults OutBigLength=14', 'a text default larger than 128 KB is the text [140000-bytes]');
 has('TrxCaller Site=L', 'a linked input wins over the default');
 has('TrxCaller Count=7', 'an input the caller does not link gets the callee default');
 has('TrxCaller Doc=row1', 'an XML input the caller does not link gets the callee default');
 check(code.includes('string site = "M",') && code.includes('bool flag = true,') && code.includes('int count = 7,'), 'constant defaults are parameter defaults');
-check(code.includes('string big = "[20000-bytes]",') && !code.includes(big), 'the large text default is left out');
-check(/default: \[20007-bytes\]/.test(code) && !code.includes('y'.repeat(100)), 'the large XML default is left out, the comment gives its size');
+check(code.includes('string big = "[140000-bytes]",') && !code.includes(big), 'the large text default is left out');
+check(/default: \[140007-bytes\]/.test(code) && !code.includes('y'.repeat(100)), 'the large XML default is left out, the comment gives its size');
 check(/\/\/ Local\.Replaced \(string\), default: never read/.test(code), 'a local declared where it is set keeps its default in the comment');
 check(!/Transaction\.Site \(string\), default/.test(code), 'a default the code holds is not repeated in the comment');
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.7.1 - 2026-11-04
+
+Tim, 2026-11-04: the limit of defaults written into the file is 128 KB (fixed), no longer 16 KB.
+
+- A default larger than 128 KB (UTF-8 bytes) stands as `[n-bytes]`; everything up to 128 KB is in the code. Found in
+  bls-project-003: the simulation of an X-Ray runs with the defaults of the file, and the 30 KB XSLT local of
+  trxGetSfcOperation started empty with the 16 KB limit (XSLT compile error).
+- `web/test/defaults.mjs` tests the limit with 140000-byte defaults.
+
 ## 2.7.0 - 2026-11-04
 
 Tim, 2026-11-04: the X-Ray of ME_EI/XML_FILE_INTERFACE (made with 2.5.1 on MII) did not compile, and defaults stood

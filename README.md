@@ -25,7 +25,7 @@ and a call tree per entry point.
 
 **Everything a rebuild needs is in the one file** (no export of MII objects): every declaration carries the exact MII
 name and type as a comment (`// Transaction.Site (string)`), the MII default value is set in the code as MII sets it
-(`string site = "M"`, XML in full; a default larger than 16 KB stands as `[n-bytes]`, see Limits); every action
+(`string site = "M"`, XML in full; a default larger than 128 KB stands as `[n-bytes]`, see Limits); every action
 lists its configured settings (`// MII settings (Type):`, linked ones marked, caches of the last test run left out);
 each method shows the transaction attributes, each query the template settings and parameter defaults. Web files the
 transactions name (stylesheet of an XSL transformation, document of an XML loader, schema of an XSD validation, URL
@@ -45,7 +45,7 @@ node web/build.mjs                                   builds web/dist/mii-x-ray.h
 node web/test/corpus.mjs <export folder> <work folder>  every transaction and every folder X-rayed and compiled as C# 12
 node web/test/equivalence.mjs <export folder> <C# output of --all>    JS against the C# console (2.1.x only)
 node web/test/staticfiles.mjs <export folder> <work folder>        web files and shared properties in the file
-node web/test/defaults.mjs <work folder>                           MII defaults in the code, [n-bytes] above 16 KB (runs on .NET)
+node web/test/defaults.mjs <work folder>                           MII defaults in the code, [n-bytes] above 128 KB (runs on .NET)
 node web/test/serve.mjs 5300 http://localhost:50100 dev:dev           the page at /XMII/CM/XRay/ with a Catalog proxy
 
 web/test/folder-source.js reads an export folder; it serves the tests only and is not part of the page.
@@ -184,7 +184,7 @@ ThrowOnLinkError off are marked.
 
 - **A faulty transaction gives faulty C#, as is.** Links to inputs or actions that no longer exist, references to
   undeclared properties and the like are kept and listed under *Notes* in the file header; X-Ray does not repair.
-- A default value larger than 16 KB (UTF-8 bytes) is not in the file: a text gets the text `"[n-bytes]"`, any other
+- A default value larger than 128 KB (UTF-8 bytes) is not in the file: a text gets the text `"[n-bytes]"`, any other
   type starts empty and the comment says `default: [n-bytes]` (n = the size). Shared property and query parameter
   defaults in the header likewise.
 - Over Xacute or the Runner an input that is not passed is empty in MII; C# gives it the parameter default (the
