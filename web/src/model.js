@@ -210,8 +210,9 @@ export const ObjectReader = {
     query.rootName = root.localName;
     query.mode = root.getAttribute('Mode');
     query.rowCount = root.getAttribute('RowCount').trim();
-    // Use Typed Parameters: the values are bound as statement parameters instead of replacing [Param.N] as text
-    query.typedParameters = /^(t|true)$/i.test(root.getAttribute('UseTypedParams').trim());
+    // Use Typed Parameters: the values are bound as statement parameters instead of replacing [Param.N] as text. MII
+    // stores T or F; "true" counts as off (measured on MII, bls-project-003, 2026-10-31)
+    query.typedParameters = /^t$/i.test(root.getAttribute('UseTypedParams').trim());
     query.attributes = root.attributes.map((attribute) => [attribute.name, attribute.value]);
 
     switch (root.localName) {

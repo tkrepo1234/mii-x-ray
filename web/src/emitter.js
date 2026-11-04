@@ -406,13 +406,20 @@ export class TransactionEmitter {
     lines.push('{');
 
     // outputs live for the whole method (they are returned); locals and action results move to where they are set
-    const body = this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', declarationComment('Transaction.', output)));
+    const body = this._contract.inputs.filter((input) => input.defaultStatement).flatMap((input) => input.defaultStatement);
+
+    if (body.length > 0) {
+      body.push('');
+    }
+
+    body.push(...this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', declarationComment('Transaction.', output))));
     const candidates = [];
     const configuration = [];
 
     for (const local of this._contract.locals) {
-      if (local.initializer === ContractBuilder.emptyValue(local.type)) {
-        candidates.push({ type: local.type.name, name: local.name, miiName: declarationComment('Local.', local), initializer: local.initializer, isCatch: false });
+      if (local.replaced) {
+        // declared where it is set, the default is not in the code: the comment keeps it
+        candidates.push({ type: local.type.name, name: local.name, miiName: declarationComment('Local.', local), placedMiiName: declarationComment('Local.', local, true), initializer: local.initializer, isCatch: false });
       } else {
         configuration.push(...withMiiName(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';', declarationComment('Local.', local)));
       }
@@ -461,10 +468,10 @@ export class TransactionEmitter {
     const lines = [head];
 
     inputs.forEach((input, index) => {
-      const declaration = '    ' + input.type.name + ' ' + input.name + ' = default' + (index < inputs.length - 1 ? ',' : ')');
+      const declaration = '    ' + input.type.name + ' ' + input.name + ' = ' + input.initializer + (index < inputs.length - 1 ? ',' : ')');
       const comment = declarationComment('Transaction.', input);
 
-      if (comment.length === 1) {
+      if (comment.length === 1 && !declaration.includes('\n')) {
         lines.push(declaration + ' // ' + comment[0]);
       } else {
         lines.push(...comment.map((text) => '    // ' + text), declaration);

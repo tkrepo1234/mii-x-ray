@@ -207,8 +207,13 @@ export class CatalogSource {
     }
 
     const text = await this._post({ Mode: 'Load', ObjectName: path, TemporaryFile: 'false', _: String(Date.now()) });
-    const answer = text.includes('FatalError') ? tryParseXml(text) : null;
-    return answer && answer.documentElement.localName === 'Rowsets' && descendants(answer, 'FatalError').length > 0 ? null : text;
+    const answer = text.includes('FatalError') || text.includes('Payload') ? tryParseXml(text) : null;
+
+    if (answer && answer.documentElement.localName === 'Rowsets' && descendants(answer, 'FatalError').length > 0) {
+      return null;
+    }
+
+    return filePayload(text, answer) ?? text;
   }
 
   async findSimilar(objectPath, maximum) {
@@ -317,6 +322,22 @@ function decodeBase64(text) {
   }
 
   return new TextDecoder('utf-8').decode(bytes).replace(/^﻿/, '');
+}
+
+// MII's HTML rendering of the Name/Type/Payload rowset ("xMII Dynamic HTML"): the title of the value cell holds the
+// Base64 of the file
+const HTML_PAYLOAD = /Column Name is Payload">Payload<\/td>\s*<td[^>]*title="Value of Row\d+ Column Value is ([A-Za-z0-9+/=\s]*)"/;
+
+/** The file of a Catalog Load answer that is a Name/Type/Payload rowset (as XML or as MII's HTML rendering of it, as
+ * the Catalog answers for an XML web file); null when the answer is the file itself. */
+function filePayload(text, answer) {
+  if (answer && answer.documentElement.localName === 'Rowsets') {
+    const payload = descendants(answer, 'Payload')[0];
+    return payload ? decodeBase64(payload.innerText.trim()) : null;
+  }
+
+  const match = text.includes('xMII Dynamic HTML') ? HTML_PAYLOAD.exec(text) : null;
+  return match ? decodeBase64(match[1]) : null;
 }
 
 /** The object type by file extension, for answers without a Type column. */

@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.7.0 - 2026-11-04
+
+Tim, 2026-11-04: the X-Ray of ME_EI/XML_FILE_INTERFACE (made with 2.5.1 on MII) did not compile, and defaults stood
+only in comments.
+
+- Why it did not compile: the line break in the description of `Persistent.SP_TARGET_ADDRESS_TAG_MAPPING` (fixed in
+  2.6.4). Every other error of that file (the "using" errors CS1529 and the string errors) followed from that one
+  line; with it the file compiles as it is. The page on MII has to be replaced by this version.
+- Defaults are set in the code as MII sets them (this replaces the decision of 2026-10-28, defaults as comments only):
+  - an input has its MII default as parameter default (text, boolean, numbers), so a caller that does not link it
+    gets the default, as in MII; XML, list, map and date inputs get it in the first lines of the method
+    (`x ??= ...;`, `if (x == default) { x = ...; }`);
+  - outputs and locals start with their MII default, XML in full (no shortened sample any more), a rowset document as
+    rows (`Mii.ToRows<T>(Mii.ParseXml(...))`);
+  - the declaration comment gives the default only where the code does not hold it (a local declared where the flow
+    sets it, a value C# cannot take as it is).
+- A default larger than 16 KB (UTF-8 bytes) is not written into the file: it stands as `[n-bytes]` (a text input or
+  local gets the text `"[n-bytes]"`, any other type starts empty and the comment says `default: [n-bytes]`). The same
+  for shared property defaults and query parameter defaults in the header. ME_EI/XML_FILE_INTERFACE: 2.6 MB -> 1.2 MB.
+- `UseTypedParams` is typed only for `T`; `true` counts as off, as MII runs it (bls-project-003, 2026-10-31).
+- An XML web file the Catalog answers as MII's HTML rendering of a Name/Type/Payload rowset ("xMII Dynamic HTML") is
+  decoded from its Payload, so `MiiFiles` holds the XML (bls-project-002 finding X3; the HTML form was seen in
+  2.5.1 output, the decoding is unverified on MII).
+- Simulation: inputs take the defaults the code holds (`MiiSim.InputOr`); a multi-line action setting keeps its
+  empty lines (bls-project-002 finding X4, a value stopped at its first empty line).
+- `web/test/defaults.mjs`: 19 checks (defaults of every type called without arguments and from a caller, 16 KB limit);
+  corpus 818/818, simrun 58/58, staticfiles, Tim's export of ME_EI/XML_FILE_INTERFACE 146/146 in both modes.
+
 ## 2.6.4 - 2026-10-29
 
 Gaps found X-Raying ME_EI and ME/Production/Release (bls-project-002):

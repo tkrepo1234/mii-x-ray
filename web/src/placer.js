@@ -51,7 +51,7 @@ function tryPlace(flow, variable) {
 
   const line = flow[assigned];
   const indentation = line.length - line.trimStart().length;
-  flow.splice(assigned, 1, ...withMiiName(line.substring(0, indentation) + 'var ' + line.substring(indentation), variable.miiName));
+  flow.splice(assigned, 1, ...withMiiName(line.substring(0, indentation) + 'var ' + line.substring(indentation), variable.placedMiiName || variable.miiName));
   return true;
 }
 

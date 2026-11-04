@@ -187,6 +187,25 @@ export class UniqueNames {
   }
 }
 
+// ---------------------------------------------------------------------------------------------- default values
+
+/** Default values larger than this (UTF-8 bytes) are not written into the file. */
+export const DEFAULT_LIMIT = 16384;
+
+/** The MII default as written into the file: the value, or "[n-bytes]" when it is larger than DEFAULT_LIMIT. */
+export function limitedDefault(text) {
+  const value = text || '';
+
+  if (value.length * 3 <= DEFAULT_LIMIT) {
+    return value;
+  }
+
+  const bytes = new TextEncoder().encode(value).length;
+  return bytes > DEFAULT_LIMIT ? '[' + bytes + '-bytes]' : value;
+}
+
+export const isOmittedDefault = (text) => /^\[\d+-bytes\]$/.test(text || '');
+
 // ---------------------------------------------------------------------------------------------- literals
 
 const isControl = (c) => {

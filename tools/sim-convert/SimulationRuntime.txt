@@ -583,6 +583,33 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         return MiiSim.FromText<T>(defaultText);
     }
 
+    /// <summary>An input whose MII default is C# code: the passed value when linked, else the default (a direct call
+    /// that passes nothing gets the default as well).</summary>
+    public T InputOr<T>(string name, T passed, T defaultValue)
+    {
+        if (Linked == null)
+        {
+            return passed is null || passed is DateTime date && date == default ? defaultValue : passed;
+        }
+
+        if (Linked.Contains(name))
+        {
+            return passed;
+        }
+
+        if (Xacute)
+        {
+            return MiiSim.Empty<T>();
+        }
+
+        if (Reused && Values.TryGetValue("Transaction." + name, out object kept))
+        {
+            return (T)kept;
+        }
+
+        return defaultValue;
+    }
+
     /// <summary>A property at the start: its value of the previous call (ResetState false) or the given value.</summary>
     public T Init<T>(string key, T value) => Reused && Values.TryGetValue(key, out object kept) ? (T)kept : value;
 

@@ -171,10 +171,12 @@ public static class Comments
                 continue;
             }
 
-            if (line.StartsWith("//     ") && context.Settings.Count > 0)
+            // a line of a multi-line value; an empty line of the value is "//" (the comment lines are trimmed at the end)
+            if ((line.StartsWith("//     ") || line == "//") && context.Settings.Count > 0)
             {
                 (string Name, string Value, bool Linked) last = context.Settings[^1];
-                context.Settings[^1] = (last.Name, last.Value.Length == 0 ? line.Substring(7) : last.Value + "\n" + line.Substring(7), last.Linked);
+                string part = line.Length > 7 ? line.Substring(7) : "";
+                context.Settings[^1] = (last.Name, last.Value.Length == 0 ? part : last.Value + "\n" + part, last.Linked);
                 continue;
             }
 

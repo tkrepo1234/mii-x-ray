@@ -24,7 +24,8 @@ transactions they call outside the folder as private methods, query templates no
 and a call tree per entry point.
 
 **Everything a rebuild needs is in the one file** (no export of MII objects): every declaration carries the exact MII
-name, type and default value as a comment (`// Transaction.Site (string), default: M`, XML in full); every action
+name and type as a comment (`// Transaction.Site (string)`), the MII default value is set in the code as MII sets it
+(`string site = "M"`, XML in full; a default larger than 16 KB stands as `[n-bytes]`, see Limits); every action
 lists its configured settings (`// MII settings (Type):`, linked ones marked, caches of the last test run left out);
 each method shows the transaction attributes, each query the template settings and parameter defaults. Web files the
 transactions name (stylesheet of an XSL transformation, document of an XML loader, schema of an XSD validation, URL
@@ -44,6 +45,7 @@ node web/build.mjs                                   builds web/dist/mii-x-ray.h
 node web/test/corpus.mjs <export folder> <work folder>  every transaction and every folder X-rayed and compiled as C# 12
 node web/test/equivalence.mjs <export folder> <C# output of --all>    JS against the C# console (2.1.x only)
 node web/test/staticfiles.mjs <export folder> <work folder>        web files and shared properties in the file
+node web/test/defaults.mjs <work folder>                           MII defaults in the code, [n-bytes] above 16 KB (runs on .NET)
 node web/test/serve.mjs 5300 http://localhost:50100 dev:dev           the page at /XMII/CM/XRay/ with a Catalog proxy
 
 web/test/folder-source.js reads an export folder; it serves the tests only and is not part of the page.
@@ -139,9 +141,9 @@ A server profile without saved password reads it from the environment variable `
 | MII | C# |
 |---|---|
 | the transactions | one class `TrxNameLogic(IQueryService queries, IPluginService plugins)` with one method per transaction; the root is public, the transactions it calls are private |
-| inputs / outputs | method parameters (optional, without MII defaults) / the return value: the only output, or a record `TrxNameResult(...)` |
+| inputs / outputs | optional method parameters with the MII default (XML, list, map and date inputs: set in the first lines of the method) / the return value: the only output, or a record `TrxNameResult(...)`; outputs start with their default |
 | transaction call, dynamic call with a literal name | `var result = TrxCallee(input: value, ...)` with named arguments |
-| local variable | local variable; a local the flow never replaces as a whole keeps its MII value (an XSLT, a map of options, a request template only edited at XPaths) |
+| local variable | local variable that starts with its MII default; one the flow replaces as a whole before reading it is declared where it is set (the comment then gives the default) |
 | SQL / MDO query template | a local `var sqlName = new Query("""...""")`, `sqlName.AddParameter("Site", value)` and `queries.Execute<SqlNameRow>(sqlName)`; a comment maps `[Param.N]` to the names, the text stays as in MII |
 | Xacute query | a call of the transaction it wraps (`Param.N` -> mapped input, `Results` -> selected output) |
 | rowset XML (`Rowsets/Rowset/Row`) | `List<XRow>` of row records; columns from reference documents, the cached results of query actions (with SQL types), the SQL select list and every column the transactions read |
@@ -157,11 +159,10 @@ A server profile without saved password reads it from the environment variable `
 
 The header is written for a reader without MII at hand (a colleague or an LLM): how to read the file, the call tree
 in execution order with the condition, loop or error handler each call runs in, and per query its parameters, the
-actions that run it and the result columns read by name. Default documents show their structure (two elements of
-each repeated name). Values are declared where they come into being.
+actions that run it and the result columns read by name. Values are declared where they come into being.
 
-MII runtime settings (Persist, ResetState, logging, transaction attributes, layout, cached test results) and default
-values are left out. The file ends with the service interfaces (`IQueryService`, `IPluginService`) and the `Mii`
+MII runtime settings (Persist, ResetState, logging, transaction attributes, layout) stand as comments at the actions;
+cached test results are left out. The file ends with the service interfaces (`IQueryService`, `IPluginService`) and the `Mii`
 helper class, so each file compiles on its own.
 
 MII rules the helpers keep: booleans are true for `true` or `1`; `match()` is case-sensitive unless the pattern
@@ -183,8 +184,11 @@ ThrowOnLinkError off are marked.
 
 - **A faulty transaction gives faulty C#, as is.** Links to inputs or actions that no longer exist, references to
   undeclared properties and the like are kept and listed under *Notes* in the file header; X-Ray does not repair.
-- Inputs a caller does not link stay empty (`null`); in MII they would get the callee's default value (the
-  simulation mode does that).
+- A default value larger than 16 KB (UTF-8 bytes) is not in the file: a text gets the text `"[n-bytes]"`, any other
+  type starts empty and the comment says `default: [n-bytes]` (n = the size). Shared property and query parameter
+  defaults in the header likewise.
+- Over Xacute or the Runner an input that is not passed is empty in MII; C# gives it the parameter default (the
+  simulation mode tells the two apart).
 - `#expr#` (an expression built at runtime) and `getvalue(name)` cannot be translated; they become `Mii.Evaluate`
   and `Mii.GetValue` and are listed in the notes.
 - A Catch handles what precedes it **in its parent** (a lexical `try`). In MII it also catches exceptions from

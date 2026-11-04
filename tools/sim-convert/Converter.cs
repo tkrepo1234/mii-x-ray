@@ -15,7 +15,12 @@ namespace MiiXRay.SimConvert;
 public sealed record Edit(int Start, int End, string Text, int Order);
 
 /// <summary>A transaction parameter: C# name and type, MII name and default.</summary>
-public sealed record Parameter(string Name, string Type, Declaration Declaration);
+public sealed record Parameter(string Name, string Type, Declaration Declaration)
+{
+    /// <summary>The MII default as C# code (the parameter default, or the "??=" / "if (x == default)" statement at the
+    /// start of the method), when the comment does not give it.</summary>
+    public string DefaultCode { get; set; }
+}
 
 /// <summary>A query template from the file header.</summary>
 public sealed class Template
@@ -43,7 +48,7 @@ public sealed class Template
 /// <summary>Turns a default-mode X-Ray into the simulation mode (see SimulationRuntime.txt for what it emulates).</summary>
 public sealed class Converter(List<MetadataReference> references)
 {
-    public const string ToolVersion = "2.6.4";
+    public const string ToolVersion = "2.7.0";
 
     private const string ServicesRegion = "#region Services (implement these to run the code)";
 
@@ -583,7 +588,30 @@ public sealed class Converter(List<MetadataReference> references)
 
         public List<StatementSyntax> Flow { get; } = [];
 
+        public List<StatementSyntax> DefaultStatements { get; } = [];
+
         public ReturnStatementSyntax FinalReturn { get; private set; }
+
+        /// <summary>"x ??= value;" or "if (x == default) { x = value; }": the input and the value.</summary>
+        private static (string Name, string Code) InputDefault(StatementSyntax statement)
+        {
+            if (statement is ExpressionStatementSyntax expression && expression.Expression is AssignmentExpressionSyntax coalesce
+                && coalesce.IsKind(SyntaxKind.CoalesceAssignmentExpression) && coalesce.Left is IdentifierNameSyntax target)
+            {
+                return (target.Identifier.Text, coalesce.Right.ToString());
+            }
+
+            if (statement is IfStatementSyntax check && check.Else == null && check.Condition is BinaryExpressionSyntax equals
+                && equals.IsKind(SyntaxKind.EqualsExpression) && equals.Left is IdentifierNameSyntax name && equals.Right.ToString() == "default"
+                && check.Statement is BlockSyntax block && block.Statements.Count == 1 && block.Statements[0] is ExpressionStatementSyntax inner
+                && inner.Expression is AssignmentExpressionSyntax assignment && assignment.IsKind(SyntaxKind.SimpleAssignmentExpression)
+                && assignment.Left.ToString() == name.Identifier.Text)
+            {
+                return (name.Identifier.Text, assignment.Right.ToString());
+            }
+
+            return (null, null);
+        }
 
         public static MethodInfo Read(MethodDeclarationSyntax method)
         {
@@ -612,7 +640,11 @@ public sealed class Converter(List<MetadataReference> references)
             foreach (ParameterSyntax parameter in method.ParameterList.Parameters)
             {
                 Declaration declaration = Comments.ParseDeclaration(Comments.Lines(parameter.GetLeadingTrivia())) ?? Comments.ParseDeclaration(Comments.TrailingLines(parameter));
-                info.Parameters.Add(new Parameter(parameter.Identifier.Text, parameter.Type.ToString(), declaration));
+                string code = parameter.Default?.Value.ToString();
+                info.Parameters.Add(new Parameter(parameter.Identifier.Text, parameter.Type.ToString(), declaration)
+                {
+                    DefaultCode = code == null || code == "default" || code == "null" ? null : code,
+                });
             }
 
             if (method.Body == null)
@@ -622,6 +654,21 @@ public sealed class Converter(List<MetadataReference> references)
 
             List<StatementSyntax> statements = method.Body.Statements.ToList();
             int index = 0;
+
+            // the defaults of inputs C# cannot take as parameter defaults (XML, lists, maps, dates)
+            for (; index < statements.Count; index++)
+            {
+                (string Name, string Code) set = InputDefault(statements[index]);
+                Parameter parameter = set.Name == null ? null : info.Parameters.FirstOrDefault((item) => item.Name == set.Name);
+
+                if (parameter == null)
+                {
+                    break;
+                }
+
+                parameter.DefaultCode = set.Code;
+                info.DefaultStatements.Add(statements[index]);
+            }
 
             for (; index < statements.Count; index++)
             {
@@ -754,8 +801,15 @@ public sealed class Converter(List<MetadataReference> references)
 
             foreach (Parameter parameter in method.Parameters)
             {
-                head.Add(indent + parameter.Name + " = " + frame + ".Input<" + parameter.Type + ">(" + Comments.Literal(MiiName(parameter)) + ", " + parameter.Name + ", "
-                    + Comments.Literal(parameter.Declaration?.DefaultText ?? "") + ");");
+                head.Add(indent + parameter.Name + " = " + frame + (parameter.Declaration?.DefaultText == null && parameter.DefaultCode != null
+                    ? ".InputOr<" + parameter.Type + ">(" + Comments.Literal(MiiName(parameter)) + ", " + parameter.Name + ", " + parameter.DefaultCode + ");"
+                    : ".Input<" + parameter.Type + ">(" + Comments.Literal(MiiName(parameter)) + ", " + parameter.Name + ", "
+                        + Comments.Literal(parameter.Declaration?.DefaultText ?? "") + ");"));
+            }
+
+            foreach (StatementSyntax statement in method.DefaultStatements)
+            {
+                file.Replace(statement.FullSpan, "");
             }
 
             if (method.Parameters.Count > 0 && method.TopDeclarations.Count == 0)
@@ -763,7 +817,9 @@ public sealed class Converter(List<MetadataReference> references)
                 head.Add("");
             }
 
-            int headPosition = body.Statements.Count > 0 ? body.Statements[0].FullSpan.Start : body.OpenBraceToken.FullSpan.End;
+            int skipped = method.DefaultStatements.Count;
+            int headPosition = body.Statements.Count > skipped ? body.Statements[skipped].FullSpan.Start
+                : skipped > 0 ? body.Statements[skipped - 1].FullSpan.End : body.OpenBraceToken.FullSpan.End;
             file.Insert(headPosition, string.Join("\n", head) + "\n", 100);
 
             // top declarations start with their MII default (or the value of the previous call)

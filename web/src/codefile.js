@@ -4,11 +4,11 @@ import { MiiQueryKind } from './model.js';
 import { GenerationContext, ContractBuilder } from './contracts.js';
 import { TransactionEmitter, indent } from './emitter.js';
 import { addBlankLines } from './placer.js';
-import { TypeKind, Naming, UniqueNames, CsLiteral } from './types.js';
+import { TypeKind, Naming, UniqueNames, CsLiteral, DEFAULT_LIMIT, limitedDefault } from './types.js';
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.6.4';
+export const TOOL_VERSION = '2.7.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -100,7 +100,7 @@ function header(context, root, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of the transaction and of every transaction and query it uses, as C# 12 (.NET 8). It shows what the',
-    '// code does, not how MII runs it: MII settings and default values stand as comments at the actions and declarations,',
+    '// code does, not how MII runs it: MII settings stand as comments at the actions, default values are set as in MII,',
     '// a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent through',
     '// IPluginService.',
     '// The Mii class at the end implements the MII expression functions and the XML handling.',
@@ -138,8 +138,8 @@ function folderHeader(context, queryMethods, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of every transaction and query template in the folder and of every transaction and query they use, as',
-    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII settings and default values stand as comments',
-    '// at the actions and declarations, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
+    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII settings stand as comments at the actions,',
+    '// default values are set as in MII, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
     '// through IPluginService. The Mii class at the end implements the MII expression functions and the XML handling.',
     '//',
     '// Entry points: new ' + context.className + '(queries, plugins).<Method>(...), one public method per transaction of the',
@@ -261,15 +261,18 @@ function readingRules() {
   return [
     '// How to read this file:',
     '//   - Every MII transaction is a method: its parameters are the MII inputs, its return value the MII outputs (a',
-    '//     record when there are several). A caller passes the inputs it links; MII default values are not carried over.',
+    '//     record when there are several). A caller passes the inputs it links; an input it does not link has its MII',
+    '//     default (the parameter default; for XML, lists, maps and dates the first lines of the method set it).',
     '//   - A query is a local Query variable: its text is the MII template text; the comment above it maps [Param.N] to',
     '//     the names. AddParameter(name, value): a text parameter (Use Typed Parameters off), MII replaces [Param.N] by the',
     '//     value as text; quoting and escaping are done by the template and the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
     '//     AddTypedParameter(name, type, value): Use Typed Parameters on, MII checks the value against the type and binds',
     '//     it as a statement parameter; an unquoted [Param.N] is right there, a quoted one is no parameter (notes).',
-    '//   - A comment at a declaration gives the exact MII name (case as in MII), the MII type and the MII default value:',
-    '//     Transaction.X for an input or output, Local.X, action X for the result of an action, column X for a column.',
-    '//     The code itself starts from empty values (a caller passes what MII links).',
+    '//   - A comment at a declaration gives the exact MII name (case as in MII) and the MII type: Transaction.X for an',
+    '//     input or output, Local.X, action X for the result of an action, column X for a column. Outputs and locals start',
+    '//     with their MII default. The comment gives the default only where the code does not hold it (a local declared',
+    '//     where the flow sets it, a value C# cannot take as it is). A default larger than ' + (DEFAULT_LIMIT / 1024) + ' KB is not in the file: it',
+    '//     stands as [n-bytes] (n = its size in UTF-8 bytes).',
     '//   - "MII settings" under an action name list every configured property of the action as MII stores it ("linked":',
     '//     a link sets it at runtime, the code shows that), without the results of the last test run.',
     '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
@@ -317,7 +320,7 @@ function sharedPropertyOverview(property) {
   const settings = property.definition.attributes.filter(([name, value]) => name !== 'Name' && name !== 'Project' && value.length > 0)
     .map(([name, value]) => name + ' = ' + value.replace(/\r\n?|\n/g, ' '));
   const lines = [head + ': ' + settings.join(', ')];
-  const value = property.definition.defaultValue.replace(/\r\n?/g, '\n').split('\n');
+  const value = limitedDefault(property.definition.defaultValue).replace(/\r\n?/g, '\n').split('\n');
 
   if (value.length === 1) {
     lines.push('//     default: ' + value[0]);
@@ -380,7 +383,7 @@ function queryOverview(contract) {
   }
 
   if (defaults.length > 0) {
-    lines.push('//     parameter defaults: ' + defaults.map(([name, value]) => '[' + name + '] = ' + value.replace(/\r\n?|\n/g, ' ')).join(', '));
+    lines.push('//     parameter defaults: ' + defaults.map(([name, value]) => '[' + name + '] = ' + limitedDefault(value).replace(/\r\n?|\n/g, ' ')).join(', '));
   }
 
   if (query.kind === MiiQueryKind.Xml && contract.fileConstant) {

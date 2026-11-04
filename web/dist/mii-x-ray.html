@@ -452,11 +452,11 @@ const { MiiQueryKind } = __require('model.js');
 const { GenerationContext, ContractBuilder } = __require('contracts.js');
 const { TransactionEmitter, indent } = __require('emitter.js');
 const { addBlankLines } = __require('placer.js');
-const { TypeKind, Naming, UniqueNames, CsLiteral } = __require('types.js');
+const { TypeKind, Naming, UniqueNames, CsLiteral, DEFAULT_LIMIT, limitedDefault } = __require('types.js');
 const { ObjectPath } = __require('sources.js');
 const { webFilePath } = __require('staticfiles.js');
 
-const TOOL_VERSION = '2.6.4';
+const TOOL_VERSION = '2.7.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -548,7 +548,7 @@ function header(context, root, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of the transaction and of every transaction and query it uses, as C# 12 (.NET 8). It shows what the',
-    '// code does, not how MII runs it: MII settings and default values stand as comments at the actions and declarations,',
+    '// code does, not how MII runs it: MII settings stand as comments at the actions, default values are set as in MII,',
     '// a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent through',
     '// IPluginService.',
     '// The Mii class at the end implements the MII expression functions and the XML handling.',
@@ -586,8 +586,8 @@ function folderHeader(context, queryMethods, sourceDescription, now) {
     '// Generated ' + stamp + ' by MII X-Ray ' + TOOL_VERSION + ' from ' + sourceDescription,
     '//',
     '// The logic of every transaction and query template in the folder and of every transaction and query they use, as',
-    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII settings and default values stand as comments',
-    '// at the actions and declarations, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
+    '// C# 12 (.NET 8). It shows what the code does, not how MII runs it: MII settings stand as comments at the actions,',
+    '// default values are set as in MII, a called transaction is a method, a query goes through IQueryService, an MII action without a C# equivalent',
     '// through IPluginService. The Mii class at the end implements the MII expression functions and the XML handling.',
     '//',
     '// Entry points: new ' + context.className + '(queries, plugins).<Method>(...), one public method per transaction of the',
@@ -709,15 +709,18 @@ function readingRules() {
   return [
     '// How to read this file:',
     '//   - Every MII transaction is a method: its parameters are the MII inputs, its return value the MII outputs (a',
-    '//     record when there are several). A caller passes the inputs it links; MII default values are not carried over.',
+    '//     record when there are several). A caller passes the inputs it links; an input it does not link has its MII',
+    '//     default (the parameter default; for XML, lists, maps and dates the first lines of the method set it).',
     '//   - A query is a local Query variable: its text is the MII template text; the comment above it maps [Param.N] to',
     '//     the names. AddParameter(name, value): a text parameter (Use Typed Parameters off), MII replaces [Param.N] by the',
     '//     value as text; quoting and escaping are done by the template and the callers (e.g. Mii.StringReplace(x, "\'", "\'\'")).',
     '//     AddTypedParameter(name, type, value): Use Typed Parameters on, MII checks the value against the type and binds',
     '//     it as a statement parameter; an unquoted [Param.N] is right there, a quoted one is no parameter (notes).',
-    '//   - A comment at a declaration gives the exact MII name (case as in MII), the MII type and the MII default value:',
-    '//     Transaction.X for an input or output, Local.X, action X for the result of an action, column X for a column.',
-    '//     The code itself starts from empty values (a caller passes what MII links).',
+    '//   - A comment at a declaration gives the exact MII name (case as in MII) and the MII type: Transaction.X for an',
+    '//     input or output, Local.X, action X for the result of an action, column X for a column. Outputs and locals start',
+    '//     with their MII default. The comment gives the default only where the code does not hold it (a local declared',
+    '//     where the flow sets it, a value C# cannot take as it is). A default larger than ' + (DEFAULT_LIMIT / 1024) + ' KB is not in the file: it',
+    '//     stands as [n-bytes] (n = its size in UTF-8 bytes).',
     '//   - "MII settings" under an action name list every configured property of the action as MII stores it ("linked":',
     '//     a link sets it at runtime, the code shows that), without the results of the last test run.',
     '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
@@ -765,7 +768,7 @@ function sharedPropertyOverview(property) {
   const settings = property.definition.attributes.filter(([name, value]) => name !== 'Name' && name !== 'Project' && value.length > 0)
     .map(([name, value]) => name + ' = ' + value.replace(/\r\n?|\n/g, ' '));
   const lines = [head + ': ' + settings.join(', ')];
-  const value = property.definition.defaultValue.replace(/\r\n?/g, '\n').split('\n');
+  const value = limitedDefault(property.definition.defaultValue).replace(/\r\n?/g, '\n').split('\n');
 
   if (value.length === 1) {
     lines.push('//     default: ' + value[0]);
@@ -828,7 +831,7 @@ function queryOverview(contract) {
   }
 
   if (defaults.length > 0) {
-    lines.push('//     parameter defaults: ' + defaults.map(([name, value]) => '[' + name + '] = ' + value.replace(/\r\n?|\n/g, ' ')).join(', '));
+    lines.push('//     parameter defaults: ' + defaults.map(([name, value]) => '[' + name + '] = ' + limitedDefault(value).replace(/\r\n?|\n/g, ' ')).join(', '));
   }
 
   if (query.kind === MiiQueryKind.Xml && contract.fileConstant) {
@@ -890,8 +893,8 @@ __define('contracts.js', () => {
 // before any code is generated so that callers can refer to their callees' types.
 const { MiiXml, MiiQueryKind } = __require('model.js');
 const { ObjectPath } = __require('sources.js');
-const { RowsetContract, ContractFactory, extractSqlColumns, shrinkXmlSample } = __require('rowset.js');
-const { CsType, TypeKind, TypedCode, Naming, UniqueNames, CsLiteral, ValueLiteral } = __require('types.js');
+const { RowsetContract, ContractFactory, extractSqlColumns } = __require('rowset.js');
+const { CsType, TypeKind, TypedCode, Naming, UniqueNames, CsLiteral, ValueLiteral, limitedDefault, isOmittedDefault } = __require('types.js');
 
 /** An input (method parameter), an output or a local variable of a transaction method. */
 class PropertySpec {
@@ -903,8 +906,10 @@ class PropertySpec {
     this.initializer = null;
     this.description = description;
     this.miiType = ''; // the MII data type (string, int, xml, list, map, ...)
-    this.defaultText = ''; // the MII default value as stored
-    this.defaultInCode = false; // the initializer already holds the full default value
+    this.defaultText = ''; // the MII default value as stored ("[n-bytes]" when larger than DEFAULT_LIMIT)
+    this.defaultInCode = false; // the code already holds the full default value
+    this.defaultStatement = null; // an input default C# cannot write as a parameter default: set at the method start
+    this.replaced = false; // a local the flow replaces as a whole (it may be declared where it is set)
   }
 }
 
@@ -1125,6 +1130,43 @@ const ContractBuilder = {
     }
   },
 
+  /** The MII default of a property as C# code: the code, and whether it holds the whole default (else the
+   * declaration comment shows it). A default left out of the file ("[n-bytes]") stays a text only for a string. */
+  defaultValue(type, defaultText) {
+    const text = defaultText || '';
+    const empty = ContractBuilder.emptyValue(type);
+
+    if (type.kind !== TypeKind.String && text.trim().length === 0) {
+      return { code: empty, exact: true };
+    }
+
+    if (type.kind !== TypeKind.String && isOmittedDefault(text)) {
+      return { code: empty, exact: false };
+    }
+
+    switch (type.kind) {
+      case TypeKind.String:
+      case TypeKind.Bool:
+      case TypeKind.List:
+      case TypeKind.Map:
+        return { code: ContractBuilder.initializer(type, text), exact: true };
+      case TypeKind.Int:
+      case TypeKind.Long:
+      case TypeKind.Double:
+      case TypeKind.Decimal:
+        return { code: CsLiteral.number(text, type.kind), exact: /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(text.trim()) };
+      case TypeKind.DateTime: {
+        const code = CsLiteral.dateTimeValue(text);
+        return { code, exact: code !== 'DateTime.MinValue' };
+      }
+      case TypeKind.Xml:
+      case TypeKind.Rowset:
+        return MiiXml.tryParse(text) ? { code: ContractBuilder.initializer(type, text), exact: true } : { code: empty, exact: false };
+      default:
+        return { code: empty, exact: false };
+    }
+  },
+
   /** A configured MII value as C# code of the given type. */
   initializer(type, defaultText) {
     switch (type.kind) {
@@ -1137,7 +1179,10 @@ const ContractBuilder = {
       case TypeKind.DateTime: return CsLiteral.dateTimeValue(defaultText);
       case TypeKind.List: return ValueLiteral.listCode(defaultText);
       case TypeKind.Map: return ValueLiteral.mapCode(defaultText);
-      case TypeKind.Rowset: return 'new ' + type.name + '()';
+      case TypeKind.Rowset:
+        return MiiXml.tryParse(defaultText)
+          ? 'Mii.ToRows<' + type.contract.rowTypeName + '>(Mii.ParseXml(' + CsLiteral.string(defaultText.trim()) + '))'
+          : 'new ' + type.name + '()';
       case TypeKind.Xml:
         return MiiXml.tryParse(defaultText) ? 'Mii.ParseXml(' + CsLiteral.string(defaultText.trim()) + ')' : 'new XmlDocument()';
       default: return 'null';
@@ -1165,7 +1210,23 @@ function buildInterface(context, contract) {
 
   for (const parameter of transaction.inputs) {
     const input = property(context, contract, parameter);
-    input.initializer = 'default';
+    const value = ContractBuilder.defaultValue(input.type, input.defaultText);
+
+    if (PARAMETER_DEFAULTS.includes(input.type.kind)) {
+      // a constant: the parameter default, which C# takes when a caller does not link the input (as MII does)
+      input.initializer = value.code;
+      input.defaultInCode = value.exact;
+    } else {
+      input.initializer = 'default';
+
+      if (value.code !== ContractBuilder.emptyValue(input.type)) {
+        input.defaultStatement = input.type.kind === TypeKind.DateTime
+          ? ['if (' + input.name + ' == default)', '{', '    ' + input.name + ' = ' + value.code + ';', '}']
+          : [input.name + ' ??= ' + value.code + ';'];
+        input.defaultInCode = value.exact;
+      }
+    }
+
     contract.inputs.push(input);
   }
 
@@ -1174,7 +1235,9 @@ function buildInterface(context, contract) {
   for (const parameter of transaction.outputs) {
     const output = property(context, contract, parameter);
     output.resultName = resultNames.claim(Naming.pascal(parameter.name).replace(/^@/, ''));
-    output.initializer = ContractBuilder.emptyValue(output.type);
+    const value = ContractBuilder.defaultValue(output.type, output.defaultText);
+    output.initializer = value.code;
+    output.defaultInCode = value.exact;
     contract.outputs.push(output);
   }
 
@@ -1185,12 +1248,12 @@ function buildInterface(context, contract) {
   const written = writtenLocals(transaction);
 
   for (const parameter of transaction.locals) {
+    // every local starts with its MII default; one the flow replaces as a whole may be declared where it is set
     const local = property(context, contract, parameter);
-    // a local the flow never replaces as a whole is configuration or a template: it keeps its MII value
-    const configuration = !written.has(parameter.name) && local.type.kind !== TypeKind.Rowset && parameter.defaultText.trim().length > 0;
-    const shown = configuration && local.type.kind === TypeKind.Xml ? shrinkXmlSample(parameter.defaultText) : parameter.defaultText;
-    local.initializer = configuration ? ContractBuilder.initializer(local.type, shown) : ContractBuilder.emptyValue(local.type);
-    local.defaultInCode = configuration && shown === parameter.defaultText;
+    const value = ContractBuilder.defaultValue(local.type, local.defaultText);
+    local.initializer = value.code;
+    local.defaultInCode = value.exact;
+    local.replaced = written.has(parameter.name) || value.code === ContractBuilder.emptyValue(local.type);
     contract.locals.push(local);
   }
 }
@@ -1219,18 +1282,21 @@ function writtenLocals(transaction) {
 
 const WHOLE_WRITES = ['Assign', 'AssignXml', 'ReplaceXml'];
 
+/** Input types whose default C# writes as a parameter default (a constant). */
+const PARAMETER_DEFAULTS = [TypeKind.String, TypeKind.Bool, TypeKind.Int, TypeKind.Long, TypeKind.Double, TypeKind.Decimal];
+
 function property(context, contract, parameter) {
   const spec = new PropertySpec(parameter.name, contract.localNames.claim(Naming.camel(parameter.name)), typeOf(context, contract, parameter), parameter.description);
   spec.miiType = parameter.type;
-  spec.defaultText = parameter.defaultText;
+  spec.defaultText = limitedDefault(parameter.defaultText);
   return spec;
 }
 
 /** The comment at a declaration: exact MII name and type, and the MII default value unless the code already
  * initializes with it (a multi-line value follows on lines of its own). */
-function declarationComment(prefix, spec) {
+function declarationComment(prefix, spec, withDefault = !spec.defaultInCode) {
   const head = prefix + spec.miiName + ' (' + (spec.miiType || 'no type') + ')';
-  const value = spec.defaultInCode ? '' : spec.defaultText || '';
+  const value = withDefault ? spec.defaultText || '' : '';
 
   if (value.trim().length === 0) {
     return [head];
@@ -1758,13 +1824,20 @@ class TransactionEmitter {
     lines.push('{');
 
     // outputs live for the whole method (they are returned); locals and action results move to where they are set
-    const body = this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', declarationComment('Transaction.', output)));
+    const body = this._contract.inputs.filter((input) => input.defaultStatement).flatMap((input) => input.defaultStatement);
+
+    if (body.length > 0) {
+      body.push('');
+    }
+
+    body.push(...this._contract.outputs.flatMap((output) => withMiiName(output.type.name + ' ' + output.name + ' = ' + output.initializer + ';', declarationComment('Transaction.', output))));
     const candidates = [];
     const configuration = [];
 
     for (const local of this._contract.locals) {
-      if (local.initializer === ContractBuilder.emptyValue(local.type)) {
-        candidates.push({ type: local.type.name, name: local.name, miiName: declarationComment('Local.', local), initializer: local.initializer, isCatch: false });
+      if (local.replaced) {
+        // declared where it is set, the default is not in the code: the comment keeps it
+        candidates.push({ type: local.type.name, name: local.name, miiName: declarationComment('Local.', local), placedMiiName: declarationComment('Local.', local, true), initializer: local.initializer, isCatch: false });
       } else {
         configuration.push(...withMiiName(local.type.name + ' ' + local.name + ' = ' + local.initializer + ';', declarationComment('Local.', local)));
       }
@@ -1813,10 +1886,10 @@ class TransactionEmitter {
     const lines = [head];
 
     inputs.forEach((input, index) => {
-      const declaration = '    ' + input.type.name + ' ' + input.name + ' = default' + (index < inputs.length - 1 ? ',' : ')');
+      const declaration = '    ' + input.type.name + ' ' + input.name + ' = ' + input.initializer + (index < inputs.length - 1 ? ',' : ')');
       const comment = declarationComment('Transaction.', input);
 
-      if (comment.length === 1) {
+      if (comment.length === 1 && !declaration.includes('\n')) {
         lines.push(declaration + ' // ' + comment[0]);
       } else {
         lines.push(...comment.map((text) => '    // ' + text), declaration);
@@ -3696,8 +3769,9 @@ const ObjectReader = {
     query.rootName = root.localName;
     query.mode = root.getAttribute('Mode');
     query.rowCount = root.getAttribute('RowCount').trim();
-    // Use Typed Parameters: the values are bound as statement parameters instead of replacing [Param.N] as text
-    query.typedParameters = /^(t|true)$/i.test(root.getAttribute('UseTypedParams').trim());
+    // Use Typed Parameters: the values are bound as statement parameters instead of replacing [Param.N] as text. MII
+    // stores T or F; "true" counts as off (measured on MII, bls-project-003, 2026-10-31)
+    query.typedParameters = /^t$/i.test(root.getAttribute('UseTypedParams').trim());
     query.attributes = root.attributes.map((attribute) => [attribute.name, attribute.value]);
 
     switch (root.localName) {
@@ -3914,7 +3988,7 @@ function tryPlace(flow, variable) {
 
   const line = flow[assigned];
   const indentation = line.length - line.trimStart().length;
-  flow.splice(assigned, 1, ...withMiiName(line.substring(0, indentation) + 'var ' + line.substring(indentation), variable.miiName));
+  flow.splice(assigned, 1, ...withMiiName(line.substring(0, indentation) + 'var ' + line.substring(indentation), variable.placedMiiName || variable.miiName));
   return true;
 }
 
@@ -5085,8 +5159,13 @@ class CatalogSource {
     }
 
     const text = await this._post({ Mode: 'Load', ObjectName: path, TemporaryFile: 'false', _: String(Date.now()) });
-    const answer = text.includes('FatalError') ? tryParseXml(text) : null;
-    return answer && answer.documentElement.localName === 'Rowsets' && descendants(answer, 'FatalError').length > 0 ? null : text;
+    const answer = text.includes('FatalError') || text.includes('Payload') ? tryParseXml(text) : null;
+
+    if (answer && answer.documentElement.localName === 'Rowsets' && descendants(answer, 'FatalError').length > 0) {
+      return null;
+    }
+
+    return filePayload(text, answer) ?? text;
   }
 
   async findSimilar(objectPath, maximum) {
@@ -5195,6 +5274,22 @@ function decodeBase64(text) {
   }
 
   return new TextDecoder('utf-8').decode(bytes).replace(/^﻿/, '');
+}
+
+// MII's HTML rendering of the Name/Type/Payload rowset ("xMII Dynamic HTML"): the title of the value cell holds the
+// Base64 of the file
+const HTML_PAYLOAD = /Column Name is Payload">Payload<\/td>\s*<td[^>]*title="Value of Row\d+ Column Value is ([A-Za-z0-9+/=\s]*)"/;
+
+/** The file of a Catalog Load answer that is a Name/Type/Payload rowset (as XML or as MII's HTML rendering of it, as
+ * the Catalog answers for an XML web file); null when the answer is the file itself. */
+function filePayload(text, answer) {
+  if (answer && answer.documentElement.localName === 'Rowsets') {
+    const payload = descendants(answer, 'Payload')[0];
+    return payload ? decodeBase64(payload.innerText.trim()) : null;
+  }
+
+  const match = text.includes('xMII Dynamic HTML') ? HTML_PAYLOAD.exec(text) : null;
+  return match ? decodeBase64(match[1]) : null;
 }
 
 /** The object type by file extension, for answers without a Type column. */
@@ -6404,6 +6499,25 @@ class UniqueNames {
   }
 }
 
+// ---------------------------------------------------------------------------------------------- default values
+
+/** Default values larger than this (UTF-8 bytes) are not written into the file. */
+const DEFAULT_LIMIT = 16384;
+
+/** The MII default as written into the file: the value, or "[n-bytes]" when it is larger than DEFAULT_LIMIT. */
+function limitedDefault(text) {
+  const value = text || '';
+
+  if (value.length * 3 <= DEFAULT_LIMIT) {
+    return value;
+  }
+
+  const bytes = new TextEncoder().encode(value).length;
+  return bytes > DEFAULT_LIMIT ? '[' + bytes + '-bytes]' : value;
+}
+
+const isOmittedDefault = (text) => /^\[\d+-bytes\]$/.test(text || '');
+
 // ---------------------------------------------------------------------------------------------- literals
 
 const isControl = (c) => {
@@ -6656,7 +6770,7 @@ function readTypedValue(text, open) {
   return { value: colon >= 0 ? inner.substring(colon + 1) : inner, end: position };
 }
 
-return { TypeKind, CsType, Precedence, TypedCode, Naming, UniqueNames, CsLiteral, ValueLiteral };
+return { TypeKind, CsType, Precedence, TypedCode, Naming, UniqueNames, DEFAULT_LIMIT, limitedDefault, isOmittedDefault, CsLiteral, ValueLiteral };
 });
 __define('xml.js', () => {
 // A small XML parser and serializer without dependencies, the same in the browser and in Node.
