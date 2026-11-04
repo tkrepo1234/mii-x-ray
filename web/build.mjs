@@ -1,9 +1,11 @@
 // Builds web/dist/mii-x-ray.html: one self-contained page (styles, scripts and the C# runtime text inline) to upload
-// to the MII server. No dependencies: each module keeps its own scope inside a small loader.
+// to the MII server. No dependencies: each module keeps its own scope inside a small loader. The page is minified
+// (web/minify.mjs); the C# runtime text stays as it is, it is part of every generated file.
 //   node web/build.mjs
 import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { minifyJs, minifyCss, minifyHtml } from './minify.mjs';
 
 const web = dirname(fileURLToPath(import.meta.url));
 const source = join(web, 'src');
@@ -40,11 +42,12 @@ const loader = [
   ...defined,
   "__require('app.js');",
   '})();',
-].join('\n').replace(/<\/script/gi, '<\\/script');
+].join('\n');
+const script = minifyJs(loader).replace(/<\/script/gi, '<\\/script');
 
-const page = readFileSync(join(source, 'index.html'), 'utf8')
-  .replace('<!--STYLE-->', () => '<style>\n' + readFileSync(join(source, 'app.css'), 'utf8') + '</style>')
-  .replace('<!--SCRIPT-->', () => '<script>\n' + loader + '\n</script>');
+const page = minifyHtml(readFileSync(join(source, 'index.html'), 'utf8'))
+  .replace('<!--STYLE-->', () => '<style>' + minifyCss(readFileSync(join(source, 'app.css'), 'utf8')) + '</style>')
+  .replace('<!--SCRIPT-->', () => '<script>\n' + script + '</script>');
 
 mkdirSync(join(web, 'dist'), { recursive: true });
 writeFileSync(join(web, 'dist', 'mii-x-ray.html'), page);

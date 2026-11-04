@@ -41,10 +41,11 @@ which MII supports only for Class=Transaction); query templates one by one. The 
 file it does nothing. The last transactions are kept in the browser (local storage).
 
 ```
-node web/build.mjs                                   builds web/dist/mii-x-ray.html from web/src
+node web/build.mjs                                   builds web/dist/mii-x-ray.html from web/src (minified by web/minify.mjs)
 node web/test/corpus.mjs <export folder> <work folder>  every transaction and every folder X-rayed and compiled as C# 12
 node web/test/equivalence.mjs <export folder> <C# output of --all>    JS against the C# console (2.1.x only)
 node web/test/staticfiles.mjs <export folder> <work folder>        web files and shared properties in the file
+node web/test/minified.mjs <export folder> <work folder>         the minified page generates the same files
 node web/test/defaults.mjs <work folder>                           MII defaults in the code, [n-bytes] above 128 KB (runs on .NET)
 node web/test/serve.mjs 5300 http://localhost:50100 dev:dev           the page at /XMII/CM/XRay/ with a Catalog proxy
 

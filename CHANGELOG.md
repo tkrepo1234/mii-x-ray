@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.7.2 - 2026-11-04
+
+Tim, 2026-11-04: the page for MII as small as its operation allows.
+
+- `web/build.mjs` minifies the page with `web/minify.mjs` (own code, no dependencies): JavaScript without comments,
+  indentation, blank lines and line breaks where automatic semicolon insertion cannot happen; strings, template
+  literals and regular expressions unchanged; CSS and HTML without comments and needless blanks. The C# runtime text
+  stays as it is (it is part of every generated file). `web/dist/mii-x-ray.html`: 316 KB -> 249 KB, of which 78 KB are
+  the runtime text. Names are not shortened (that needs a parser; the gain is not worth the risk).
+- `web/test/minified.mjs`: minifies every module into a copy and X-Rays an export folder with both; corpus 818 of 818
+  and Tim's ME_EI/XML_FILE_INTERFACE 146 of 146 files byte-identical (except the generation time), the page script
+  parses. Checked in Edge headless against the MUD mock catalog: X-Ray of trxBatchNumberResolve, no console errors.
+
 ## 2.7.1 - 2026-11-04
 
 Tim, 2026-11-04: the limit of defaults written into the file is 128 KB (fixed), no longer 16 KB.
