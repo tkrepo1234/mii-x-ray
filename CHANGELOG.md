@@ -1,5 +1,119 @@
 # Changelog
 
+## 2.8.0 - 2026-11-25
+
+Tim, 2026-11-25: X-Ray follows the newest findings of the SAP Manufacturing Suite Definitive Guide. The guide of
+2026-11-23 settled the runtime behaviour of MII 15.5 SP1 and re-measured the open points on the real system (two test
+runs of 2026-11-23). Where X-Ray said or did something else, it follows now. The measured points are marked (measured).
+
+Flow of a transaction (generated code):
+
+- **An exception that no Catch takes does not reach the caller** (measured). The transaction ends with status
+  Terminated; for the caller that is a success: its call goes on with the outputs as they are, its Catch does not run.
+  Only Terminate with error makes the call fail. The flow of a method that has an action no Catch follows stands in
+  `try { ... } catch (Exception uncaught) when (!Mii.IsTerminationOf(...)) { }`, and the reading rules of the header
+  say so. A transaction whose root ends with a Catch needs no such block (in the corpus that is nearly every one).
+  Before, the C# exception ran into the caller's catch block.
+- A Throw with `TerminateException` true is Terminate with error (no Catch takes it). The outgoing links of a Throw and
+  of a Terminate run. `TerminateWithError` is true when the action does not set it.
+- Catch: `ExceptionType` is `USER_EXCEPTION` (Throw), `ACTION_FAILURE` or `OUTPUT_LINK` (before: the .NET type name).
+  Inside a loop the outputs of a Catch that is reached without an exception are empty again. Further children of a
+  Catch run on every pass (the note said "not documented"). `Catch.Success` is true.
+- A Conditional whose `LogicalAnd` is empty is OR (before: AND). A While loop without `MaxIterations` runs at most 256
+  times (before: without limit). The `Break` of a loop inside a loop is declared once for the method: MII never resets
+  it.
+- `Action.Success` and `Action.LastErrorMessage` are `Mii.ActionSuccess("Action")` and `Mii.LastErrorMessage("Action")`
+  (before: the value stored by the last test run in the Workbench).
+- Remove XML without an XPath has no effect in MII: a comment and a note instead of emptying the document (in the
+  corpus mostly `Transaction.Results` in error handlers, which therefore keeps its value).
+- An XML input of a call that only element links fill starts from the callee's default (measured), not from an empty
+  document.
+- Xacute query: an input the query does not map keeps its default (measured, the README said "empty"); a mapped text
+  input whose parameter the action does not set gets the parameter's value of the action or the template, also empty.
+- A Tracer with outgoing links is marked: MII skips the Tracer and its links when the run's log level is above its
+  level, and always in a transaction called with Persist NEVER (measured).
+- A query template with RowCount 0 returns one row (`RowCount = 1`).
+- The note for ThrowOnLinkError off says what MII does: no exception, but the list of links ends at the failing link,
+  what it wrote before is taken back, and an action whose incoming link fails does not run.
+
+Expressions (parser and translation):
+
+- `&&` and `||` share one precedence level and are applied from left to right (`A || B && C` is `(A || B) && C`); `^`
+  is left-associative (`2 ^ 3 ^ 2` is 64, before 512). `//` starts a comment. `\t`, `\n`, `\r` (and `\f`, `\b`, `\'`)
+  in a literal are the control characters (measured for `\t` and `\n`; before the backslash stayed in the text).
+- `match()` is `Mii.Match`: it ignores case (measured: `match("abc", "ABC")` is true), `(?-i)` makes it
+  case-sensitive, a third argument changes nothing. Before: `Regex.IsMatch`, case-sensitive.
+- `<` `>` `<=` `>=` compare numbers only: `Mii.ToNumber(a) < Mii.ToNumber(b)` where a side is no C# number. An empty
+  side makes the comparison false, other text fails (before: a comparison as text).
+- `+` follows MII's operand types: a text added to a whole number is cut to a whole number first (`"2.5" + 1` is 3),
+  two texts add as integers. A value read through an XPath counts as text, whatever type its row record has.
+- `&&` with a text on the left compares the two texts (`Mii.AndText`, with a note).
+- `if()` evaluates only the branch it takes: `Mii.If(condition ? a : b)`.
+- Notes for what does not compile in MII: a function MII does not have (`quotes`, `sum`, `and`, `or`, `name`, ...: the
+  set of registered functions is in the translator), a function or keyword written in another case (`getvaluefrommap`
+  for `getvaluefromMap`), `match2` without its third argument (measured), `round` with a second argument.
+- Keywords: `nullstring` is the text `---` (before `""`); new `null`, `nanotime`, `settings`.
+- A boolean literal as text is `"1"` or `"0"`. `stringtoboolean()` is `Mii.StringToBoolean` (true only for `true`).
+
+Runtime (`Mii`, part of every file; a file converted to the simulation mode gets it whatever version wrote the file):
+
+- Text forms: a boolean is `1` / `0` (before `true` / `false`); a double has no exponent and at most 12 decimals, `12.0`
+  is `12`, not-a-number and the result of a division by zero are `NA` (`Mii.NumberText`); a list is
+  `[[string:a], [string:b]]` and a map `{Key=[string:v]}`, both `""` when empty (before `a,b` and `{Key=v}`).
+- `Mii.ToBool` reads text as MII does: `true/yes/on/1/y/t`, `false/no/off/0/n/f`, whole numbers (1 or more is true), a
+  text with a decimal point is false, other text fails. `""` stays false (it stands for a boolean a service did not
+  set; MII fails there).
+- `Mii.AreEqual` converts the right side to the type of the left side: `5 == "5.0"` is true, `"5.0" == 5` false,
+  `"true" == true` false; `==` never fails.
+- `Mii.Number`: the leading number (measured: `"12abc"` 12, `"0abc"` 0, `"1,5"` 15, `"1e3"` 1, `" 5 "` 5, `""` fails).
+  `Mii.Round`: a half goes up (`round(-2.5)` is -2), text that is no number fails (measured).
+- Maps: `Map{Key}` of a missing key is `""`, `getvaluefromMap` the text `null` (both measured; before both `null`).
+  `keys()`, `values()`, the text of a map and a loop over a map follow the hash order of a Java HashMap
+  (`Mii.HashOrder`; measured: `Sfc`, `Site`, `Operation` come as `Site`, `Sfc`, `Operation`). `liststomap` does not sort
+  (measured; 2.2.0 sorted), trims its keys and fails for lists of different length.
+- `stringreplaceall` trims the replacement (measured: a blank inside stays, 2.2.0 removed every blank) and takes
+  Java's replacement syntax (`$1`, `${name}`, `\$`). `stringtolist` and `stringtolistwithlimit` split as Java does: no
+  groups in the result, empty parts at the end dropped, every part trimmed, `""` gives one empty part.
+- `size()` of a text is 0 (a text in list or map notation counts as that collection). `append()` adds the elements
+  of a list argument. `average()` divides by the number of arguments. `encode()` also encodes `! ( )`.
+- Dates: a date text is read in the XML format only, what follows the seconds is ignored (before: an offset was
+  applied); `dateformat()` of a text that does not fit its format gives `""`; `datetoseconds` and `datefromseconds`
+  count from year 1 (62135769600 s before 1970) and use the instant; an unknown time zone id is GMT.
+- XML links: Assign XML at an XPath replaces the selected element by the source element, the source's name wins
+  (measured; 2.2.0 kept the target element and copied the content). An XPath that selects nothing fails with "No
+  nodes found in xpath ..." (before: the path was created). Exception: a document that X-Ray starts empty is still
+  built by plain element paths, so files of earlier versions keep working.
+- New: `Mii.ToNumber`, `Mii.AndText`, `Mii.StringToBoolean`, `Mii.NumberText`, `Mii.HashOrder`, `Mii.NanoTime`,
+  `Mii.ActionSuccess`, `Mii.LastErrorMessage`, `MiiException.ExceptionType`. `Mii.Compare` and the three-argument
+  `Mii.If` stay for files of earlier versions.
+
+Simulation mode (`tools/sim-convert`):
+
+- A transaction whose exception no Catch takes ends Terminated (`frame.Uncaught`): the caller's call succeeds with the
+  outputs as they are, `LastErrorMessage` holds the message (`TRANSACTION EXECUTED OK` after a normal end), an entry
+  run returns its outputs (all measured). The converter adds the try block to files of earlier versions. A callee
+  ended by Terminate with error fails the call action: `Catch.Source` is the call action, `ExceptionType`
+  `ACTION_FAILURE`.
+- `Action.Success` and `Action.LastErrorMessage` come from the frame.
+- An Xacute query no longer empties the inputs it does not map: they keep their defaults (measured).
+- Query results: a text value is trimmed on both sides (measured; before only at the end).
+- `Regex.IsMatch(text, pattern)` of a file of an earlier version becomes `Mii.Match` (case-insensitive).
+- Boolean values cross the boundaries as `1` / `0`; text to boolean reads `true/yes/on/y/t` and whole numbers from 1.
+
+Tests: `web/test/simrun.mjs` has 46 more checks for the rules above (104 in all); the three checks that expected an
+uncaught exception to fail the entry run expect the Terminated end now. Corpus 818 of 818 compile in the default and
+in the simulation mode; 40 files written by 2.7.3 convert and compile with the new converter; the minified page
+generates the same 818 files; `build.cmd test` 32 of 32. `web/dist/mii-x-ray.html`: 222 KB -> 251 KB (the runtime
+text grew). The page itself (reading the Catalog, the user interface) is unchanged and was not opened in a browser
+for this version.
+
+Known differences that stay (README, Limits): the list rule of ThrowOnLinkError off, a loop that MII does not leave on
+an exception, the outgoing links of a Catch, bounds errors of `stringpart`/`stringleft`/`stringright`, typed `sort()`,
+the line breaks of `base64encode`, the `Expiration` of action properties, Tracer skipping (marked only).
+
+What needs a new X-Ray on MII: everything under "Flow" and "Expressions" (the generated code changes). The runtime
+changes reach a file of an earlier version when it is converted to the simulation mode.
+
 ## 2.7.3 - 2026-11-04
 
 Tim, 2026-11-04: variable and function names minified as well.

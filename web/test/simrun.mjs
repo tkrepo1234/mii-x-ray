@@ -96,6 +96,23 @@ function notRun(throwOnLinkError) {
   });
 }
 
+/** Calls a transaction, then sets After and reads the call; a Catch at the end notes what it caught. */
+function callAndCatch(callee) {
+  return trx({
+    outputs: [['After', 'string', ''], ['Marker', 'string', ''], ['Msg', 'string', ''], ['Ok', 'string', ''], ['Caught', 'string', 'no'], ['Type', 'string', ''], ['Src', 'string', ''], ['Text', 'string', '']],
+    actions: [['CallIt', 'TransactionCall', { TransactionName: callee, ResetState: 'true' }], ['Collect', 'Assignment', {}], ['Catch', 'CatchAction', {}], ['Handler', 'Assignment', {}]],
+    steps: [
+      step('ActionSequence', 'Sequence_1', { name: 'CallIt' }),
+      step('ActionSequence', 'Sequence_2', {
+        name: 'Collect',
+        outgoing: [['Transaction.After', '"ok"'], ['Transaction.Marker', 'CallIt.Marker'], ['Transaction.Msg', 'CallIt.LastErrorMessage'], ['Transaction.Ok', 'CallIt.Success']],
+      }),
+      step('Catch', 'Sequence_3', { name: 'Catch', outgoing: [['Transaction.Type', 'Catch.ExceptionType'], ['Transaction.Src', 'Catch.Source'], ['Transaction.Text', 'Catch.Message']] },
+        [step('ActionSequence', 'Sequence_4', { name: 'Handler', outgoing: [['Transaction.Caught', '"yes"']] })]),
+    ],
+  });
+}
+
 function actionError(throwOnActionError) {
   return trx({
     throwOnActionError,
@@ -221,6 +238,62 @@ const objects = {
     actions: [['Tx', 'XSLTransform', { Transform: '', InputXSL: '' }]],
     steps: [step('ActionSequence', 'Sequence_1', { name: 'Tx', incoming: [['Tx.Input', 'Local.Src']], outgoing: [['Transaction.Out', 'Tx.Output']] })],
   }),
+  // 2.8.0: behaviour measured on MII 15.5 SP1 (Definitive Guide of 2026-11-23)
+  'SIM/trxThrower.trx': trx({
+    outputs: [['Marker', 'string', '']],
+    actions: [['Mark', 'Assignment', {}], ['Boom', 'Throw', { Message: 'boom', Enable: 'true' }]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Mark', outgoing: [['Transaction.Marker', '"set"']] }), step('ActionSequence', 'Sequence_2', { name: 'Boom' })],
+  }),
+  'SIM/trxFailer.trx': trx({
+    outputs: [['Marker', 'string', '']],
+    actions: [['Mark', 'Assignment', {}], ['Stop', 'TerminateTransaction', { TerminateWithError: 'true', TerminationMessage: 'stopped' }]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Mark', outgoing: [['Transaction.Marker', '"set"']] }), step('ActionSequence', 'Sequence_2', { name: 'Stop' })],
+  }),
+  'SIM/trxUncaught.trx': callAndCatch('SIM/trxThrower'),
+  'SIM/trxFailed.trx': callAndCatch('SIM/trxFailer'),
+  'SIM/trxThrowCaught.trx': trx({
+    outputs: [['Type', 'string', ''], ['Src', 'string', ''], ['Text', 'string', '']],
+    actions: [['Boom', 'Throw', { Message: 'boom', Enable: 'true' }], ['Catch', 'CatchAction', {}]],
+    steps: [
+      step('ActionSequence', 'Sequence_1', { name: 'Boom' }),
+      step('Catch', 'Sequence_2', { name: 'Catch', outgoing: [['Transaction.Type', 'Catch.ExceptionType'], ['Transaction.Src', 'Catch.Source'], ['Transaction.Text', 'Catch.Message']] }),
+    ],
+  }),
+  'SIM/trxReqCallee.trx': trx({
+    inputs: [['Request', 'xml', '<Req><Sfc/><Keep>default</Keep></Req>']],
+    outputs: [['Echo', 'string', '']],
+    actions: [['Read', 'Assignment', {}]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Read', outgoing: [['Transaction.Echo', 'Transaction.Request{/Req/Sfc} & "|" & Transaction.Request{/Req/Keep}']] })],
+  }),
+  'SIM/trxReqCaller.trx': trx({
+    outputs: [['Echo', 'string', '']],
+    actions: [['CallReq', 'TransactionCall', { TransactionName: 'SIM/trxReqCallee', ResetState: 'true', Request: '<Req><Sfc/><Keep>stored</Keep></Req>' }]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'CallReq', incoming: [['CallReq.Request{/Req/Sfc}', '"S1"']], outgoing: [['Transaction.Echo', 'CallReq.Echo']] })],
+  }),
+  'SIM/trxExpr.trx': trx({
+    outputs: ['M1', 'M2', 'N1', 'N2', 'N3', 'B1', 'D1', 'D2', 'E1', 'E2', 'C1', 'K1', 'K2', 'G1', 'G2', 'R1', 'R2', 'S1', 'P1', 'A1', 'T1', 'X1', 'NS', 'RD', 'L1', 'D3', 'D4', 'Q1'].map((name) => [name, 'string', '?']),
+    locals: [['M', 'map', '{Present=[string:yes]}'], ['Req', 'xml', '<Envelope><Body><requests/></Body></Envelope>'],
+      ['Tpl', 'xml', '<Template><requests><request>1</request></requests></Template>']],
+    actions: [['Work', 'Assignment', {}]],
+    steps: [step('ActionSequence', 'Sequence_1', {
+      name: 'Work',
+      outgoing: [
+        ['Transaction.M1', 'match("abc", "ABC")'], ['Transaction.M2', 'match("abc", "(?-i)ABC")'],
+        ['Transaction.N1', 'number("12abc")'], ['Transaction.N2', 'number("1,5")'], ['Transaction.N3', 'number("1e3")'],
+        ['Transaction.B1', '"" & (1 < 2)'], ['Transaction.D1', '"" & (4 / 2)'], ['Transaction.D2', '"" & (1 / 0)'],
+        ['Transaction.E1', '5 == "5.0"'], ['Transaction.E2', '"5.0" == 5'], ['Transaction.C1', '"" < 1'],
+        ['Transaction.K1', 'listtostring(keys(map("Sfc", "1", "Site", "2", "Operation", "3")), ",")'],
+        ['Transaction.K2', 'listtostring(keys(liststomap(list("Sfc", "Site", "Operation"), list("1", "2", "3"))), ",")'],
+        ['Transaction.G1', 'getvaluefromMap(Local.M, "Missing")'], ['Transaction.G2', '"[" & Local.M{Missing} & "]"'],
+        ['Transaction.R1', 'stringreplaceall("a-b", "-", "x y")'], ['Transaction.R2', 'stringreplaceall("a-b", "-", " z ")'],
+        ['Transaction.S1', 'listtostring(stringtolist("a, b,,", ","), "|")'], ['Transaction.P1', '2 ^ 3 ^ 2'], ['Transaction.A1', '"2.5" + 1'],
+        ['Transaction.T1', 'stringlength("a\\tb")'],
+        ['Local.Req{/Envelope/Body}', 'Local.Tpl{/Template}', 'AssignXml'], ['Transaction.X1', 'Local.Req{name(/Envelope/*)}'],
+        ['Transaction.NS', 'nullstring'], ['Transaction.RD', 'round(0 - 2.5)'], ['Transaction.L1', '"" & list("a", "b")'],
+        ['Transaction.D3', '"" & (0.1 + 0.2)'], ['Transaction.D4', '"" & (10 ^ 20)'], ['Transaction.Q1', '(1 == 1) || (1 == 1) && (1 == 2)'],
+      ],
+    })],
+  }),
   'SIM/sqlMulti.tqsq': sql('do begin select A, END from X; select B from Y; end', { UseTypedParams: 'F' }),
   'SIM/trxStar.trx': trx({
     outputs: [['Txt', 'string', ''], ['Dyn1', 'string', ''], ['Dyn2', 'string', ''], ['Dyn3', 'string', ''], ['Dyn4', 'string', '']],
@@ -275,6 +348,13 @@ public static class Harness
         Run("xml", "SIM/trxXml", []);
         Run("xsl", "SIM/trxXslMissing", []);
         Run("star", "SIM/trxStar", []);
+        Run("uncaught", "SIM/trxUncaught", []);
+        Run("failed", "SIM/trxFailed", []);
+        Run("thrower", "SIM/trxThrower", []);
+        Run("failer", "SIM/trxFailer", []);
+        Run("throwcaught", "SIM/trxThrowCaught", []);
+        Run("req", "SIM/trxReqCaller", []);
+        Run("expr", "SIM/trxExpr", []);
     }
 
     private static void Run(string label, string path, Dictionary<string, string> inputs)
@@ -454,16 +534,19 @@ has('callee EchoNum=0', 'Run: a number input given "abc" arrives as 0');
 has('link0 Res=ab', 'ThrowOnLinkError 0: the run goes on after the failing link');
 has('link0 Num=42', 'ThrowOnLinkError 0: the failing link leaves its target unchanged');
 matches(/^link0 DIAG .*Conversion Exception/, 'ThrowOnLinkError 0: the swallowed link error is recorded');
-matches(/^link1 ERROR Conversion Exception/, 'ThrowOnLinkError 1: the failing link raises the exception');
+matches(/^link1 DIAG .*status Terminated.*Conversion Exception/, 'ThrowOnLinkError 1: the failing link raises the exception; nothing catches it, the run ends Terminated');
+has('link1 Num=42', 'ThrowOnLinkError 1: the entry run returns the outputs as they are (no error for the caller)');
 has('notrun0 Res=keep', 'a link to an output of an action that did not run fails; ThrowOnLinkError 0 keeps the target');
 has('notrun0 After=done', 'ThrowOnLinkError 0: the later link still runs');
-matches(/^notrun1 ERROR Invalid variable: CallNotRun/, 'ThrowOnLinkError 1: "Invalid variable" raises the exception');
+matches(/^notrun1 DIAG .*status Terminated.*Invalid variable: CallNotRun/, 'ThrowOnLinkError 1: "Invalid variable" raises the exception (run Terminated)');
+has('notrun1 Res=keep', 'ThrowOnLinkError 1: the target of the failing link keeps its value');
 has('action0 Res=after', 'ThrowOnActionError 0: the run goes on after the failing action');
 matches(/^action0 DIAG .*plugin failed/, 'ThrowOnActionError 0: the action error is recorded');
-matches(/^action1 ERROR plugin failed/, 'ThrowOnActionError 1: the failing action raises the exception');
+matches(/^action1 DIAG .*status Terminated.*plugin failed/, 'ThrowOnActionError 1: the failing action raises the exception (run Terminated)');
+has('action1 Res=', 'ThrowOnActionError 1: the step after the failing action is skipped');
 has("query SQL select 'x' as A, 'dflt' as B, '' as C, N from DUMMY VALUES ", 'text parameters: set value, template default, unset slot without default is ""');
 has('query SQL select A, N from T where A = ? and B = ? VALUES Int64:5,String:z', 'typed parameters: bound as ?, the unset slot takes the template default');
-has('query A=r1', 'trailing blanks of a text column are cut');
+has('query A=r1', 'a text column is trimmed');
 has('query N=---', 'a null text column is ---');
 has('xpath C1=2', 'XPath: a location path ending with "/" counts the rows (count(/Rowsets/Rowset/Row/))');
 has('xpath C2=1', 'getlistfromxpath with count(): one element with the number');
@@ -475,13 +558,13 @@ has('star Dyn4=last:I1', '#Repeater.Item# after its loop is the last item');
 has('star Dyn3=ab', '#Iterator.CurrentItem# is the current element');
 has('star Txt=<Row><INVENTORY_ID>I1</INVENTORY_ID><QTY_ON_HAND>5</QTY_ON_HAND></Row>', 'select *: the row record without columns stands for the Row read (repeater item)');
 has('regex R1=ResourceBO', 'Java regex: possessive quantifier :.*+$');
-has('regex R2=true', 'Java regex: POSIX class \\p{Lower}');
+has('regex R2=1', 'Java regex: POSIX class \\p{Lower} (a boolean as text is 1)');
 has('regex R3=a-c', 'Java regex: \\Q...\\E');
 has('regex I1=5', 'stringindexof counts from 1 (stringindexof("football", "ball") = 5, measured on MII)');
 has('regex I2=0', 'stringindexof gives 0 for a missing part');
 has('regex I3=4', 'stringlastindexof counts from 1');
 has('regex A1=5', 'append(list, value1, ...) appends every value');
-has('regex R4=true','Java regex: a backslash before _ quotes it (.NET refuses \\_)');
+has('regex R4=1','Java regex: a backslash before _ quotes it (.NET refuses \\_)');
 has('formats D=2026-10-28T10:00:00', 'Query.DateFormat is the template DateFormat (not unresolved)');
 has('formats DT=2026-10-28T10:00:00', 'a date link into a dateTime output converts');
 has('formats F=2.68', 'NumberFormat 0.00 rounds half-even (2.675 -> 2.68)');
@@ -490,8 +573,8 @@ has('formats I=12', 'NumberFormat leaves integer values');
 has('multi M1=2', 'several result sets: one Rowset each (count(/Rowsets/Rowset[2]/Row))');
 has('multi M2=y', 'several result sets: a value of the second Rowset');
 has('multi D1=TimeUnavailable', 'a NULL date column is TimeUnavailable');
-has('multi NB=true', 'END_DATE_TIME == "TimeUnavailable" holds for a NULL date');
-has('multi CT=true', 'first(getlistfromxpath(rows, "count(...)")) > 0 compares the count as a number');
+has('multi NB=1', 'END_DATE_TIME == "TimeUnavailable" holds for a NULL date');
+has('multi CT=1', 'first(getlistfromxpath(rows, "count(...)")) > 0 compares the count as a number');
 has('multi RC=1', 'rows typed by a reference document keep the columns the record does not know');
 has('xml Sum=12', 'a repeater item keeps the namespace declarations in scope (p:)');
 has('xml Appended=2', 'Append XML of Doc{xpath} appends the selected nodes');
@@ -499,7 +582,51 @@ matches(/^xml PLUGIN Distinct Unique .*ValueSource=<Nodes><i>1<\/i><i>2<\/i><\/N
 has('xml Num=0', 'NA (the null of a number) linked into a double gives 0 (assumed)');
 matches(/^xml PLUGIN Joiner Join .*ParentSource=<r><i>1<\/i>/,'Joiner gets the value of its ParentSource reference');
 has('xml DY=x-Z-y', '#Local.Name# in a regular expression is the value of the local');
-matches(/^xsl ERROR .*without a stylesheet/, 'an XSL transformation without a stylesheet fails with a clear message');
+matches(/^xsl DIAG .*without a stylesheet/, 'an XSL transformation without a stylesheet fails with a clear message');
 has('formats F2=2.7','the action XmlNumberFormat 0.0 wins over the template NumberFormat');
+// 2.8.0: measured on MII 15.5 SP1 (ZZ_RETEST, ZZ_RETEST2 of 2026-11-23)
+has('uncaught After=ok', 'callee with an uncaught exception: the caller goes on (ERR-3)');
+has('uncaught Caught=no', 'callee with an uncaught exception: the caller\'s Catch does not run');
+has('uncaught Marker=set', 'callee with an uncaught exception: its outputs are returned as they are');
+has('uncaught Msg=boom', 'callee with an uncaught exception: the message is in LastErrorMessage of the call');
+has('uncaught Ok=1', 'callee with an uncaught exception: Success of the call is true');
+has('thrower Marker=set', 'entry run with an uncaught exception: the outputs are returned, no error (ERR-1, ERR-4)');
+has('failed Caught=yes', 'callee ended by Terminate with error: the caller\'s Catch runs');
+has('failed After=', 'callee ended by Terminate with error: the step after the call is skipped');
+has('failed Type=ACTION_FAILURE', 'Catch.ExceptionType of a failed call is ACTION_FAILURE');
+has('failed Src=CallIt', 'Catch.Source of a failed call is the call action');
+has('failed Text=stopped', 'Catch.Message of a failed call is the termination message');
+matches(/^failer ERROR stopped/, 'entry run ended by Terminate with error: the run fails with the message');
+has('throwcaught Type=USER_EXCEPTION', 'Catch.ExceptionType of a Throw is USER_EXCEPTION');
+has('throwcaught Src=Boom', 'Catch.Source of a Throw is the Throw action');
+has('req Echo=S1|default', 'a call XML input filled by an element link starts from the callee default (CALL-4)');
+has('expr M1=1', 'match() ignores case (EXP-1)');
+has('expr M2=0', '(?-i) makes match() case-sensitive (M2-4)');
+has('expr N1=12', 'number("12abc") is 12 (NUM-2)');
+has('expr N2=15', 'number("1,5") is 15 (NUM-7)');
+has('expr N3=1', 'number("1e3") is 1 (NUM-5)');
+has('expr B1=1', 'a boolean as text is 1');
+has('expr D1=2', 'a double as text has no .0 (4 / 2 is 2)');
+has('expr D2=NA', 'a division by zero is NA');
+has('expr E1=1', '5 == "5.0" is true (the right side becomes a number)');
+has('expr E2=0', '"5.0" == 5 is false (the right side becomes the text 5)');
+has('expr C1=0', '"" < 1 is false (an empty side is not-a-number)');
+has('expr K1=Site,Sfc,Operation', 'map(): keys in hash order (EXP-2)');
+has('expr K2=Site,Sfc,Operation', 'liststomap(): keys in hash order, not sorted (EXP-2)');
+has('expr G1=null', 'getvaluefromMap of a missing key is the text null (MAP-1)');
+has('expr G2=[]', 'Map{Missing} is empty (MAP-2)');
+has('expr R1=ax yb', 'stringreplaceall keeps a blank inside the replacement (EXP-4)');
+has('expr R2=azb', 'stringreplaceall trims the replacement (EXP-4)');
+has('expr S1=a|b', 'stringtolist trims the parts and drops empty parts at the end');
+has('expr P1=64', '2 ^ 3 ^ 2 is 64 (left-associative)');
+has('expr A1=3', '"2.5" + 1 is 3 (a text added to a whole number is cut first)');
+has('expr T1=3', '\\t in a literal is a tab (EXP-3)');
+has('expr X1=Template', 'Assign XML at an XPath replaces the target element by the source element (XML-1)');
+has('expr NS=---', 'nullstring is ---');
+has('expr RD=-2', 'round(-2.5) is -2 (a half goes up)');
+has('expr L1=[[string:a], [string:b]]', 'a list as text is [[string:a], [string:b]]');
+has('expr D3=0.3', 'a double as text has at most 12 decimals (0.1 + 0.2 is 0.3)');
+has('expr D4=100000000000000000000', 'a double as text has no exponent');
+has('expr Q1=0', '&& and || share one level, left to right: (A || B) && C');
 console.log(failures === 0 ? 'OK (' + simulationFile + ')' : failures + ' failure(s), see ' + join(workFolder, 'output.txt'));
 process.exit(failures === 0 ? 0 : 1);

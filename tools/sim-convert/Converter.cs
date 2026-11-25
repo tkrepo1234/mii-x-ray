@@ -48,7 +48,7 @@ public sealed class Template
 /// <summary>Turns a default-mode X-Ray into the simulation mode (see SimulationRuntime.txt for what it emulates).</summary>
 public sealed class Converter(List<MetadataReference> references)
 {
-    public const string ToolVersion = "2.7.0";
+    public const string ToolVersion = "2.8.0";
 
     private const string ServicesRegion = "#region Services (implement these to run the code)";
 
@@ -786,6 +786,7 @@ public sealed class Converter(List<MetadataReference> references)
             WrapRegexPatterns();
             ConvertXmlSources();
             WrapDynamicLiterals();
+            EndTerminated(indent);
 
             // the start: enter, external call, inputs
             List<string> head = [indent + "var " + frame + " = " + file.Simulation + ".Enter(" + Comments.Literal(method.Path) + ", "
@@ -1019,6 +1020,12 @@ public sealed class Converter(List<MetadataReference> references)
                 {
                     file.Replace(invocation.Expression.Span, frame + ".LoadResource");
                 }
+
+                // Action.Success and Action.LastErrorMessage: the frame knows them
+                if (called == "Mii.ActionSuccess" || called == "Mii.LastErrorMessage")
+                {
+                    file.Replace(invocation.Expression.Span, frame + (called == "Mii.ActionSuccess" ? ".Success" : ".LastError"));
+                }
             }
         }
 
@@ -1135,11 +1142,42 @@ public sealed class Converter(List<MetadataReference> references)
             return match.Groups[3].Success ? "MiiSim.Nodes(" + code + ", " + Comments.Literal(match.Groups[3].Value.Trim()) + ")" : code;
         }
 
-        /// <summary>Patterns of the Regex calls the X-Ray writes for match() are Java patterns: Mii.JavaPattern.</summary>
+        /// <summary>An exception that no Catch of the transaction takes ends it with status Terminated, which the caller
+        /// treats as success (measured on MII): the flow stands in a try block whose filter tells the frame. A file of
+        /// X-Ray 2.8 has that block already (its filter is replaced), an older file gets it here.</summary>
+        private void EndTerminated(string indent)
+        {
+            if (method.Flow.Count == 0)
+            {
+                return;
+            }
+
+            if (method.Flow[^1] is TryStatementSyntax wrapper && wrapper.Catches.Count == 1 && wrapper.Catches[0].Filter != null
+                && wrapper.Catches[0].Declaration != null && wrapper.Catches[0].Filter.FilterExpression.ToString().Contains("Mii.IsTerminationOf"))
+            {
+                file.Replace(wrapper.Catches[0].Filter.FilterExpression.Span, frame + ".Uncaught(" + wrapper.Catches[0].Declaration.Identifier.Text + ")");
+                return;
+            }
+
+            string uncaught = FileConversion.FreeName(method.Node, "uncaught");
+            file.Insert(method.Flow[0].FullSpan.Start, indent + "try\n" + indent + "{\n", 102);
+            file.Insert(method.Flow[^1].FullSpan.End, indent + "}\n" + indent + "catch (Exception " + uncaught + ") when (" + frame + ".Uncaught(" + uncaught + "))\n"
+                + indent + "{\n" + indent + "    // MII: no Catch took the exception, the transaction ends with status Terminated; the caller goes on\n" + indent + "}\n", 150);
+        }
+
+        /// <summary>Patterns of the Regex calls the X-Ray writes are Java patterns: Mii.JavaPattern. Regex.IsMatch(text,
+        /// pattern) is the match() of a file older than X-Ray 2.8: Mii.Match, which ignores case as MII does.</summary>
         private void WrapRegexPatterns()
         {
             foreach (InvocationExpressionSyntax invocation in method.Flow.SelectMany((item) => item.DescendantNodesAndSelf().OfType<InvocationExpressionSyntax>()))
             {
+                if (invocation.Expression is MemberAccessExpressionSyntax isMatch && isMatch.Expression.ToString() == "Regex"
+                    && isMatch.Name.Identifier.Text == "IsMatch" && invocation.ArgumentList.Arguments.Count == 2)
+                {
+                    file.Replace(invocation.Expression.Span, "Mii.Match");
+                    continue;
+                }
+
                 if (invocation.Expression is MemberAccessExpressionSyntax member && member.Expression.ToString() == "Regex"
                     && invocation.ArgumentList.Arguments.Count >= 2)
                 {

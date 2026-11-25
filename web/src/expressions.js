@@ -1,7 +1,7 @@
-// Lexer and parser of the MII link expression language. Operator precedence as documented by SAP (guide p. 199-201),
-// lowest first: equality (== !=), or (|| or), and (&& and), relational (< > <= >=), concatenation (&), additive (+ -),
-// multiplicative (* / %), exponent (^), unary (- !), primary. Note: & binds tighter than comparisons and equality
-// binds weakest.
+// Lexer and parser of the MII link expression language. Operator precedence as MII applies it, lowest first:
+// equality (== !=), logical (&& and || or, one level), relational (< > <= >=), concatenation (&), additive (+ -),
+// multiplicative (* / %), exponent (^), unary (- !), primary. Every binary operator is left-associative
+// (2 ^ 3 ^ 2 is 64, A || B && C is (A || B) && C). Note: & binds tighter than comparisons and equality binds weakest.
 
 export class ExpressionError extends Error {}
 
@@ -11,8 +11,11 @@ const KEYWORDS = [
   'cr', 'lf', 'crlf', 'tab', 'doublequote', 'singlequote', 'datenow', 'today', 'dateformat', 'dateoffsetformat',
   'datetimezoneformat', 'currenttimezone', 'currenttimeoffset', 'timezoneids', 'emptylist', 'emptymap', 'nullstring',
   'nulldate', 'nullnumber', 'guid', 'transactionid', 'e', 'pi', 'username', 'transactionpath', 'currenttimemillis',
-  'userlocale', 'currenttimezoneoffset',
+  'userlocale', 'currenttimezoneoffset', 'nanotime', 'null', 'settings',
 ];
+
+// the escapes MII's parser takes inside a string literal besides \\ and \" (any other one does not compile in MII)
+const CONTROL_ESCAPES = { t: '\t', n: '\n', r: '\r', f: '\f', b: '\b', "'": "'" };
 
 const isDigit = (c) => /\p{Nd}/u.test(c);
 const isLetter = (c) => /\p{L}/u.test(c);
@@ -108,6 +111,10 @@ export function tokenize(text) {
       } else if (source.startsWith('/*', position)) {
         const end = source.indexOf('*/', position + 2);
         position = end < 0 ? source.length : end + 2;
+      } else if (source.startsWith('//', position)) {
+        // a line comment runs to the end of the line
+        const end = source.indexOf('\n', position + 2);
+        position = end < 0 ? source.length : end + 1;
       } else {
         return;
       }
@@ -123,6 +130,9 @@ export function tokenize(text) {
 
       if (c === '\\' && position + 1 < source.length && (source[position + 1] === '"' || source[position + 1] === '\\')) {
         value += source[position + 1];
+        position += 2;
+      } else if (c === '\\' && position + 1 < source.length && Object.hasOwn(CONTROL_ESCAPES, source[position + 1])) {
+        value += CONTROL_ESCAPES[source[position + 1]];
         position += 2;
       } else if (c === '"') {
         position++;
@@ -259,15 +269,12 @@ export function parseExpression(expression) {
   }
 
   function parseEquality() {
-    return leftAssociative(parseOr, ['==', '!=']);
+    return leftAssociative(parseLogical, ['==', '!=']);
   }
 
-  function parseOr() {
-    return leftAssociative(parseAnd, ['||', 'or']);
-  }
-
-  function parseAnd() {
-    return leftAssociative(parseRelational, ['&&', 'and']);
+  // && and || share one level in MII and are applied from left to right
+  function parseLogical() {
+    return leftAssociative(parseRelational, ['&&', 'and', '||', 'or']);
   }
 
   function parseRelational() {
@@ -287,14 +294,7 @@ export function parseExpression(expression) {
   }
 
   function parseExponent() {
-    const left = parseUnary();
-
-    if (isOperator('^')) {
-      takeOperator();
-      return binary('^', left, parseExponent());
-    }
-
-    return left;
+    return leftAssociative(parseUnary, ['^']);
   }
 
   function parseUnary() {
@@ -341,7 +341,7 @@ export function parseExpression(expression) {
 
     if (current().kind === 'LeftParen' && t.text.indexOf('.') < 0) {
       index++;
-      const fn = { node: 'Function', name: t.text.toLowerCase(), args: [] };
+      const fn = { node: 'Function', name: t.text.toLowerCase(), spelling: t.text, args: [] };
 
       if (current().kind !== 'RightParen') {
         fn.args.push(parseEquality());
@@ -364,7 +364,7 @@ export function parseExpression(expression) {
       }
 
       if (isKeyword(lower)) {
-        return { node: 'Keyword', name: lower };
+        return { node: 'Keyword', name: lower, spelling: t.text };
       }
     }
 

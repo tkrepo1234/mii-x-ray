@@ -8,7 +8,7 @@ import { TypeKind, Naming, UniqueNames, CsLiteral, DEFAULT_LIMIT, limitedDefault
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.7.3';
+export const TOOL_VERSION = '2.8.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -280,8 +280,21 @@ function readingRules() {
     '//   - Conditions combine with & and |, not && and ||: MII evaluates every part (a later part is no guard).',
     '//   - Mii.If is MII\'s if(): it returns a number, also for text branches (stringif returns text).',
     '//   - A catch handles every action before it in the same block (MII Catch). TransactionTerminatedException is',
-    "//     MII's Terminate Transaction: it ends the transaction, its own catch blocks pass it on to the caller.",
+    "//     MII's Terminate Transaction with error: it ends the transaction with status Failed, its own catch blocks pass",
+    '//     it on, and the call fails in the caller (the caller\'s Catch takes it).',
+    '//   - An exception that no Catch of a transaction takes does NOT reach the caller: the transaction ends with status',
+    '//     Terminated and the caller goes on as after a success, with the outputs as they are (measured on MII). Such a',
+    '//     method ends with "catch (Exception uncaught) when (...)" around its flow. A transaction that must fail for its',
+    '//     caller ends its Catch handler with Terminate with error.',
     '//   - Mii.IsEmpty(x) is MII\'s empty check (blank, "null" or "---"), Mii.IsTrue(x) its boolean check ("true" or "1").',
+    '//   - Mii.Match is MII\'s match(): it ignores case (also without (?i)) and finds the pattern anywhere in the text.',
+    '//   - Text and numbers: a boolean as text is 1 or 0; a number as text has no exponent and at most 12 decimals (12.0',
+    '//     is 12, not-a-number and a division by zero are NA); == converts the right side to the type of the left side',
+    '//     (Mii.AreEqual); < and > compare numbers only (Mii.ToNumber: "" makes the comparison false, other text fails).',
+    '//   - A map lists its keys in hash order (Mii.Keys, Mii.Values, a loop over a map), never in the order they were put;',
+    '//     Map{Key} of a missing key is "", getvaluefromMap of a missing key the text "null".',
+    '//   - An XML link writes to a node that exists: an XPath that selects nothing fails ("No nodes found"). Assign XML at',
+    '//     an XPath replaces the selected element by the source element (the source\'s name wins).',
     '//   - Improvements must keep the interfaces and the behaviour (sorting, empty checks, returned values) unless a',
     '//     change is asked for; list every behaviour change separately.',
     '//   - The notes below are problems of the MII objects themselves (stale links, undeclared properties); the code',

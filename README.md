@@ -16,7 +16,8 @@ runtime. Typical use: hand the file to an LLM or a colleague to understand, revi
 JavaScript version under `web/` is the leading one; the C# console stays at the 2.1 output (it was the reference the
 port was proven against: 526 of 526 corpus transactions gave byte-identical files) and only shares the runtime.
 Since 2.2.0 the page follows the SAP Manufacturing Suite Definitive Guide's verified runtime behaviour (see
-CHANGELOG), which the console does not.
+CHANGELOG), which the console does not; 2.8.0 follows the guide of 2026-11-23, whose runtime rules were re-measured on
+MII 15.5 SP1.
 
 **Transaction or folder.** Enter a transaction (`PROJECT/Folder/trxName`) or a folder (`PROJECT/Folder`). A folder
 gives one file with everything below it, subfolders included: one public method per transaction of the folder, the
@@ -89,18 +90,26 @@ names). `MiiSim.Diagnostics` lists the errors MII swallows.
 
 What the simulation emulates (CHANGELOG 2.6.0 lists what is assumed):
 
-- `ThrowOnLinkError` 1: a failing link raises the exception; 0: the link leaves its target unchanged, the run goes on.
+- An exception that no Catch of a transaction takes ends it with status Terminated: the caller's call succeeds, gets
+  the outputs as they are and the message in `LastErrorMessage`, the caller's Catch does not run; an entry run returns
+  its outputs. Terminate with error (or a Throw with TerminateException) ends with status Failed: the call action
+  fails in the caller (`Catch.Source` = the call action, `ExceptionType` = `ACTION_FAILURE`), an entry run fails.
+- `ThrowOnLinkError` 1: a failing link raises the exception; 0: the link leaves its target unchanged, the run goes on
+  (MII also ends the rest of that link list and takes back what the list wrote before; not emulated).
   A failing link into a call input leaves the input unlinked (callee default). `ThrowOnActionError` likewise.
-- A link to an output of an action that has not run fails with "Invalid variable".
+- A link to an output of an action that has not run fails with "Invalid variable". `Action.Success` and
+  `Action.LastErrorMessage` come from the run.
 - `ResetState` false: the call action keeps the callee's inputs, locals, outputs and action results of its previous
   call in the same run of the caller; true: each call starts from the defaults.
-- Defaults: an input the caller does not link gets the callee's default (not the stored snapshot); Runner inputs not
-  given get their default; locals and outputs start with their defaults; an unset query parameter takes the
-  template's `Param.N`, an unset slot without one is empty text.
-- Values cross the boundaries as MII text and MII types: a number input given `abc` arrives as 0, a link of text that
-  is no number into a number fails ("Conversion Exception", switch: `MiiSim.StrictLinkConversions`), query nulls are
-  `---` / `NA`, trailing blanks of text columns are cut, RowCount cuts the rows.
-- Catch, Throw and Terminate as in the default runtime.
+- Defaults: an input the caller does not link gets the callee's default (not the stored snapshot), also through an
+  Xacute query; Runner inputs not given get their default; locals and outputs start with their defaults; an unset
+  query parameter takes the template's `Param.N`, an unset slot without one is empty text.
+- Values cross the boundaries as MII text and MII types: a boolean is `1` or `0`, a number input given `abc` arrives
+  as 0, a link of text that is no number into a number fails ("Conversion Exception", switch:
+  `MiiSim.StrictLinkConversions`), query nulls are `---` / `NA` / `TimeUnavailable`, text columns arrive trimmed on
+  both sides, RowCount cuts the rows.
+- Catch and Throw as in the default runtime; `Catch.ExceptionType` is `USER_EXCEPTION`, `ACTION_FAILURE` or
+  `OUTPUT_LINK`.
 
 ## Build (console)
 
@@ -151,8 +160,9 @@ A server profile without saved password reads it from the environment variable `
 | `Doc{/Rowsets/Rowset/Row/Col}`, `Row[n]`, `Row[Col='v']`, `count(...)` | `doc.FirstOrEmpty().Col`, `doc.RowAt(n).Col`, `doc.FirstOrEmpty(row => row.Col == "v").Col`, `doc.Count`; any other XPath through `Mii.XPath` |
 | Conditional / Switch | `if` / `else`, `if` / `else if` |
 | Repeater / Iterator / For loop | `foreach (var ...)` over rows, nodes or a list / `for`; `Break` becomes a flag |
-| Catch | `try` / `catch (Exception catchName)` around everything that runs before it in the same parent |
-| Throw / Terminate Transaction | `throw new MiiException(...)` / `throw new TransactionTerminatedException(...)` or `return ...;` |
+| Catch | `try` / `catch (Exception catchName)` around everything that runs before it in the same parent; the first child is the handler, further children follow the block (MII runs them on every pass) |
+| Throw / Terminate Transaction | `throw new MiiException(...)` / `throw new TransactionTerminatedException(...)` (also a Throw with TerminateException) or `return ...;` |
+| an exception no Catch takes | `catch (Exception uncaught) when (...)` around the flow of the method: the transaction ends with status Terminated and its caller goes on as after a success |
 | Tracer, Event Logger | `plugins.Log(level, message)` |
 | every other action (ME PAPI, web service, HTTP, mail, files, sort/filter, ...) | `plugins.Invoke("ActionClass", "ActionName", new() { ["Setting"] = value, ... })` |
 | shared / global properties (`Inline.X`, `Global.X`) | `plugins.GetProperty` / `SetProperty` |
@@ -166,20 +176,46 @@ MII runtime settings (Persist, ResetState, logging, transaction attributes, layo
 cached test results are left out. The file ends with the service interfaces (`IQueryService`, `IPluginService`) and the `Mii`
 helper class, so each file compiles on its own.
 
-MII rules the helpers keep: booleans are true for `true` or `1`; `match()` is case-sensitive unless the pattern
-starts with `(?i)`; `datediff()` returns seconds; `stringpart()` counts from 1; `append()` changes the list it gets;
-`==` binds weaker than `&&` and `&` binds tighter than comparisons (SAP's operator precedence).
+MII rules the helpers keep: `datediff()` returns seconds; `stringpart()` counts from 1; `append()` changes the list
+it gets; `==` binds weaker than `&&` and `||` (which share one level) and `&` binds tighter than comparisons; every
+binary operator is left-associative (`2 ^ 3 ^ 2` is 64).
 
 Since 2.2.0 also (verified behaviour from the Definitive Guide and Tim's projects): `&&`, `||` and the inputs of a
 Conditional evaluate every part (C# `&` / `|`); `if()` returns a number, also for text branches (`Mii.If`, with a
-note); `number("")` and `number` of other text fail (`Mii.Number`); a missing map key reads as the text `null`;
-`list(list, x)` adds the elements of a list argument; `first()`/`last()` of an empty list fail; `liststomap` sorts its
-keys; `stringreplaceall` drops the blanks of its replacement; `encode`/`decode` are form encoding;
-`currenttimezoneoffset` is in milliseconds; an Iterator over a map gives its keys and has no `Item`; Assign XML at an
-XPath fills the selected node with the source's content; Assign XML of a text has no effect; a query's `RowCount`
-becomes `Query.RowCount`; a `TransactionName` set by an expression is a call chosen at runtime; only the first child
-of a Catch is its handler. Calls inside loops with ResetState false, asynchronous calls and transactions with
-ThrowOnLinkError off are marked.
+note); `list(list, x)` adds the elements of a list argument; `first()`/`last()` of an empty list fail;
+`encode`/`decode` are form encoding; `currenttimezoneoffset` is in milliseconds; an Iterator over a map gives its
+keys and has no `Item`; Assign XML of a text has no effect; a query's `RowCount` becomes `Query.RowCount`; a
+`TransactionName` set by an expression is a call chosen at runtime; only the first child of a Catch is its handler.
+Calls inside loops with ResetState false, asynchronous calls and transactions with ThrowOnLinkError off are marked.
+
+Since 2.8.0 (the guide of 2026-11-23, re-measured on MII 15.5 SP1):
+
+- Text forms: a boolean as text is `1` or `0`; a floating-point number has no exponent and at most 12 decimals (`12.0`
+  is `12`), not-a-number and a division by zero are `NA`; a list is `[[string:a], [string:b]]`, a map
+  `{Key=[string:v]}`, both `""` when empty; `nullstring` is `---`.
+- Conversions: text is true for `true/yes/on/1/y/t` and whole numbers from 1, false for `false/no/off/0/n/f`, other
+  text fails; `==` converts the right side to the type of the left side (`5 == "5.0"` is true, `"5.0" == 5` is
+  false); `<` `>` `<=` `>=` compare numbers only (`""` makes the comparison false, other text fails); `+` of a text
+  and a whole number adds whole numbers (`"2.5" + 1` is 3); `&&` with a text on the left compares the two texts.
+- Functions: `match()` ignores case, `(?-i)` switches that off; `number()` reads the leading number (`"12abc"` is 12,
+  `"1,5"` is 15, `"1e3"` is 1, `""` fails); `round()` takes one argument, rounds a half up and fails on text;
+  `getvaluefromMap` of a missing key is the text `null`, `Map{Key}` is `""`; `map()` and `liststomap()` list their keys
+  in hash order (Java's HashMap order is reproduced); `stringreplaceall` trims its replacement and takes Java's
+  replacement syntax; `stringtolist` trims the parts and drops empty ones at the end; `size()` of a text is 0;
+  `dateformat()` of a text that does not fit gives `""`; `datetoseconds` counts from year 1; an unknown time zone is
+  GMT; `stringtoboolean` is true only for the text `true`.
+- A function MII does not have (`quotes`, `sum`, `and`, `or`, ...) and a name in another case than MII's
+  (`getvaluefrommap`) are notes: such a link does not compile in MII. `\t`, `\n`, `\r` in a literal are the control
+  characters.
+- Flow: an exception no Catch takes ends the transaction with status Terminated and the caller goes on; a Throw with
+  TerminateException is Terminate with error; the outgoing links of Throw and Terminate run; a Conditional with empty
+  `LogicalAnd` is OR; a While loop without `MaxIterations` runs 256 times at most; the `Break` of a loop inside a loop is
+  never reset; a Tracer with links is marked (MII skips it and its links below the run's log level).
+- Links: Assign XML at an XPath replaces the selected element by the source element; an XML link to an XPath that
+  selects nothing fails ("No nodes found"); Remove XML without an XPath has no effect; an XML input of a call that
+  only element links fill starts from the callee's default.
+- Xacute query: an input the query does not map keeps its default; a mapped text input whose parameter the action
+  does not set arrives as the parameter's value (also empty).
 
 ## Limits
 
@@ -188,12 +224,22 @@ ThrowOnLinkError off are marked.
 - A default value larger than 128 KB (UTF-8 bytes) is not in the file: a text gets the text `"[n-bytes]"`, any other
   type starts empty and the comment says `default: [n-bytes]` (n = the size). Shared property and query parameter
   defaults in the header likewise.
-- Over Xacute or the Runner an input that is not passed is empty in MII; C# gives it the parameter default (the
-  simulation mode tells the two apart).
 - `#expr#` (an expression built at runtime) and `getvalue(name)` cannot be translated; they become `Mii.Evaluate`
   and `Mii.GetValue` and are listed in the notes.
 - A Catch handles what precedes it **in its parent** (a lexical `try`). In MII it also catches exceptions from
-  earlier sibling branches of an ancestor; such rare layouts differ.
+  earlier sibling branches of an ancestor; such rare layouts differ. MII does not leave a loop on an exception (the
+  remaining passes run with every action skipped, and a Catch inside the body takes the exception on a later pass);
+  the C# leaves the loop. The outgoing links of a Catch run in the handler only (MII: on every pass).
+- The C# types follow the MII types of the properties; a value read through an XPath is text in MII whatever the row
+  record says. X-Ray applies MII's text rules to such values in `+` and `&&`; `==` compares them by the record's type.
+- `ThrowOnLinkError` off: MII ends the list of links at the first failing link and takes back what the list wrote
+  before; the C# throws, the simulation skips the one link.
+- An XML document that X-Ray starts empty is built by plain element paths; in MII such a document has content or the
+  link fails. `Action.Success` is true and `Action.LastErrorMessage` empty in the default file (the simulation knows
+  both).
+- Not adopted from the guide: bounds errors of `stringpart`/`stringleft`/`stringright` (the C# clamps), typed sorting
+  of `sort()`, the line breaks of `base64encode`, list and map elements of other types than text, the `Expiration` of
+  action properties, Tracer skipping by log level (marked only), Event Logger type checks.
 - Only rowset XML is typed; other XML documents (PAPI requests, web service payloads) stay `XmlDocument`.
 - Java date patterns, Java regular expressions and Java time zone ids are mapped to .NET as far as they match
   (.NET `\w` and `\d` also match non-ASCII letters and digits, Java's do not).

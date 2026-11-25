@@ -3,7 +3,9 @@
 // Execution model: a step runs its action, then its children in order. Conditional: child 0 = true path, child 1 =
 // false path, further children run afterwards. Switcher: one child per match value, then the default, further
 // children afterwards. Loops: child 0 is the body, further children run once after the loop. Catch: handles whatever
-// ran before it in the same parent (and the parent's own action) - a try block around those statements.
+// ran before it in the same parent (and the parent's own action) - a try block around those statements; child 0 is
+// the handler, further children run on every pass. An exception no Catch takes ends the transaction with status
+// Terminated, which its caller treats as success (_endOfRun).
 import { MiiXml, MiiQueryKind } from './model.js';
 import { literalLinkedValue, linkedExpression } from './resolver.js';
 import { parseExpression, ExpressionError, referenceScope, referenceMember } from './expressions.js';
@@ -26,6 +28,7 @@ const PARAM_SLOT = /^Param\.(\d+)$/;
 const SECRET = /password|passwort|secret|^pin$/i;
 const SINGLE_ROW_COLUMN_PATH = /^\/?Row\/([A-Za-z_][A-Za-z0-9_]*)$/;
 const WORD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const PLAIN_INPUT_TYPES = [TypeKind.String, TypeKind.Bool, TypeKind.Int, TypeKind.Long, TypeKind.Double, TypeKind.Decimal];
 
 /** Settings of a transaction call that only steer the MII runtime. */
 const CALL_SETTINGS = ['TransactionName', 'ResetState', 'Persist', 'Async', 'LogLevel', 'LogType', 'StoreTransactionOutput', 'Expiration', 'Inputs', 'Outputs'];
@@ -70,6 +73,13 @@ const hasCode = (lines) => lines.some((line) => {
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/** True when the last statement of the lines leaves the flow (a statement after it would never run). */
+function endsFlow(lines) {
+  const code = lines.filter((line) => line.trim().length > 0 && !line.trim().startsWith('//'));
+  const last = code.length > 0 ? code[code.length - 1] : '';
+  return /^(return|throw|break|continue)\b/.test(last);
+}
+
 function oneLine(text) {
   const value = (text || '').replace(/\s+/g, ' ').trim();
   return value.length > 100 ? value.substring(0, 100) + '...' : value;
@@ -111,6 +121,8 @@ export class TransactionEmitter {
     this._actions = new Map();
     this._loops = [];
     this._flow = [];
+    this._unguarded = 0; // actions that can fail and that no Catch of this transaction follows (lexically)
+    this._hoisted = []; // declarations that live for the whole run (the Break of a loop inside a loop)
     this._expressionTexts = [];
     this._currentAction = '';
     this._collectExpressionTexts();
@@ -358,6 +370,13 @@ export class TransactionEmitter {
       return this._translator.unresolved(reference.path);
     }
 
+    if (symbol.kind !== ActionKind.Catch && (member === 'Success' || member === 'LastErrorMessage')) {
+      // what the engine sets for every action: known at runtime only (the simulation mode reads them from its frame)
+      return member === 'Success'
+        ? TypedCode.primary('Mii.ActionSuccess(' + CsLiteral.string(scope) + ')', CsType.Bool)
+        : TypedCode.primary('Mii.LastErrorMessage(' + CsLiteral.string(scope) + ')', CsType.String);
+    }
+
     const result = resolveActionMember(symbol, member) || configuredValue(symbol, member);
 
     if (!result) {
@@ -383,7 +402,7 @@ export class TransactionEmitter {
   /** The lines of the transaction's method: inputs are parameters, outputs the return value. */
   emitMethod(isPublic) {
     if (/^\s*(false|0)\s*$/i.test(this._transaction.throwOnLinkError)) {
-      this._context.note(this._transaction.shortName, 'ThrowOnLinkError is off: in MII a link that fails leaves its target unchanged and the run goes on (the C# throws)');
+      this._context.note(this._transaction.shortName, 'ThrowOnLinkError is off: in MII a link that fails raises no exception of its own, but it ends its list of links (what the list wrote before is taken back) and, for an incoming link, the action does not run and counts as failed (the C# throws)');
     }
 
     const flow = this._emitSiblings(this._transaction.steps, []);
@@ -437,14 +456,14 @@ export class TransactionEmitter {
       body.push(...withMiiName(variable.type + ' ' + variable.name + ' = ' + variable.initializer + ';', variable.miiName));
     }
 
-    body.push(...configuration);
+    body.push(...configuration, ...this._hoisted);
 
     if (flow.length > 0) {
       if (body.length > 0) {
         body.push('');
       }
 
-      body.push(...flow);
+      body.push(...this._endOfRun(flow));
     }
 
     if (this._contract.outputs.length > 0) {
@@ -453,6 +472,24 @@ export class TransactionEmitter {
 
     lines.push(...indent(body), '}');
     return lines;
+  }
+
+  /** An exception that no Catch of the transaction takes does not reach the caller in MII: the run ends with status
+   * Terminated, which a caller treats as success (its Catch does not run, it gets the outputs as they are). Only
+   * Terminate with error makes the call fail. The flow of a transaction that has such an action stands in a try block
+   * that ends the method the same way. */
+  _endOfRun(flow) {
+    if (this._unguarded === 0) {
+      return flow;
+    }
+
+    const uncaught = this._names.claim('uncaught');
+    return ['try', '{', ...indent(flow), '}',
+      'catch (Exception ' + uncaught + ') when (!Mii.IsTerminationOf(' + uncaught + ', ' + CsLiteral.string(this._transaction.path) + '))', '{',
+      '    // MII: no Catch took the exception, the transaction ends here with status Terminated. A caller treats that as',
+      '    // success: its call goes on with the outputs as they are now and with the message in LastErrorMessage, its',
+      '    // Catch does not run. Only Terminate with error makes the call fail.',
+      '}'];
   }
 
   /** Every parameter is optional: a caller passes the inputs MII links, the others stay empty. One parameter per line
@@ -481,13 +518,14 @@ export class TransactionEmitter {
     return lines;
   }
 
-  /** Steps in order; a Catch wraps everything before it (including the lines passed in) in a try block. */
-  _emitSiblings(steps, before) {
+  /** Steps in order; a Catch wraps everything before it (including the lines passed in) in a try block. mark is the
+   * count of unguarded actions before the first of those lines. */
+  _emitSiblings(steps, before, mark = this._unguarded) {
     let lines = before;
 
     for (const step of steps) {
       if (step.stepType === 'Catch') {
-        lines = this._wrapInTry(lines, step);
+        lines = this._wrapInTry(lines, step, mark);
       } else {
         lines.push(...this._emitStep(step));
       }
@@ -511,6 +549,7 @@ export class TransactionEmitter {
         return this._wrapInTry([], step);
       default: {
         const lines = [];
+        const mark = this._unguarded;
 
         if (step.stepType !== 'ActionSequence') {
           lines.push('// X-Ray: unknown step type ' + step.stepType + ', run as a sequence');
@@ -520,14 +559,14 @@ export class TransactionEmitter {
           lines.push(...this._emitAction(step.action));
         }
 
-        return this._emitSiblings(step.children, lines);
+        return this._emitSiblings(step.children, lines, mark);
       }
     }
   }
 
   // ---------------------------------------------------------------------------------------------- exception handling
 
-  _wrapInTry(guarded, catchStep) {
+  _wrapInTry(guarded, catchStep, mark = this._unguarded) {
     const name = catchStep.action ? catchStep.action.name : catchStep.name;
     this._currentAction = name;
 
@@ -535,6 +574,9 @@ export class TransactionEmitter {
       guarded.push('// ' + name + ': catches nothing (no action runs before it), its handler never runs');
       return guarded;
     }
+
+    // what ran before the Catch is guarded now
+    this._unguarded = mark;
 
     const symbol = catchStep.action ? this._actions.get(catchStep.action.name) || null : null;
     const error = this._names.claim(Naming.camel(name) + 'Error');
@@ -550,7 +592,15 @@ export class TransactionEmitter {
     }
 
     if (catchStep.action) {
-      handler.push(...this._emitOutgoing(catchStep.action));
+      const outgoing = this._emitOutgoing(catchStep.action);
+
+      if (hasCode(outgoing)) {
+        // a Catch runs whenever it is reached; without an exception its outputs are empty and its links run as well
+        this.note('the Catch ' + name + ' has outgoing links: MII runs them on every pass, without an exception with empty outputs (the C# runs them in the handler only)');
+        handler.push('// X-Ray: MII runs the links of ' + name + ' on every pass, without an exception with empty outputs');
+      }
+
+      handler.push(...outgoing);
     }
 
     // only the first child of a Catch is its handler; further children do not belong to it
@@ -563,11 +613,16 @@ export class TransactionEmitter {
       handler.push('// the exception is swallowed');
     }
 
+    if (symbol && symbol.variable !== null && this._loops.length > 0 && !endsFlow(guarded)) {
+      // a Catch that is reached with nothing to catch runs as well: its outputs are empty again on that pass
+      guarded.push(symbol.variable + ' = null; // ' + name + ' reached without an exception: ExceptionCaught false, Message empty');
+    }
+
     const result = ['try', '{', ...indent(guarded), '}', 'catch (Exception ' + error + ')', '{', ...indent(handler), '}'];
 
     if (catchStep.children.length > 1) {
-      this.note('the Catch ' + name + ' has ' + catchStep.children.length + ' children: only the first is its handler, the others are not (when they run is not documented)');
-      result.push('// further children of the Catch ' + name + ': not part of its handler (when MII runs them is not documented)');
+      this.note('the Catch ' + name + ' has ' + catchStep.children.length + ' children: only the first is its handler, the others run on every pass, with or without an exception');
+      result.push('// further children of the Catch ' + name + ': not part of its handler, MII runs them on every pass (after the handler)');
       result.push(...this._emitSiblings(catchStep.children.slice(1), []));
     }
 
@@ -579,6 +634,7 @@ export class TransactionEmitter {
   _emitConditional(step) {
     const lines = [];
     const use = step.action;
+    const mark = this._unguarded;
 
     if (!use || !use.definition) {
       lines.push('// X-Ray: conditional step ' + step.name + ' without action; its paths follow as a sequence');
@@ -587,7 +643,8 @@ export class TransactionEmitter {
 
     this._currentAction = use.name;
     const count = parseCount(use.definition.static('InputCount'), 1);
-    const logicalAnd = use.definition.static('LogicalAnd').length === 0 || CsLiteral.isTrue(use.definition.static('LogicalAnd'));
+    // LogicalAnd false or empty is OR (the Workbench stores false unless AND is chosen in the dialog)
+    const logicalAnd = CsLiteral.isTrue(use.definition.static('LogicalAnd'));
     const terms = [];
 
     for (let index = 1; index <= count; index++) {
@@ -622,12 +679,13 @@ export class TransactionEmitter {
       }
     }
 
-    return this._emitSiblings(step.children.slice(2), lines);
+    return this._emitSiblings(step.children.slice(2), lines, mark);
   }
 
   _emitSwitcher(step) {
     const lines = [];
     const use = step.action;
+    const mark = this._unguarded;
 
     if (!use || !use.definition) {
       lines.push('// X-Ray: switch step ' + step.name + ' without action; its paths follow as a sequence');
@@ -658,7 +716,7 @@ export class TransactionEmitter {
       lines.push('{', ...indent(branch), '}');
     }
 
-    return this._emitSiblings(step.children.slice(matchCount + 1), lines);
+    return this._emitSiblings(step.children.slice(matchCount + 1), lines, mark);
   }
 
   /** A branch step with its flow context for the call tree (null = no context, e.g. an always-true condition). */
@@ -685,6 +743,7 @@ export class TransactionEmitter {
   _emitLoop(step) {
     const lines = [];
     const use = step.action;
+    const mark = this._unguarded;
 
     if (!use || !use.definition) {
       lines.push('// X-Ray: loop step ' + step.name + ' without action; its body follows as a sequence');
@@ -699,7 +758,13 @@ export class TransactionEmitter {
 
     if (this._isLinkTarget(use.name, 'Break')) {
       loop.breakVariable = this._names.claim(camel + 'Break');
-      lines.push('var ' + loop.breakVariable + ' = false;');
+
+      if (this._loops.length > 0) {
+        // MII never resets Break: once it is set, the loop does not run again in this run of the transaction
+        this._hoisted.push('bool ' + loop.breakVariable + ' = false; // ' + use.name + '.Break: MII never resets it, a loop whose Break is set does not run again in this run');
+      } else {
+        lines.push('var ' + loop.breakVariable + ' = false;');
+      }
     }
 
     let header;
@@ -709,7 +774,7 @@ export class TransactionEmitter {
       header = this._forHeader(use, loop, camel);
     } else if (type === 'WhileRepeaterAction') {
       const counter = this._names.claim(camel + 'Iteration');
-      const maximum = this._inputValue(use, 'MaxIterations', CsType.Int) || TypedCode.primary('int.MaxValue', CsType.Int);
+      const maximum = this._inputValue(use, 'MaxIterations', CsType.Int) || TypedCode.primary('256', CsType.Int); // MII's default
       loop.index = TypedCode.primary(counter, CsType.Int);
       header = 'for (int ' + counter + ' = 1; ' + counter + ' <= ' + maximum.at(Precedence.Relational + 1) + '; ' + counter + '++)';
 
@@ -748,7 +813,7 @@ export class TransactionEmitter {
     this._loops.pop();
     this._flow.pop();
     lines.push(header, '{', ...indent(body), '}');
-    return this._emitSiblings(step.children.slice(1), lines);
+    return this._emitSiblings(step.children.slice(1), lines, mark);
   }
 
   _forHeader(use, loop, camel) {
@@ -910,6 +975,12 @@ export class TransactionEmitter {
     const kind = link.kind;
 
     if (kind === 'RemoveXml') {
+      if (selector === null) {
+        // Remove XML needs an XPath: on a whole property it does nothing (it does not empty the document)
+        this.note('Remove XML on ' + link.to + ' without an XPath has no effect in MII (the property keeps its value)');
+        return ['// X-Ray: no effect in MII (Remove XML without an XPath does nothing, ' + oneLine(link.to) + ' keeps its value)'];
+      }
+
       return [this._removeXml(target, selector)];
     }
 
@@ -987,6 +1058,10 @@ export class TransactionEmitter {
         lines.push(...this._emitTerminate(use));
         return lines;
       case 'Tracer':
+        if (use.outgoing.length > 0) {
+          lines.push('// MII runs a Tracer and its links only when the log level of the run reaches the Level of the Tracer; in a', '// transaction called with Persist NEVER no Tracer runs, and the links below do not run then');
+        }
+
         lines.push('plugins.Log(' + this._logText(use, 'Level', 'DEBUG') + ', ' + this._messageOf(use, 'Message') + ');');
         break;
       case 'EventLogger':
@@ -1007,9 +1082,11 @@ export class TransactionEmitter {
 
         break;
       case 'StringToXmlConverter':
+        this._unguarded++;
         lines.push(assign(symbol, 'Mii.ParseXml(' + toStringCode(this._inputValue(use, 'Input', CsType.String) || TypedCode.primary('""', CsType.String)).code + ')'));
         break;
       case 'XSLTransform':
+        this._unguarded++;
         lines.push(...this._emitXslTransform(use, symbol));
         break;
       default:
@@ -1084,23 +1161,36 @@ export class TransactionEmitter {
   }
 
   _emitThrow(use) {
-    const statement = 'throw new MiiException(' + this._messageOf(use, 'Message') + ', ' + CsLiteral.string(use.name) + ');';
+    const terminate = this._inputValue(use, 'TerminateException', CsType.Bool);
+    const message = this._messageOf(use, 'Message');
+    let statement = 'throw new MiiException(' + message + ', ' + CsLiteral.string(use.name) + ');';
+    const lines = [];
+
+    if (terminate !== null && terminate.code === 'true') {
+      // a Throw with TerminateException acts as Terminate with error: no Catch takes it, the caller's call fails
+      lines.push('// TerminateException is true: the Throw ends the transaction with status Failed, no Catch takes it');
+      statement = 'throw ' + TERMINATION_MARKER + CsLiteral.string(this._transaction.path) + ', ' + message + ');';
+    } else if (terminate !== null && terminate.code !== 'false') {
+      this.note('TerminateException of the Throw is set by a link: when it is true the Throw acts as Terminate with error (the C# always throws the exception a Catch can take)');
+      lines.push('// X-Ray: TerminateException = ' + oneLine(terminate.code) + ': when true, MII ends the transaction with status Failed and no Catch takes it');
+    }
+
     const enable = this._inputValue(use, 'Enable', CsType.Bool);
 
-    if (enable === null || enable.code === 'true') {
-      return [statement];
+    if (enable !== null && enable.code === 'false') {
+      return [...lines, '// disabled in MII (Enable = false): ' + statement];
     }
 
-    if (enable.code === 'false') {
-      return ['// disabled in MII (Enable = false): ' + statement];
-    }
-
-    return ['if (' + enable.code + ')', '{', '    ' + statement, '}'];
+    this._unguarded++;
+    // a Throw succeeds as an action: its outgoing links run, then the exception is on its way
+    const body = [...this._emitOutgoing(use), statement];
+    return enable === null || enable.code === 'true' ? [...lines, ...body] : [...lines, 'if (' + enable.code + ')', '{', ...indent(body), '}'];
   }
 
   _emitTerminate(use) {
     const lines = [];
-    const withError = this._inputValue(use, 'TerminateWithError', CsType.Bool) || TypedCode.primary('false', CsType.Bool);
+    // TerminateWithError is true unless the action says otherwise
+    const withError = this._inputValue(use, 'TerminateWithError', CsType.Bool) || TypedCode.primary('true', CsType.Bool);
     let message = this._inputValue(use, 'TerminationMessage', CsType.String);
 
     if (message === null || (message.isLiteral && message.literalText.length === 0)) {
@@ -1108,16 +1198,20 @@ export class TransactionEmitter {
     }
 
     const statement = 'throw ' + TERMINATION_MARKER + CsLiteral.string(this._transaction.path) + ', ' + message.code + ');';
+    // the outgoing links of a Terminate still run, with or without error
+    const outgoing = this._emitOutgoing(use);
 
     if (withError.code === 'true') {
-      return [statement];
+      return [...outgoing, statement];
     }
+
+    lines.push(...outgoing);
 
     if (withError.code !== 'false') {
       lines.push('if (' + withError.code + ')', '{', '    ' + statement, '}');
     }
 
-    lines.push(...this._emitOutgoing(use), this._contract.returnStatement);
+    lines.push(this._contract.returnStatement);
     return lines;
   }
 
@@ -1176,6 +1270,7 @@ export class TransactionEmitter {
 
   _emitCall(use, symbol) {
     this._record(use, symbol);
+    this._unguarded++;
 
     switch (symbol.kind) {
       case ActionKind.TransactionCall:
@@ -1284,25 +1379,54 @@ export class TransactionEmitter {
       inputs.push([input, link]);
     }
 
-    lines.push(...this._emitMethodCall(use, symbol, inputs));
+    // measured on MII: an input the query does not map keeps its default. A mapped input whose Param.N the action
+    // does not set gets the parameter's value of the action or the template: a text input arrives as that text, also
+    // as "", any other input keeps its default when the value is empty
+    const set = new Set(inputs.map(([input]) => input.name));
+    const fixed = new Map();
+
+    for (const [slot, mapped] of query.xacuteMappedTargets) {
+      const input = callee.findInput(mapped);
+
+      if (!input || set.has(input.name)) {
+        continue;
+      }
+
+      const parameter = query.findParameter(slot);
+      const configured = use.definition.static('Param.' + slot) || (parameter && parameter.defaultValue ? parameter.defaultValue : '');
+
+      if (input.type.kind === TypeKind.String || (configured.trim().length > 0 && PLAIN_INPUT_TYPES.includes(input.type.kind))) {
+        lines.push('// Param.' + slot + ' is not set by the action: ' + mapped + ' gets the value of the query parameter'
+          + (configured.length === 0 ? ' (empty, not the default of the input)' : ''));
+        fixed.set(input.name, convertTo(staticValue(configured, input.type), input.type).code);
+      }
+    }
+
+    lines.push(...this._emitMethodCall(use, symbol, inputs, fixed));
     return lines;
   }
 
-  /** The call of a transaction's method with named arguments; an input filled through XPath links is built first. */
-  _emitMethodCall(use, symbol, inputs) {
+  /** The call of a transaction's method with named arguments; an input filled through XPath links is built first.
+   * fixed: values of inputs no link sets (input name -> code). */
+  _emitMethodCall(use, symbol, inputs, fixed = new Map()) {
     const lines = [];
-    const order = [];
-    const values = new Map();
+    const order = [...fixed.keys()];
+    const values = new Map(fixed);
     const documents = new Map();
 
     for (const [input, link] of inputs) {
       const target = linkTarget(link.to);
 
+      if (target.selector === null && link.kind === 'RemoveXml') {
+        lines.push('// X-Ray: no effect in MII (Remove XML without an XPath does nothing): ' + oneLine(link.to));
+        continue;
+      }
+
       if (!order.includes(input.name)) {
         order.push(input.name);
       }
 
-      if (target.selector === null && link.kind !== 'RemoveXml') {
+      if (target.selector === null) {
         const value = convertTo(this._linkValue(link, input.type), input.type);
 
         if (documents.has(input.name)) {
@@ -1318,12 +1442,20 @@ export class TransactionEmitter {
 
       if (name === undefined) {
         name = this._names.claim(Naming.camel(use.name) + Naming.pascal(input.miiName).replace(/^@/, ''));
-        const initial = values.has(input.name) ? 'Mii.ToXml(' + values.get(input.name) + ')' : 'new XmlDocument()';
-        lines.push('var ' + name + ' = ' + initial + ';');
+
+        if (values.has(input.name)) {
+          lines.push('var ' + name + ' = Mii.ToXml(' + values.get(input.name) + ');');
+        } else {
+          // measured on MII: an XML input that only element links fill starts from the callee's default value of that
+          // input (not from the value stored in the call action), the links change the parts they address
+          lines.push('// the input starts from the default of ' + symbol.callee.methodName + ', the links below change parts of it');
+          lines.push('var ' + name + ' = ' + ContractBuilder.initializer(CsType.Xml, input.defaultText) + ';');
+        }
+
         documents.set(input.name, name);
       }
 
-      lines.push(...this._write(TypedCode.primary(name, CsType.Xml), target.selector === null ? '/*' : target.selector, link));
+      lines.push(...this._write(TypedCode.primary(name, CsType.Xml), target.selector, link));
       values.set(input.name, convertTo(TypedCode.primary(name, CsType.Xml), input.type).code);
     }
 
@@ -1395,6 +1527,8 @@ export class TransactionEmitter {
         lines.push(variable + '.RowCount = ' + convertTo(this._linkValue(rowCountLink, CsType.Int), CsType.Int).code + ';');
       } else if (configured !== undefined) {
         lines.push(variable + '.RowCount = ' + configured.trim() + ';');
+      } else if ([use.definition.static('RowCount'), query.query.rowCount].find((value) => (value || '').trim().length > 0)?.trim() === '0') {
+        lines.push(variable + '.RowCount = 1; // RowCount 0 returns one row in MII');
       }
     }
 
@@ -1564,6 +1698,7 @@ function catchMember(variable, member) {
     case 'Source': return TypedCode.primary('Mii.ExceptionSource(' + variable + ')', CsType.String);
     case 'ActionType': return TypedCode.primary('Mii.ExceptionActionType(' + variable + ')', CsType.String);
     case 'ExceptionCaught': return new TypedCode(variable + ' != null', CsType.Bool, Precedence.Equality);
+    case 'Success':
     case 'Succeeded': return TypedCode.primary('true', CsType.Bool);
     default: return null;
   }

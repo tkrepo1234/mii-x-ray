@@ -35,7 +35,13 @@ export function convertTo(value, target) {
 
   switch (target.kind) {
     case TypeKind.String:
-      if (value.isLiteral && (value.type.kind === TypeKind.Int || value.type.kind === TypeKind.Long || value.type.kind === TypeKind.Bool)) {
+      if (value.isLiteral && value.type.kind === TypeKind.Bool) {
+        // a boolean as text is 1 or 0 in MII
+        const digit = value.literalText === 'true' ? '1' : '0';
+        return literal(CsLiteral.string(digit), CsType.String, digit);
+      }
+
+      if (value.isLiteral && (value.type.kind === TypeKind.Int || value.type.kind === TypeKind.Long)) {
         return literal(CsLiteral.string(value.literalText), CsType.String, value.literalText);
       }
 
@@ -135,7 +141,7 @@ helpers(CsType.Double,
   'ceiling', 'Ceiling', 'floor', 'Floor', 'sqrt', 'Sqrt', 'random', 'Random');
 helpers(CsType.Bool,
   'match2', 'Match2', 'containskey', 'ContainsKey', 'containsvalue', 'ContainsValue',
-  'stringtoboolean', 'ToBool', 'datebetween', 'DateBetween', 'match', 'Match');
+  'stringtoboolean', 'StringToBoolean', 'datebetween', 'DateBetween', 'match', 'Match');
 helpers(CsType.List,
   'list', 'List', 'stringtolist', 'StringToList', 'stringtolistwithlimit', 'StringToListWithLimit',
   'append', 'Append', 'insert', 'Insert', 'set', 'Set', 'remove', 'Remove', 'keys', 'Keys', 'values', 'Values',
@@ -156,6 +162,30 @@ helpers(CsType.Double,
   'asin', 'Asin', 'acos', 'Acos', 'atan', 'Atan', 'sinh', 'Sinh', 'cosh', 'Cosh', 'tanh', 'Tanh');
 helpers(CsType.String,
   'getsessionvariable', 'GetSessionVariable', 'datetoxmlformat', 'DateToXmlFormat');
+
+/** Every function MII registers, as MII spells it (names are case-sensitive; four of them are mixed-case). A call of
+ * any other name does not compile in MII. */
+const MII_FUNCTIONS = new Map((
+  'booleantostring convertunits format getconversionfactor localformat localnumber number stringtoboolean '
+  + 'dateadddays dateaddhours dateaddminutes dateaddmonths dateaddseconds dateaddyears datebetween datecompare datediff '
+  + 'datediffdays datediffdaysdstaware datediffhours datediffminutes dateformat dateformattz datefromseconds '
+  + 'datefromsecondsformatted datefromxmlformat datefromxmlformattz datefromxmlformatwithUMElocale datetoseconds '
+  + 'datetoxmlformat datetoxmlformattz day dayofweek dayofyear daysinmonth formatdatenow hour minute month monthend '
+  + 'monthstart second year yearend yearstart base64decode base64encode decode encode encodedStringToHex '
+  + 'hexToEncodedString xmldecode xmlencode xmlencodename append find first insert last list listtostring remove set '
+  + 'size sort if not objectif stringif containskey containsvalue getvaluefromMap keys liststomap map put values abs '
+  + 'acos asin atan average ceiling cos cosh exp floor ln log logn max min random randomflag round scaledmax scaledmin '
+  + 'scaledvalue sin sinh sqrt tan tanh match match2 stringindexof stringlastindexof stringleft stringlength '
+  + 'stringlower stringpart stringreplace stringreplaceall stringright stringtolist stringtolistwithlimit stringtrim '
+  + 'stringupper getsessionvariable getvalue localize tempfile converttimezone converttimezone2 difftimezone dstoffset '
+  + 'getoffset indst getlistfromxpath getmapfromxpath').split(' ').map((name) => [name.toLowerCase(), name]));
+
+/** What to write instead of a name that is no MII function. */
+const NO_FUNCTION_HINTS = { and: 'the operator && or and', or: 'the operator || or or', quotes: 'doublequote & x & doublequote', sum: 'the operator +' };
+
+/** True when MII sees the value as text although the C# has a type for it (a column read through an XPath). */
+const isMiiText = (value) => value.type.kind === TypeKind.String || value.miiText === true;
+const isWhole = (type) => type.kind === TypeKind.Int || type.kind === TypeKind.Long;
 
 /** symbols: { resolve(reference) -> TypedCode | null, note(message), transactionPath, newName(wanted) } */
 export class ExpressionTranslator {
@@ -201,7 +231,12 @@ export class ExpressionTranslator {
       case 'String': return literal(CsLiteral.string(node.value), CsType.String, node.value);
       case 'Number': return numberLiteral(node.text);
       case 'Boolean': return literal(node.value ? 'true' : 'false', CsType.Bool, node.value ? 'true' : 'false');
-      case 'Keyword': return this._keyword(node.name);
+      case 'Keyword':
+        if (node.spelling && node.spelling !== node.name) {
+          this._symbols.note('keywords are case-sensitive in MII: ' + node.spelling + ' is read as a property reference there, the keyword is ' + node.name);
+        }
+
+        return this._keyword(node.name);
       case 'Reference': return this._reference(node);
       case 'Function': return this._function(node);
       case 'Unary': return this._unary(node);
@@ -240,9 +275,15 @@ export class ExpressionTranslator {
       case 'timezoneids': return TypedCode.primary('Mii.TimeZoneIds()', CsType.List);
       case 'emptylist': return TypedCode.primary('new List<string>()', CsType.List);
       case 'emptymap': return TypedCode.primary('new Dictionary<string, string>()', CsType.Map);
-      case 'nullstring': return literal('""', CsType.String, '');
+      // MII's own empty values: the text ---, the number NA, the date TimeUnavailable
+      case 'nullstring': return literal('"---"', CsType.String, '---');
       case 'nulldate': return TypedCode.primary('DateTime.MinValue', CsType.DateTime);
       case 'nullnumber': return TypedCode.primary('double.NaN', CsType.Double);
+      case 'null': return TypedCode.primary('null', CsType.Object);
+      case 'nanotime': return TypedCode.primary('Mii.NanoTime()', CsType.Long);
+      case 'settings':
+        this._symbols.note('the keyword settings (the map of the evaluation settings, e.g. LegacyMode) has no C# equivalent');
+        return TypedCode.primary('new Dictionary<string, string>()', CsType.Map);
       case 'guid': return TypedCode.primary('Guid.NewGuid().ToString()', CsType.String);
       case 'transactionid': return TypedCode.primary('Mii.TransactionId', CsType.String);
       case 'e': return TypedCode.primary('Math.E', CsType.Double);
@@ -443,6 +484,12 @@ export class ExpressionTranslator {
         return equality(binary.operator, left, right);
       // MII evaluates both sides of && and ||: C#'s & and | on bools do the same, && and || would not
       case '&&':
+        if (isMiiText(left)) {
+          // a text on the left: MII compares the two texts instead of converting to booleans
+          this._symbols.note('&& with a text on the left is true in MII only when the right side is the same text (a text && true is false); convert first, e.g. with stringtoboolean()');
+          return TypedCode.primary('Mii.AndText(' + toStringCode(left).code + ', ' + right.code + ')', CsType.Bool);
+        }
+
         return new TypedCode(toBoolCode(left).at(Precedence.BitwiseAnd) + ' & ' + toBoolCode(right).at(Precedence.BitwiseAnd + 1), CsType.Bool, Precedence.BitwiseAnd);
       case '||':
         return new TypedCode(toBoolCode(left).at(Precedence.BitwiseOr) + ' | ' + toBoolCode(right).at(Precedence.BitwiseOr + 1), CsType.Bool, Precedence.BitwiseOr);
@@ -481,6 +528,19 @@ export class ExpressionTranslator {
 
   _function(fn) {
     const args = fn.args;
+    const spelling = fn.spelling || fn.name;
+    const registered = MII_FUNCTIONS.get(fn.name);
+
+    if (registered === undefined) {
+      const hint = NO_FUNCTION_HINTS[fn.name];
+      this._symbols.note(spelling + '() is no MII function: the link does not compile in MII' + (hint ? ' (MII has ' + hint + ')' : ''));
+    } else if (registered !== spelling) {
+      this._symbols.note('function names are case-sensitive in MII: ' + spelling + '() does not compile, the name is ' + registered);
+    } else if (fn.name === 'match2' && args.length !== 3) {
+      this._symbols.note('match2() takes exactly three arguments (text, pattern, case-sensitive): with ' + args.length + ' the link does not compile in MII');
+    } else if (fn.name === 'round' && args.length !== 1) {
+      this._symbols.note('round() takes one argument in MII: with ' + args.length + ' the link does not compile (round to n decimals: round(x * 10 ^ n) / 10 ^ n)');
+    }
 
     switch (fn.name) {
       case 'stringlength':
@@ -515,8 +575,7 @@ export class ExpressionTranslator {
             return idiom;
           }
 
-          // case-sensitive on the system unless the pattern carries (?i)
-          return TypedCode.primary('Regex.IsMatch(' + toStringCode(this.translateNode(args[0])).code + ', ' + toStringCode(this.translateNode(args[1])).code + ')', CsType.Bool);
+          // match() ignores case in MII and its pattern is a Java one: Mii.Match, not Regex.IsMatch
         }
 
         break;
@@ -627,10 +686,12 @@ export class ExpressionTranslator {
     }
 
     let method = null;
+    // match() ignores case with or without (?i)
+    const withFlag = pattern.value.startsWith('(?i)') ? pattern.value : '(?i)' + pattern.value;
 
-    if (EMPTY_PATTERNS.includes(pattern.value)) {
+    if (EMPTY_PATTERNS.includes(withFlag)) {
       method = 'Mii.IsEmpty';
-    } else if (pattern.value === TRUE_PATTERN) {
+    } else if (withFlag === TRUE_PATTERN) {
       method = 'Mii.IsTrue';
     }
 
@@ -676,7 +737,9 @@ export class ExpressionTranslator {
     }
 
     this._symbols.note('if() with a text branch returns a number in MII (0 for text, a type cast error inside a string function); stringif() returns text');
-    return TypedCode.primary('Mii.If(' + toBoolCode(this.translateNode(args[0])).code + ', ' + whenTrue.code + ', ' + whenFalse.code + ')', CsType.Double);
+    // MII evaluates only the branch it takes: a C# conditional, its result as a number
+    return TypedCode.primary('Mii.If(' + toBoolCode(this.translateNode(args[0])).at(Precedence.Conditional + 1) + ' ? (object)' + whenTrue.at(Precedence.Unary)
+      + ' : ' + whenFalse.at(Precedence.Conditional) + ')', CsType.Double);
   }
 
   /** getvalue(CatchX.Source & ".Message"): the caught exception's message. */
@@ -735,6 +798,7 @@ function columnAccess(row, contract, columnName, baseCode, pathLiteral) {
   const column = contract.ensure(columnName);
   column.read = true;
   const result = TypedCode.primary(row + '.' + column.propertyName, column.type);
+  result.miiText = true; // read through an XPath: MII has the text of the cell, whatever type the record gives it
   result.xmlCode = 'Mii.SelectXml(' + baseCode.code + ', ' + pathLiteral + ')';
   return result;
 }
@@ -768,7 +832,35 @@ function interpolation(parts) {
   return TypedCode.primary(text + '"', CsType.String);
 }
 
+/** + in MII follows the operand types: with a double the sum is a double; a text added to a whole number is cut to a
+ * whole number first ("2.5" + 1 is 3); two texts add as integers ("1.5" + "1" is 2). Null when C#'s + already does it. */
+function textAddition(left, right) {
+  const text = [isMiiText(left), isMiiText(right)];
+  const real = (value, index) => !text[index] && (value.type.kind === TypeKind.Double || value.type.kind === TypeKind.Decimal);
+  const whole = (value, index) => !text[index] && isWhole(value.type);
+
+  if ((!text[0] && !text[1]) || real(left, 0) || real(right, 1)) {
+    return null;
+  }
+
+  if (!(text[0] && text[1]) && !whole(left, 0) && !whole(right, 1)) {
+    return null; // a text and a value of unknown type
+  }
+
+  const type = text[0] && text[1] ? CsType.Int : CsType.Long;
+  const operand = (value) => (isWhole(value.type) ? value : call(type === CsType.Int ? 'Mii.ToInt' : 'Mii.ToLong', value, type));
+  const a = operand(left);
+  const b = operand(right);
+  return a === left && b === right ? null : new TypedCode(a.at(Precedence.Additive) + ' + ' + b.at(Precedence.Additive + 1), type, Precedence.Additive);
+}
+
 function arithmetic(op, left, right) {
+  const addition = op === '+' ? textAddition(left, right) : null;
+
+  if (addition !== null) {
+    return addition;
+  }
+
   let type = commonNumericType(left.type, right.type);
   let a;
 
@@ -784,8 +876,10 @@ function arithmetic(op, left, right) {
   return new TypedCode(a.at(precedence) + ' ' + op + ' ' + b.at(precedence + 1), type, precedence);
 }
 
+/** < > <= >= compare numbers only in MII: Mii.ToNumber reads a side that is no C# number ("" and NA are not-a-number,
+ * which makes every comparison false; other text fails; a date counts by its instant). */
 function relational(op, left, right) {
-  if (isNumericOrUnknownNumber(left, right)) {
+  if (left.type.isNumeric && right.type.isNumeric) {
     const type = commonNumericType(left.type, right.type);
     return new TypedCode(toNumberOf(left, type).at(Precedence.Relational + 1) + ' ' + op + ' ' + toNumberOf(right, type).at(Precedence.Relational + 1), CsType.Bool, Precedence.Relational);
   }
@@ -794,13 +888,8 @@ function relational(op, left, right) {
     return new TypedCode(left.at(Precedence.Relational + 1) + ' ' + op + ' ' + right.at(Precedence.Relational + 1), CsType.Bool, Precedence.Relational);
   }
 
-  return new TypedCode('Mii.Compare(' + left.code + ', ' + right.code + ') ' + op + ' 0', CsType.Bool, Precedence.Relational);
-}
-
-function isNumericOrUnknownNumber(left, right) {
-  return (left.type.isNumeric && right.type.isNumeric)
-    || (left.type.isNumeric && right.type.kind !== TypeKind.String && right.type.kind !== TypeKind.DateTime)
-    || (right.type.isNumeric && left.type.kind !== TypeKind.String && left.type.kind !== TypeKind.DateTime);
+  const operand = (value) => (value.type.isNumeric ? toDoubleCode(value) : call('Mii.ToNumber', value, CsType.Double));
+  return new TypedCode(operand(left).at(Precedence.Relational + 1) + ' ' + op + ' ' + operand(right).at(Precedence.Relational + 1), CsType.Bool, Precedence.Relational);
 }
 
 function equality(op, left, right) {

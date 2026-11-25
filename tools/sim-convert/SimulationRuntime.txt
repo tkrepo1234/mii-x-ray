@@ -4,7 +4,7 @@
 /// sends it (text parameters replaced, typed ones as ? with Values in order) and returns every result set of the
 /// statement (a SQLScript block may return several: MII answers one Rowset each) with the database column types and
 /// the rows as column name to text, null for a database null. The runtime turns them into MII's document: a null text
-/// is "---", a null number "NA", a null date "TimeUnavailable", trailing blanks of a text are cut, NumberFormat applies
+/// is "---", a null number "NA", a null date "TimeUnavailable", a text loses the blanks at both ends, NumberFormat applies
 /// to floating-point columns, RowCount cuts the rows. For a Command the result is not read.</summary>
 public interface IQueryService
 {
@@ -192,6 +192,12 @@ public interface IMiiSimLogic
 public sealed class MiiLinkException(MiiSimFrame frame, string message, string actionName) : MiiException(message, actionName, "Link")
 {
     public MiiSimFrame Frame { get; } = frame;
+
+    /// <summary>False for an incoming link: it makes its action fail.</summary>
+    public bool Outgoing { get; set; } = true;
+
+    /// <summary>OUTPUT_LINK for an outgoing link, ACTION_FAILURE for an incoming one (its action fails).</summary>
+    public override string ExceptionType => Outgoing ? "OUTPUT_LINK" : "ACTION_FAILURE";
 }
 
 /// <summary>A call of a transaction that the callee has not entered yet.</summary>
@@ -216,8 +222,11 @@ public sealed class MiiSimCall(MiiSimFrame caller, string actionName, bool reset
 ///   - A link to an output of an action that has not run fails with "Invalid variable".
 ///   - ResetState false: a call action keeps the callee's transaction, local and action properties of its previous call
 ///     in the same run of the caller (also an unlinked input); true: every call starts from the defaults.
-///   - An input the caller does not link gets the callee's default; an Xacute query passes every input (unmapped: empty).
-///   - Locals and outputs start with their defaults; an unset query parameter uses the template's Param.N.</summary>
+///   - An input the caller does not link gets the callee's default, also through an Xacute query (measured: an input
+///     the query does not map keeps its default).
+///   - Locals and outputs start with their defaults; an unset query parameter uses the template's Param.N.
+///   - An exception that no Catch takes ends its transaction with status Terminated: the caller's call succeeds, gets the
+///     outputs as they are and the message in LastErrorMessage. Terminate with error makes the call fail (measured).</summary>
 public sealed class MiiSim
 {
     private MiiSimCall pending;
@@ -299,6 +308,7 @@ public sealed class MiiSim
 
         frame.ThrowOnLinkError = throwOnLinkError;
         frame.ThrowOnActionError = throwOnActionError;
+        frame.EndMessage = null;
         frame.Linked = call.Linked;
         frame.Xacute = call.Xacute;
         frame.External = IsExternal(path);
@@ -318,7 +328,8 @@ public sealed class MiiSim
     }
 
     /// <summary>MII text to a value of the property's type: numbers that are no numbers give 0, booleans are true for
-    /// true, 1 or yes (verified for Runner inputs), XML is parsed, lists and maps in MII's text form.</summary>
+    /// true, yes, on, 1, y, t and whole numbers from 1 (MII's conversion; other text is false here), XML is parsed,
+    /// lists and maps in MII's text form.</summary>
     public static T FromText<T>(string text) => (T)FromText(typeof(T), text ?? "");
 
     public static object FromText(Type type, string text)
@@ -330,7 +341,7 @@ public sealed class MiiSim
 
         if (type == typeof(bool))
         {
-            return Regex.IsMatch(text, @"^\s*(true|1|yes)\s*$", RegexOptions.IgnoreCase);
+            return Regex.IsMatch(text, @"^\s*(true|yes|on|y|t|\+?0*[1-9]\d*)\s*$", RegexOptions.IgnoreCase);
         }
 
         if (type == typeof(int) || type == typeof(long) || type == typeof(double) || type == typeof(decimal))
@@ -380,7 +391,7 @@ public sealed class MiiSim
         return type.IsValueType ? Activator.CreateInstance(type) : null;
     }
 
-    /// <summary>The empty value of a type (an unmapped Xacute input: text "", number 0, boolean false).</summary>
+    /// <summary>The empty value of a type (text "", number 0, boolean false).</summary>
     public static T Empty<T>() => FromText<T>("");
 
     /// <summary>A value as MII text (XML as its text).</summary>
@@ -558,7 +569,28 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
 
     public Dictionary<string, string> Errors { get; } = [];
 
+    /// <summary>LastErrorMessage of the call actions that succeeded (the status text of the callee).</summary>
+    public Dictionary<string, string> Messages { get; } = [];
+
     public Dictionary<string, MiiSimFrame> Children { get; } = [];
+
+    /// <summary>The message of the exception that ended this run with status Terminated (null: it ended normally).</summary>
+    public string EndMessage { get; set; }
+
+    /// <summary>The filter of the catch around a transaction's flow: an exception that no Catch took ends the run with
+    /// status Terminated, which the caller treats as success. Terminate with error of this transaction (status Failed)
+    /// goes on to the caller.</summary>
+    public bool Uncaught(Exception exception)
+    {
+        if (Mii.IsTerminationOf(exception, Path))
+        {
+            return false;
+        }
+
+        EndMessage = exception.Message;
+        Simulation.Diagnostics.Add(Path + ": no Catch took the exception, the transaction ended with status Terminated (a success for its caller): " + exception.Message);
+        return true;
+    }
 
     // ------------------------------------------------------------------ properties
 
@@ -568,11 +600,6 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         if (Linked == null || Linked.Contains(name))
         {
             return passed;
-        }
-
-        if (Xacute)
-        {
-            return MiiSim.Empty<T>();
         }
 
         if (Reused && Values.TryGetValue("Transaction." + name, out object kept))
@@ -595,11 +622,6 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         if (Linked.Contains(name))
         {
             return passed;
-        }
-
-        if (Xacute)
-        {
-            return MiiSim.Empty<T>();
         }
 
         if (Reused && Values.TryGetValue("Transaction." + name, out object kept))
@@ -652,7 +674,7 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         }
         catch (Exception exception)
         {
-            LinkFailed(target, exception);
+            LinkFailed(target, exception, false);
             return configured;
         }
     }
@@ -668,7 +690,7 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         }
         catch (Exception exception)
         {
-            LinkFailed((Simulation.Pending != null ? Simulation.Pending.ActionName + "." : "") + input, exception);
+            LinkFailed((Simulation.Pending != null ? Simulation.Pending.ActionName + "." : "") + input, exception, false);
             return default;
         }
     }
@@ -687,10 +709,11 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
     /// <summary>Success of an action ("Invalid variable" when it has not run).</summary>
     public bool Success(string actionName) => Read(actionName, !Errors.ContainsKey(actionName));
 
-    /// <summary>LastErrorMessage of an action.</summary>
-    public string LastError(string actionName) => Read(actionName, Errors.TryGetValue(actionName, out string message) ? message : "");
+    /// <summary>LastErrorMessage of an action: its error; for a call that succeeded the status text of the callee
+    /// (TRANSACTION EXECUTED OK, or the message of the exception no Catch of the callee took).</summary>
+    public string LastError(string actionName) => Read(actionName, Errors.TryGetValue(actionName, out string message) || Messages.TryGetValue(actionName, out message) ? message : "");
 
-    private void LinkFailed(string target, Exception exception)
+    private void LinkFailed(string target, Exception exception, bool outgoing = true)
     {
         if (exception is MiiLinkException link && link.Frame != this)
         {
@@ -701,12 +724,13 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
 
         if (ThrowOnLinkError)
         {
-            if (exception is MiiLinkException)
+            if (exception is MiiLinkException own)
             {
+                own.Outgoing = outgoing;
                 throw exception;
             }
 
-            throw new MiiLinkException(this, exception.Message, actionName);
+            throw new MiiLinkException(this, exception.Message, actionName) { Outgoing = outgoing };
         }
 
         Simulation.Diagnostics.Add(Path + ": link " + target + " failed and was skipped (ThrowOnLinkError 0): " + exception.Message);
@@ -723,10 +747,17 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         RunAction(actionName, xacute ? "XacuteQuery" : "TransactionCall", async, () =>
         {
             Simulation.Expect(new MiiSimCall(this, actionName, resetState || xacute, xacute, []));
+            Messages.Remove(actionName);
 
             try
             {
                 call();
+                Messages[actionName] = Children.TryGetValue(actionName, out MiiSimFrame callee) && callee.EndMessage != null ? callee.EndMessage : "TRANSACTION EXECUTED OK";
+            }
+            catch (TransactionTerminatedException failed) when (failed.TransactionPath != Path)
+            {
+                // the callee ended with status Failed (Terminate with error): the call action fails with its message
+                throw new MiiException(failed.Message, actionName, xacute ? "XacuteQuery" : "TransactionCall");
             }
             finally
             {
@@ -971,7 +1002,8 @@ public sealed class MiiSimQueries(MiiSim simulation)
             return Mii.JavaDecimalFormat(text, request.NumberFormat);
         }
 
-        return number || date ? text : text.TrimEnd(' ');
+        // measured on MII: a text value arrives trimmed on both sides
+        return number || date ? text : text.Trim();
     }
 
     private static PropertyInfo FindProperty(MiiRow row, string column)

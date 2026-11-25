@@ -226,7 +226,8 @@ export const CsLiteral = {
     }
 
     if (value.includes('\n') || value.includes('\r')) {
-      return raw(value);
+      // a short text with a line break or two (a literal with \r\n) stays one exact line; documents are raw literals
+      return value.length <= 120 && value.split(/\r\n|\r|\n/).length <= 3 ? regular(value) : raw(value);
     }
 
     if (value.includes('"') && !value.includes('"""') && !value.startsWith('"') && !value.endsWith('"') && !value.includes('\t')) {

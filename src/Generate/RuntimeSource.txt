@@ -79,10 +79,15 @@ public class MiiException(string message, string actionName, string actionType =
 
     /// <summary>The MII action class (Catch output ActionType).</summary>
     public string ActionType { get; } = actionType;
+
+    /// <summary>Catch output ExceptionType: USER_EXCEPTION for a Throw, ACTION_FAILURE for an action that failed
+    /// (also when an incoming link failed), OUTPUT_LINK for an outgoing link.</summary>
+    public virtual string ExceptionType => ActionType == "Throw" ? "USER_EXCEPTION" : "ACTION_FAILURE";
 }
 
-/// <summary>Terminate Transaction with error: ends the transaction; a Catch of the same transaction does not stop it,
-/// the calling transaction sees it as a failed call.</summary>
+/// <summary>Terminate Transaction with error (or a Throw with TerminateException): ends the transaction with status
+/// Failed; a Catch of the same transaction does not stop it, the calling transaction sees it as a failed call. An
+/// exception that no Catch takes is different: that transaction ends with status Terminated and its caller goes on.</summary>
 public sealed class TransactionTerminatedException(string transactionPath, string message)
     : MiiException(message, transactionPath, "TerminateTransaction")
 {
@@ -132,18 +137,24 @@ public static class MiiRows
         position >= 1 && position <= rows.Count ? rows[position - 1] : new T();
 }
 
-/// <summary>Stand-ins for the MII expression language and XML handling. MII rules kept: booleans are true for
-/// "true" or "1" (any case, blanks around); match() is case-sensitive unless the pattern starts with (?i);
-/// datediff() returns seconds; append() changes the list it gets.</summary>
+/// <summary>Stand-ins for the MII expression language and XML handling. MII rules kept: a boolean as text is 1 or 0;
+/// text is true for true/yes/on/1/y/t and false for false/no/off/0/n/f; match() ignores case unless the pattern
+/// says (?-i); == converts the right side to the type of the left side; &lt; and &gt; compare numbers only; a number
+/// as text has no exponent and at most 12 decimals, not-a-number is NA; datediff() returns seconds; append() changes
+/// the list it gets; a map lists its keys in hash order.</summary>
 public static class Mii
 {
     private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
     private static readonly Regex TrueValue = new Regex(@"^\s*(true|1)\s*$", RegexOptions.IgnoreCase);
     private static readonly Regex EmptyValue = new Regex(@"^\s*(null|---)?\s*$", RegexOptions.IgnoreCase);
+    private static readonly string[] TrueWords = { "true", "yes", "on", "1", "y", "t" };
+    private static readonly string[] FalseWords = { "false", "no", "off", "0", "n", "f" };
+
+    // MII reads a date text only in the XML date format (text after the seconds is ignored); the other formats are
+    // kept for values that reach the C# from outside MII
     private static readonly string[] DateFormats =
     {
-        "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss.fff", "yyyy-MM-dd'T'HH:mm:sszzz", "yyyy-MM-dd'T'HH:mm:ss.fffzzz",
-        "yyyy-MM-dd'T'HH:mm:sszz", "yyyy-MM-dd'T'HH:mm:ssK", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "MM/dd/yyyy HH:mm:ss"
+        "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd", "MM/dd/yyyy HH:mm:ss"
     };
 
     private static readonly string RunId = Guid.NewGuid().ToString();
@@ -181,7 +192,8 @@ public static class Mii
 
         if (value is bool)
         {
-            return (bool)value ? "true" : "false";
+            // a boolean as text is 1 or 0 in MII (booleantostring gives true / false)
+            return (bool)value ? "1" : "0";
         }
 
         if (value is DateTime)
@@ -192,7 +204,12 @@ public static class Mii
 
         if (value is double)
         {
-            return ((double)value).ToString("R", Invariant);
+            return NumberText((double)value);
+        }
+
+        if (value is float)
+        {
+            return NumberText((double)(float)value);
         }
 
         if (value is XmlDocument)
@@ -230,21 +247,23 @@ public static class Mii
 
         if (map != null)
         {
+            // MII's text of a map: {Site=[string:1000], Sfc=[string:SFC-1]} in hash order, "" when it is empty
             List<string> pairs = new List<string>();
 
-            foreach (KeyValuePair<string, string> pair in map)
+            foreach (string key in HashOrder(map.Keys))
             {
-                pairs.Add(pair.Key + "=" + pair.Value);
+                pairs.Add(key + "=[string:" + map[key] + "]");
             }
 
-            return "{" + string.Join(", ", pairs.ToArray()) + "}";
+            return pairs.Count == 0 ? string.Empty : "{" + string.Join(", ", pairs.ToArray()) + "}";
         }
 
         List<string> list = value as List<string>;
 
         if (list != null)
         {
-            return ListToString(list);
+            // MII's text of a list: [[string:a], [string:b]], "" when it is empty
+            return list.Count == 0 ? string.Empty : "[" + string.Join(", ", list.Select((item) => "[string:" + item + "]").ToArray()) + "]";
         }
 
         IFormattable formattable = value as IFormattable;
@@ -255,6 +274,62 @@ public static class Mii
         }
 
         return value.ToString();
+    }
+
+    /// <summary>A floating-point number as MII writes it: no grouping, no exponent, at most 12 decimals (rounded
+    /// half-even), 12.0 as 12. Not-a-number is NA; so is the result of a division by zero (infinity in C#).</summary>
+    public static string NumberText(double value)
+    {
+        if (double.IsNaN(value) || double.IsInfinity(value))
+        {
+            return "NA";
+        }
+
+        string digits;
+        decimal exact;
+
+        if (Math.Abs(value) < 7.9e27 && decimal.TryParse(value.ToString("R", Invariant), NumberStyles.Float, Invariant, out exact))
+        {
+            digits = Math.Abs(Math.Round(exact, 12, MidpointRounding.ToEven)).ToString("0.############", Invariant);
+        }
+        else
+        {
+            digits = Math.Abs(value) < 1 ? "0" : Math.Abs(value).ToString("F0", Invariant);
+        }
+
+        // Java writes the sign also when nothing is left of the value (-0)
+        return value < 0 ? "-" + digits : digits;
+    }
+
+    /// <summary>The keys of a map in the order MII lists them: the order of a Java HashMap (by hash bucket, neither the
+    /// order of insertion nor sorted) for a map that was filled entry by entry.</summary>
+    public static List<string> HashOrder(IEnumerable<string> keys)
+    {
+        List<string> all = new List<string>(keys);
+        int capacity = 16;
+
+        while (all.Count > capacity / 4 * 3)
+        {
+            capacity *= 2;
+        }
+
+        List<KeyValuePair<int, string>> buckets = new List<KeyValuePair<int, string>>();
+
+        foreach (string key in all)
+        {
+            int hash = 0;
+
+            foreach (char c in key)
+            {
+                hash = unchecked(31 * hash + c);
+            }
+
+            hash ^= (int)((uint)hash >> 16);
+            buckets.Add(new KeyValuePair<int, string>(hash & (capacity - 1), key));
+        }
+
+        // a stable sort: keys of one bucket stay in the order they were put
+        return buckets.OrderBy((entry) => entry.Key).Select((entry) => entry.Value).ToList();
     }
 
     public static bool ToBool(object value)
@@ -269,7 +344,76 @@ public static class Mii
             return Convert.ToDouble(value, Invariant) != 0;
         }
 
-        return TrueValue.IsMatch(ToStr(value));
+        bool result = false;
+        string text = ToStr(value);
+
+        // "" stands for a boolean that is not set (an output a service did not fill); in MII an empty text fails too
+        if (text.Length == 0 || TryBool(text, out result))
+        {
+            return text.Length > 0 && result;
+        }
+
+        throw new FormatException("Conversion Exception: \"" + text + "\" is no boolean (MII reads true/yes/on/1/y/t, false/no/off/0/n/f and whole numbers, without blanks around)");
+    }
+
+    /// <summary>Text as a boolean the way MII converts it: the words true/yes/on/1/y/t and false/no/off/0/n/f in any
+    /// case, a whole number (1 or more is true), a text with a decimal point is false; anything else is no boolean.</summary>
+    private static bool TryBool(string text, out bool result)
+    {
+        string lower = text.ToLowerInvariant();
+        result = Array.IndexOf(TrueWords, lower) >= 0;
+
+        if (result || Array.IndexOf(FalseWords, lower) >= 0)
+        {
+            return true;
+        }
+
+        long whole;
+        double number;
+
+        if (long.TryParse(text, NumberStyles.AllowLeadingSign, Invariant, out whole))
+        {
+            result = whole >= 1;
+            return true;
+        }
+
+        return text.Contains(".") && double.TryParse(text, NumberStyles.Float, Invariant, out number);
+    }
+
+    /// <summary>stringtoboolean(text): true only for the exact text true.</summary>
+    public static bool StringToBoolean(object value)
+    {
+        return value is bool ? (bool)value : ToStr(value) == "true";
+    }
+
+    /// <summary>The operand of a comparison (&lt; &gt; &lt;= &gt;=) as MII reads it: always a number. "" and NA are
+    /// not-a-number (every comparison with it is false), a date counts by its instant, other text fails.</summary>
+    public static double ToNumber(object value)
+    {
+        if (value is DateTime)
+        {
+            return ((DateTime)value - new DateTime(1970, 1, 1)).TotalMilliseconds;
+        }
+
+        if (value == null || IsNumber(value) || value is bool)
+        {
+            return value == null ? double.NaN : ToDouble(value);
+        }
+
+        string text = ToStr(value).Trim();
+        double result;
+
+        if (text.Length == 0 || text == "NA")
+        {
+            return double.NaN;
+        }
+
+        if (double.TryParse(text, NumberStyles.Float, Invariant, out result))
+        {
+            return result;
+        }
+
+        throw new FormatException("Could not evaluate operator node: \"" + text + "\" is no number (MII compares numbers only)");
     }
 
     public static double ToDouble(object value)
@@ -293,7 +437,11 @@ public static class Mii
         return double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result) ? result : 0;
     }
 
-    /// <summary>number(x): converts strictly; empty text, "null", "---" and other text fail in MII.</summary>
+    private static readonly Regex LeadingNumber = new Regex(@"^-?(?:\d[\d,]*(?:\.\d*)?|\.\d+)(?:E-?\d+)?");
+
+    /// <summary>number(x) reads the number a text starts with and ignores the rest: number("12abc") is 12,
+    /// number("1,5") is 15 (the comma groups), number("1e3") is 1 (only an upper-case E is an exponent), number(" 5 ")
+    /// is 5. "---" is not-a-number; "" and a text without a leading number fail (measured on MII).</summary>
     public static double Number(object value)
     {
         if (value is double || value is int || value is long || value is decimal || value is float || value is bool)
@@ -301,21 +449,42 @@ public static class Mii
             return ToDouble(value);
         }
 
+        string text = ToStr(value);
         double result;
 
-        if (double.TryParse(ToStr(value).Trim(), NumberStyles.Float, Invariant, out result))
+        if (value == null || text == "---")
+        {
+            return double.NaN;
+        }
+
+        Match leading = LeadingNumber.Match(text);
+
+        if (leading.Success && double.TryParse(leading.Value.Replace(",", string.Empty), NumberStyles.Float, Invariant, out result))
         {
             return result;
         }
 
-        throw new FormatException("number(\"" + ToStr(value) + "\") fails in MII: the text is no number");
+        // no leading number: the whole text, blanks around it removed
+        if (text.Trim().Length > 0 && double.TryParse(text.Trim(), NumberStyles.Float, Invariant, out result))
+        {
+            return result;
+        }
+
+        throw new FormatException("Unable to convert the the value to a number. (number(\"" + text + "\"))");
     }
 
     /// <summary>if(condition, a, b) returns a number in MII, also for text branches: text that is no number gives 0
     /// (assigned to a string) or a type cast error (inside a string function); stringif returns text.</summary>
     public static double If(bool condition, object whenTrue, object whenFalse)
     {
-        return ToDouble(condition ? whenTrue : whenFalse);
+        return If(condition ? whenTrue : whenFalse);
+    }
+
+    /// <summary>The result of if(): the chosen branch as a number, 0 for text that is no number.</summary>
+    public static double If(object chosen)
+    {
+        double result;
+        return TryNumber(chosen, out result) ? result : 0;
     }
 
     public static int ToInt(object value)
@@ -367,8 +536,15 @@ public static class Mii
         }
 
         DateTime result;
+        string text = ToStr(value).Trim();
 
-        if (DateTime.TryParseExact(ToStr(value).Trim(), DateFormats, Invariant, DateTimeStyles.None, out result))
+        // MII ignores what follows the seconds (milliseconds, Z, an offset): the text is taken as local time
+        if (text.Length > 19 && text[10] == 'T' && DateTime.TryParseExact(text.Substring(0, 19), DateFormats[0], Invariant, DateTimeStyles.None, out result))
+        {
+            return result;
+        }
+
+        if (DateTime.TryParseExact(text, DateFormats, Invariant, DateTimeStyles.None, out result))
         {
             return result;
         }
@@ -433,8 +609,8 @@ public static class Mii
 
         if (map != null)
         {
-            // an Iterator over a map goes through its keys
-            result.AddRange(map.Keys);
+            // an Iterator over a map goes through its keys, in the map's hash order
+            result.AddRange(HashOrder(map.Keys));
             return result;
         }
 
@@ -574,45 +750,65 @@ public static class Mii
 
     // ------------------------------------------------------------------ comparisons
 
-    /// <summary>== in MII: numbers compare as numbers, everything else as text.</summary>
+    /// <summary>== in MII: the right side is converted to the type of the left side, then both are compared. So
+    /// 5 == "5.0" is true and "5.0" == 5 is false ("5.0" against "5"); "true" == true is false (a boolean as text is
+    /// 1). A right side that cannot be converted makes the two unequal; == never fails.</summary>
     public static bool AreEqual(object left, object right)
     {
-        if (IsNumber(left) || IsNumber(right))
-        {
-            double a;
-            double b;
+        double number;
 
-            if (TryNumber(left, out a) && TryNumber(right, out b))
-            {
-                return a == b;
-            }
+        if (left is int || left is long)
+        {
+            // a whole number on the left: the right side is cut to a whole number ("2.7" equals 2)
+            return TryNumber(right, out number) && !double.IsNaN(number) && Convert.ToInt64(left, Invariant) == (long)number;
         }
 
-        if (left is bool || right is bool)
+        if (IsNumber(left))
         {
-            return ToBool(left) == ToBool(right);
+            return TryNumber(right, out number) && Convert.ToDouble(left, Invariant) == number;
+        }
+
+        if (left is bool)
+        {
+            bool flag;
+
+            if (right is bool || IsNumber(right))
+            {
+                return (bool)left == ToBool(right);
+            }
+
+            return TryBool(ToStr(right), out flag) && (bool)left == flag;
+        }
+
+        if (left is DateTime)
+        {
+            DateTime date = ToDateTime(right);
+            return (right is DateTime || date != DateTime.MinValue || ToStr(right) == "TimeUnavailable") && ToStr(left) == ToStr(date);
         }
 
         return ToStr(left) == ToStr(right);
     }
 
-    /// <summary>&lt; &gt; in MII: as numbers when both are numbers, else as text.</summary>
+    /// <summary>&lt; &gt; in MII compare numbers only (files of X-Ray before 2.8 call this; newer ones compare
+    /// Mii.ToNumber(a) with Mii.ToNumber(b), which also gives false for an empty side).</summary>
     public static int Compare(object left, object right)
     {
-        double a;
-        double b;
+        double a = ToNumber(left);
+        double b = ToNumber(right);
+        return double.IsNaN(a) || double.IsNaN(b) ? 0 : a.CompareTo(b);
+    }
 
-        if (TryNumber(left, out a) && TryNumber(right, out b))
+    /// <summary>&amp;&amp; with a text on the left: MII does not convert to booleans, it is true only when the right
+    /// side is a text with exactly the same content ("false" &amp;&amp; "false" is true, a text &amp;&amp; true is
+    /// false).</summary>
+    public static bool AndText(object left, object right)
+    {
+        if (left is string)
         {
-            return a.CompareTo(b);
+            return right is string && (string)left == (string)right;
         }
 
-        if (left is DateTime || right is DateTime)
-        {
-            return ToDateTime(left).CompareTo(ToDateTime(right));
-        }
-
-        return string.CompareOrdinal(ToStr(left), ToStr(right));
+        return left != null && right != null && ToBool(left) & ToBool(right);
     }
 
     private static bool IsNumber(object value)
@@ -763,7 +959,8 @@ public static class Mii
         return XPath(source, key);
     }
 
-    /// <summary>Assign link with XPath: sets the text of the node (created when the path is a plain element path).</summary>
+    /// <summary>Assign link with XPath: sets the text of the selected node. The node must exist, MII never creates it
+    /// ("No nodes found ..."); only in a document that is still empty X-Ray builds a plain element path.</summary>
     public static XmlDocument SetXPathValue(XmlDocument document, string xpath, object value)
     {
         XmlNode node = FindOrCreate(document, xpath);
@@ -777,7 +974,8 @@ public static class Mii
     }
 
     /// <summary>Assign XML link: without XPath the source document replaces the whole document; at an XPath the selected
-    /// node keeps its own element and gets the children and text of the source's root element instead of its own.</summary>
+    /// element is replaced by a copy of the source element, so the source's element name wins (measured on MII:
+    /// Request{/Envelope/Body} from Template{/Template} gives Envelope/Template). A source that is no XML has no effect.</summary>
     public static XmlDocument AssignXml(XmlDocument document, string xpath, object source)
     {
         XmlDocument sourceDocument = ToXml(source);
@@ -789,23 +987,14 @@ public static class Mii
 
         XmlNode node = FindOrCreate(document, xpath);
 
-        if (node == null || node == document.DocumentElement || node == document)
+        if (node == null || node == document.DocumentElement || node == document || node.ParentNode == null)
         {
             document.RemoveAll();
             document.AppendChild(document.ImportNode(sourceDocument.DocumentElement, true));
             return document;
         }
 
-        while (node.HasChildNodes)
-        {
-            node.RemoveChild(node.FirstChild);
-        }
-
-        foreach (XmlNode child in sourceDocument.DocumentElement.ChildNodes)
-        {
-            node.AppendChild(document.ImportNode(child, true));
-        }
-
+        node.ParentNode.ReplaceChild(document.ImportNode(sourceDocument.DocumentElement, true), node);
         return document;
     }
 
@@ -1069,9 +1258,17 @@ public static class Mii
         return document;
     }
 
-    /// <summary>The node of an XPath; a missing plain element path (/a/b/c) is created.</summary>
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<XmlDocument, object> BuiltDocuments = new System.Runtime.CompilerServices.ConditionalWeakTable<XmlDocument, object>();
+
+    /// <summary>The node an XML link writes to. In MII the node must exist: an XPath that selects nothing fails the
+    /// link ("No nodes found in xpath ..."). A document that X-Ray starts empty is the exception: there a plain element
+    /// path (/a/b/c) is built, also by the links that follow (MII starts such a document with content, for example the
+    /// input of a called transaction with the callee's default).</summary>
     private static XmlNode FindOrCreate(XmlDocument document, string xpath)
     {
+        object built;
+        bool plainPath = Regex.IsMatch(xpath, @"^(/[A-Za-z_][\w.\-]*)+$");
+
         if (document.DocumentElement != null)
         {
             XmlNode found = document.SelectSingleNode(xpath, Namespaces(document));
@@ -1080,11 +1277,21 @@ public static class Mii
             {
                 return found;
             }
+
+            if (!plainPath || !BuiltDocuments.TryGetValue(document, out built))
+            {
+                throw new InvalidOperationException("No nodes found in xpath: \"" + xpath + "\" XML was:" + document.DocumentElement.OuterXml);
+            }
         }
 
-        if (!Regex.IsMatch(xpath, @"^(/[A-Za-z_][\w.\-]*)+$"))
+        if (!plainPath)
         {
             return null;
+        }
+
+        if (!BuiltDocuments.TryGetValue(document, out built))
+        {
+            BuiltDocuments.Add(document, string.Empty);
         }
 
         XmlNode current = document;
@@ -1299,16 +1506,19 @@ public static class Mii
         return result;
     }
 
+    /// <summary>Map{Key}: the value, "" for a key the map does not have (measured on MII).</summary>
     public static string MapGet(object map, string key)
     {
         string value;
-        // a missing key reads as the text "null" in MII, which is no empty text
-        return ToMap(map).TryGetValue(key, out value) ? value : "null";
+        return ToMap(map).TryGetValue(key, out value) ? value : string.Empty;
     }
 
+    /// <summary>getvaluefromMap(map, key): the value; for a key the map does not have the text "null", which is no
+    /// empty text (measured on MII). The key is trimmed.</summary>
     public static string GetValueFromMap(object map, object key)
     {
-        return MapGet(map, ToStr(key));
+        string value;
+        return ToMap(map).TryGetValue(ToStr(key).Trim(), out value) ? value : "null";
     }
 
     public static string ListGet(object list, int index)
@@ -1326,17 +1536,37 @@ public static class Mii
             return map.Count;
         }
 
-        return ToList(value).Count;
+        // size() of anything that is no list and no map is 0 in MII. A text in MII's list or map notation counts as
+        // the collection it stands for (a service may hand a list over as text).
+        string text = value as string;
+
+        if (text != null)
+        {
+            text = text.Trim();
+            return text.StartsWith("[") && text.EndsWith("]") ? ToList(text).Count : text.StartsWith("{") && text.EndsWith("}") ? ToMap(text).Count : 0;
+        }
+
+        return value == null || value is XmlNode ? 0 : ToList(value).Count;
     }
 
-    /// <summary>append(list, value1, ...) works by reference in MII: the list itself gets the values.</summary>
+    /// <summary>append(list, value1, ...) works by reference in MII: the list itself gets the values (a list among
+    /// them adds its elements).</summary>
     public static List<string> Append(object list, params object[] values)
     {
         List<string> items = ToList(list);
 
         foreach (object value in values)
         {
-            items.Add(ToStr(value));
+            List<string> more = value as List<string>;
+
+            if (more != null)
+            {
+                items.AddRange(new List<string>(more));
+            }
+            else
+            {
+                items.Add(ToStr(value));
+            }
         }
 
         return items;
@@ -1421,14 +1651,17 @@ public static class Mii
         return items;
     }
 
+    /// <summary>keys(map): in the map's hash order, which is neither the order of insertion nor sorted.</summary>
     public static List<string> Keys(object map)
     {
-        return new List<string>(ToMap(map).Keys);
+        return HashOrder(ToMap(map).Keys);
     }
 
+    /// <summary>values(map): in the order of keys(map).</summary>
     public static List<string> Values(object map)
     {
-        return new List<string>(ToMap(map).Values);
+        Dictionary<string, string> items = ToMap(map);
+        return HashOrder(items.Keys).Select((key) => items[key]).ToList();
     }
 
     public static Dictionary<string, string> Put(object map, object key, object value)
@@ -1452,27 +1685,68 @@ public static class Mii
     {
         List<string> keyList = ToList(keys);
         List<string> valueList = ToList(values);
-        SortedDictionary<string, string> sorted = new SortedDictionary<string, string>(StringComparer.Ordinal);
+
+        if (keyList.Count != valueList.Count)
+        {
+            throw new InvalidOperationException("liststomap fails in MII: " + keyList.Count + " keys and " + valueList.Count + " values");
+        }
+
+        // the same kind of map as map(): its keys come in hash order, liststomap does not sort them (measured on MII)
+        Dictionary<string, string> result = new Dictionary<string, string>();
 
         for (int index = 0; index < keyList.Count; index++)
         {
-            sorted[keyList[index]] = index < valueList.Count ? valueList[index] : string.Empty;
+            result[keyList[index].Trim()] = valueList[index];
         }
 
-        // liststomap sorts its keys in MII (map() keeps no order at all)
-        return new Dictionary<string, string>(sorted);
+        return result;
     }
 
-    /// <summary>Splits on a regular expression (default ","); further MII arguments are ignored.</summary>
+    /// <summary>stringtolist(text, delimiter): splits on a regular expression (default ",") as Java's split does: the
+    /// groups of the expression are not part of the result, empty parts at the end are dropped, every part is trimmed,
+    /// an empty text gives one empty part. Further MII arguments are ignored.</summary>
     public static List<string> StringToList(object text, params object[] options)
     {
-        string delimiter = options.Length > 0 ? ToStr(options[0]) : ",";
-        return new List<string>(Regex.Split(ToStr(text), JavaPattern(delimiter)));
+        return JavaSplit(ToStr(text), options.Length > 0 ? ToStr(options[0]) : ",", 0);
     }
 
+    /// <summary>stringtolistwithlimit(text, delimiter, limit): at most limit parts (the last one holds the rest); 0
+    /// drops the empty parts at the end, a negative limit keeps them.</summary>
     public static List<string> StringToListWithLimit(object text, object delimiter, object limit)
     {
-        return new List<string>(new Regex(JavaPattern(delimiter)).Split(ToStr(text), Math.Max(1, ToInt(limit))));
+        return JavaSplit(ToStr(text), ToStr(delimiter), ToInt(limit));
+    }
+
+    private static List<string> JavaSplit(string text, string delimiter, int limit)
+    {
+        List<string> parts = new List<string>();
+        int start = 0;
+
+        foreach (Match match in Regex.Matches(text, JavaPattern(delimiter)))
+        {
+            if (limit > 0 && parts.Count == limit - 1)
+            {
+                break;
+            }
+
+            // a match of no width at the very start gives no empty first part
+            if (match.Length == 0 && (match.Index == 0 || match.Index >= text.Length))
+            {
+                continue;
+            }
+
+            parts.Add(text.Substring(start, match.Index - start));
+            start = match.Index + match.Length;
+        }
+
+        parts.Add(text.Substring(start));
+
+        while (limit == 0 && parts.Count > 1 && parts[parts.Count - 1].Length == 0)
+        {
+            parts.RemoveAt(parts.Count - 1);
+        }
+
+        return parts.Select((part) => part.Trim()).ToList();
     }
 
     public static string ListToString(object list, params object[] delimiter)
@@ -1542,11 +1816,66 @@ public static class Mii
         return search.Length == 0 ? ToStr(text) : ToStr(text).Replace(search, ToStr(replacement));
     }
 
-    /// <summary>stringreplaceall replaces every match of a regular expression; MII drops the blanks of the replacement
-    /// text ("$1 " inserts the group only).</summary>
+    /// <summary>stringreplaceall replaces every match of a regular expression. MII trims the replacement text: blanks at
+    /// its start and end are lost ("$1 " inserts the group only), blanks inside stay (measured on MII). The replacement
+    /// is a Java one: $1 or ${name} is a group, a backslash takes the next character as it is.</summary>
     public static string StringReplaceAll(object text, object pattern, object replacement)
     {
-        return Regex.Replace(ToStr(text), JavaPattern(pattern), ToStr(replacement).Replace(" ", string.Empty));
+        string template = ToStr(replacement).Trim();
+        return Regex.Replace(ToStr(text), JavaPattern(pattern), (match) => JavaReplacement(match, template));
+    }
+
+    private static string JavaReplacement(Match match, string template)
+    {
+        StringBuilder result = new StringBuilder();
+        int index = 0;
+
+        while (index < template.Length)
+        {
+            char c = template[index];
+
+            if (c == '\\' && index + 1 < template.Length)
+            {
+                result.Append(template[index + 1]);
+                index += 2;
+            }
+            else if (c == '$' && index + 1 < template.Length && template[index + 1] == '{' && template.IndexOf('}', index) > 0)
+            {
+                int close = template.IndexOf('}', index);
+                result.Append(match.Groups[template.Substring(index + 2, close - index - 2)].Value);
+                index = close + 1;
+            }
+            else if (c == '$' && index + 1 < template.Length && char.IsDigit(template[index + 1]))
+            {
+                // as many digits as still name a group of the expression
+                int number = template[index + 1] - '0';
+                index += 2;
+
+                while (index < template.Length && char.IsDigit(template[index]) && number * 10 + (template[index] - '0') < match.Groups.Count)
+                {
+                    number = number * 10 + (template[index] - '0');
+                    index++;
+                }
+
+                if (number >= match.Groups.Count)
+                {
+                    throw new ArgumentException("stringreplaceall: the expression has no group " + number);
+                }
+
+                result.Append(match.Groups[number].Value);
+            }
+            else if (c == '$')
+            {
+                throw new ArgumentException("stringreplaceall: a $ in the replacement must be followed by a group ($1) or be written \\$");
+            }
+            else
+            {
+                result.Append(c);
+                index++;
+            }
+        }
+
+        return result.ToString();
     }
 
     /// <summary>MII's empty check: null, "", blanks, the text "null" or "---" (any case), as match(x, "(?i)^\s*(null|---)?\s*$").</summary>
@@ -1561,10 +1890,12 @@ public static class Mii
         return TrueValue.IsMatch(ToStr(value));
     }
 
-    /// <summary>match(text, pattern) with more arguments than usual; case-sensitive like on the system.</summary>
+    /// <summary>match(text, pattern): true when the pattern is found anywhere in the text. match() ignores case (measured
+    /// on MII: match("abc", "ABC") is true); (?-i) in the pattern makes it case-sensitive. A third argument changes
+    /// nothing. Use match2 to choose.</summary>
     public static bool Match(object text, object pattern, params object[] ignored)
     {
-        return Regex.IsMatch(ToStr(text), JavaPattern(pattern));
+        return Regex.IsMatch(ToStr(text), JavaPattern(pattern), RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     /// <summary>match2(text, pattern, caseSensitive).</summary>
@@ -1792,10 +2123,10 @@ public static class Mii
         return "\"" + ToStr(text) + "\"";
     }
 
-    /// <summary>encode is form encoding (a blank becomes +).</summary>
+    /// <summary>encode is form encoding as Java does it (a blank becomes +; ! ( ) are encoded, * - _ . are kept).</summary>
     public static string Encode(object text)
     {
-        return System.Net.WebUtility.UrlEncode(ToStr(text));
+        return System.Net.WebUtility.UrlEncode(ToStr(text)).Replace("!", "%21").Replace("(", "%28").Replace(")", "%29");
     }
 
     /// <summary>decode is form decoding (+ becomes a blank).</summary>
@@ -1938,12 +2269,18 @@ public static class Mii
     {
         DateTime date;
 
-        if (!(value is DateTime) && DateTime.TryParseExact(ToStr(value).Trim(), NetFormat(ToStr(fromFormat)), Invariant, DateTimeStyles.None, out date))
+        if (value is DateTime)
+        {
+            return ((DateTime)value).ToString(NetFormat(ToStr(toFormat)), Invariant);
+        }
+
+        if (DateTime.TryParseExact(ToStr(value).Trim(), NetFormat(ToStr(fromFormat)), Invariant, DateTimeStyles.None, out date))
         {
             return date.ToString(NetFormat(ToStr(toFormat)), Invariant);
         }
 
-        return ToDateTime(value).ToString(NetFormat(ToStr(toFormat)), Invariant);
+        // a text that does not fit fromFormat gives "" in MII, no error
+        return string.Empty;
     }
 
     /// <summary>datefromxmlformat(date, toFormat): the date as text in toFormat.</summary>
@@ -2071,19 +2408,26 @@ public static class Mii
         return ToDateTime(value).AddYears(ToInt(amount));
     }
 
+    // MII counts seconds from the start of year 1 of its calendar: 62135769600 s before 1970-01-01 UTC
+    private const long SecondsBeforeUnixEpoch = 62135769600L;
+
+    /// <summary>datetoseconds(date): the seconds since the start of year 1 (of the instant, so the server's time zone
+    /// counts); the difference of two results is the seconds between two dates.</summary>
     public static long DateToSeconds(object value)
     {
-        return (long)(ToDateTime(value) - new DateTime(1970, 1, 1)).TotalSeconds;
+        DateTime utc = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(ToDateTime(value), DateTimeKind.Unspecified), TimeZoneInfo.Local);
+        return (long)(utc - new DateTime(1970, 1, 1)).TotalSeconds + SecondsBeforeUnixEpoch;
     }
 
+    /// <summary>datefromseconds(seconds): the date of a datetoseconds value, in the server's time zone.</summary>
     public static DateTime DateFromSeconds(object seconds)
     {
-        return new DateTime(1970, 1, 1).AddSeconds(ToDouble(seconds));
+        DateTime utc = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(ToDouble(seconds) - SecondsBeforeUnixEpoch);
+        return DateTime.SpecifyKind(TimeZoneInfo.ConvertTimeFromUtc(utc, TimeZoneInfo.Local), DateTimeKind.Unspecified);
     }
 
     /// <summary>converttimezone(date, toZone) converts from the server's zone, converttimezone(date, fromZone, toZone)
-    /// between two zones. MII uses Java zone ids (Europe/Berlin), Windows knows other ids, so an unknown id leaves the
-    /// date unchanged.</summary>
+    /// between two zones. MII uses Java zone ids (Europe/Berlin); an id that is not known counts as GMT, as in MII.</summary>
     public static DateTime ConvertTimeZone(object value, params object[] zones)
     {
         DateTime date = ToDateTime(value);
@@ -2093,15 +2437,20 @@ public static class Mii
             return date;
         }
 
+        TimeZoneInfo source = zones.Length >= 2 ? ZoneOrGmt(ToStr(zones[0])) : TimeZoneInfo.Local;
+        TimeZoneInfo target = ZoneOrGmt(ToStr(zones[zones.Length >= 2 ? 1 : 0]));
+        return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(date, DateTimeKind.Unspecified), source, target);
+    }
+
+    private static TimeZoneInfo ZoneOrGmt(string id)
+    {
         try
         {
-            TimeZoneInfo source = zones.Length >= 2 ? TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[0])) : TimeZoneInfo.Local;
-            TimeZoneInfo target = TimeZoneInfo.FindSystemTimeZoneById(ToStr(zones[zones.Length >= 2 ? 1 : 0]));
-            return TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(date, DateTimeKind.Unspecified), source, target);
+            return TimeZoneInfo.FindSystemTimeZoneById(id);
         }
-        catch (TimeZoneNotFoundException)
+        catch (Exception exception) when (exception is TimeZoneNotFoundException || exception is InvalidTimeZoneException || exception is ArgumentException)
         {
-            return date;
+            return TimeZoneInfo.Utc;
         }
     }
 
@@ -2127,6 +2476,12 @@ public static class Mii
         return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
     }
 
+    /// <summary>nanotime: a nanosecond counter with an arbitrary origin (only differences mean something).</summary>
+    public static long NanoTime()
+    {
+        return (long)(System.Diagnostics.Stopwatch.GetTimestamp() * (1000000000.0 / System.Diagnostics.Stopwatch.Frequency));
+    }
+
     /// <summary>Java date pattern -> .NET: the common letters are the same; S (milliseconds), a (AM/PM), E (day name),
     /// Z/X (offset) differ.</summary>
     private static string NetFormat(string javaFormat)
@@ -2136,10 +2491,31 @@ public static class Mii
 
     // ------------------------------------------------------------------ numbers
 
+    /// <summary>round(x): the nearest whole number, a half goes up (round(-2.5) is -2). round() converts strictly: a
+    /// text that is no number fails ("Conversion Exception", measured on MII), "" and NA count as 0. MII's round takes
+    /// one argument; with a number of digits (not MII) it rounds to that many decimals.</summary>
     public static double Round(object value, params object[] digits)
     {
-        int places = digits.Length > 0 ? ToInt(digits[0]) : 0;
-        return Math.Round(ToDouble(value), Math.Max(0, Math.Min(15, places)), MidpointRounding.AwayFromZero);
+        double number;
+
+        if (!TryNumber(value, out number))
+        {
+            string text = ToStr(value).Trim();
+
+            if (text.Length > 0 && text != "NA")
+            {
+                throw new FormatException("Conversion Exception: round(\"" + text + "\")");
+            }
+
+            number = 0;
+        }
+
+        if (digits.Length > 0)
+        {
+            return Math.Round(number, Math.Max(0, Math.Min(15, ToInt(digits[0]))), MidpointRounding.AwayFromZero);
+        }
+
+        return double.IsNaN(number) ? 0 : Math.Floor(number + 0.5);
     }
 
     public static double Min(params object[] values)
@@ -2180,10 +2556,11 @@ public static class Mii
         return result;
     }
 
+    /// <summary>average(a, b, ...): the sum of all numbers (a list counts with its elements) divided by the number
+    /// of arguments, as MII computes it.</summary>
     public static double Average(params object[] values)
     {
-        List<double> numbers = Numbers(values);
-        return numbers.Count == 0 ? 0 : Sum(values) / numbers.Count;
+        return values.Length == 0 ? 0 : Sum(values) / values.Length;
     }
 
     private static readonly Random Randomizer = new Random();
@@ -2266,9 +2643,12 @@ public static class Mii
         return exception == null ? string.Empty : exception.Message;
     }
 
+    /// <summary>Catch output ExceptionType: USER_EXCEPTION (a Throw), ACTION_FAILURE (an action that failed, also a
+    /// call whose transaction ended with Terminate with error), OUTPUT_LINK (an outgoing link that failed).</summary>
     public static string ExceptionType(Exception exception)
     {
-        return exception == null ? string.Empty : exception.GetType().Name;
+        MiiException mii = exception as MiiException;
+        return exception == null ? string.Empty : mii != null ? mii.ExceptionType : "ACTION_FAILURE";
     }
 
     public static string ExceptionSource(Exception exception)
@@ -2287,6 +2667,21 @@ public static class Mii
     {
         MiiException mii = exception as MiiException;
         return mii != null ? mii.ActionType : string.Empty;
+    }
+
+    /// <summary>Action.Success: here an action that has run has succeeded (a failure is an exception); with
+    /// ThrowOnActionError off MII goes on after a failure with Success false, which the simulation mode shows.</summary>
+    public static bool ActionSuccess(string actionName)
+    {
+        return true;
+    }
+
+    /// <summary>Action.LastErrorMessage: "" here. In MII it holds the error of a failed action and, for a Transaction
+    /// Call, the status text of the callee (TRANSACTION EXECUTED OK, or the message of an exception that no Catch of the
+    /// callee took); the simulation mode shows it.</summary>
+    public static string LastErrorMessage(string actionName)
+    {
+        return string.Empty;
     }
 
     /// <summary>True when the exception is the transaction's own Terminate Transaction (not to be caught there).</summary>
