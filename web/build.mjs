@@ -43,7 +43,7 @@ const loader = [
   "__require('app.js');",
   '})();',
 ].join('\n');
-const script = minifyJs(loader).replace(/<\/script/gi, '<\\/script');
+const script = minifyJs(loader, { rename: true }).replace(/<\/script/gi, '<\\/script');
 
 const page = minifyHtml(readFileSync(join(source, 'index.html'), 'utf8'))
   .replace('<!--STYLE-->', () => '<style>' + minifyCss(readFileSync(join(source, 'app.css'), 'utf8')) + '</style>')

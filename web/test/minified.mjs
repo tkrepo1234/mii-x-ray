@@ -24,7 +24,10 @@ cpSync(join(web, '..', 'src', 'Generate'), join(copy, 'src', 'Generate'), { recu
 
 for (const name of readdirSync(join(web, 'src'))) {
   const text = readFileSync(join(web, 'src', name), 'utf8');
-  writeFileSync(join(copy, 'web', 'src', name), name.endsWith('.js') ? minifyJs(text) : text);
+  // the names a module exports or imports stay (the page bundles the modules, there they are object keys)
+  const keep = [...text.matchAll(/^export (?:async function|function|class|const|let) (\w+)/gm)].map((match) => match[1])
+    .concat([...text.matchAll(/^import \{([^}]+)\}/gm)].flatMap((match) => match[1].split(',').map((item) => item.trim())));
+  writeFileSync(join(copy, 'web', 'src', name), name.endsWith('.js') ? minifyJs(text, { rename: true, keep }) : text);
 }
 
 const node = process.execPath;

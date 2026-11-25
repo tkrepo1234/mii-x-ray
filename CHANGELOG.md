@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.7.3 - 2026-11-04
+
+Tim, 2026-11-04: variable and function names minified as well.
+
+- `web/minify.mjs` renames every name the code declares (variables, constants, functions, classes, parameters,
+  also the module loader) to a short one, the same one everywhere. Without scope analysis that is safe because the
+  renaming is one to one and the short names are names the code nowhere uses. Property names (`a.x`, object keys,
+  methods, getters), shorthand names (`{ a }`, also a key), the globals of the browser and the engine and keywords
+  stay. `web/dist/mii-x-ray.html`: 249 KB -> 222 KB (78 KB of it the C# runtime text). Properties with a leading
+  underscore would give about 4 KB more and are left alone: renaming properties needs certainty that no code reaches
+  them by a computed name.
+- `web/test/minified.mjs` minifies the modules with renaming (the names a module exports or imports stay, in the page
+  they are object keys): corpus 818 of 818 and Tim's ME_EI/XML_FILE_INTERFACE 146 of 146 files byte-identical. Edge
+  headless against the MUD mock catalog: a transaction, a folder and a mistyped path (with the similar name offered),
+  no console errors.
+
 ## 2.7.2 - 2026-11-04
 
 Tim, 2026-11-04: the page for MII as small as its operation allows.
