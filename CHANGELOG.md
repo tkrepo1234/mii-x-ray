@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.9.1 - 2026-11-27
+
+Tim, 2026-11-26: "Xray kann das Designerfeld TempTableList schreiben, bzw. sollte es, aber nicht mehr den Inhalt
+aufführen, der ist u.U. extrem riesig, das Feld weglassen wäre schlecht."
+
+- The settings line of a query template names `TempTableList` again (left out since 2.5.1), with its content as
+  `[n-bytes]` (n = its size in UTF-8 bytes), the notation of large defaults: `TempTableList = [34196-bytes]`. An empty
+  `TempTableList` is left out like every empty setting. The header's reading rules say so.
+
 ## 2.9.0 - 2026-11-26
 
 Tim, 2026-11-26: X-Ray checked against the MII behaviour measured on MII 15.5 SP1 Patch 23 the same day (probe runs 5

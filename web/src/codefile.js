@@ -8,7 +8,7 @@ import { TypeKind, Naming, UniqueNames, CsLiteral, DEFAULT_LIMIT, limitedDefault
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.9.0';
+export const TOOL_VERSION = '2.9.1';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -272,7 +272,7 @@ function readingRules() {
     '//     input or output, Local.X, action X for the result of an action, column X for a column. Outputs and locals start',
     '//     with their MII default. The comment gives the default only where the code does not hold it (a local declared',
     '//     where the flow sets it, a value C# cannot take as it is). A default larger than ' + (DEFAULT_LIMIT / 1024) + ' KB is not in the file: it',
-    '//     stands as [n-bytes] (n = its size in UTF-8 bytes).',
+    '//     stands as [n-bytes] (n = its size in UTF-8 bytes). So does the content of the Workbench field TempTableList.',
     '//   - "MII settings" under an action name list every configured property of the action as MII stores it ("linked":',
     '//     a link sets it at runtime, the code shows that), without the results of the last test run.',
     '//   - Query.RowCount is MII\'s RowCount: the query returns at most that many rows and drops the rest without a message.',
@@ -392,11 +392,14 @@ function queryOverview(contract) {
       + (contract.parameterMode === 'typed' ? ' ' + (p.type || '(no type)') : '')).join(', '));
   }
 
-  const settings = query.attributes.filter(([name, value]) => value.trim().length > 0 && name !== 'Query' && name !== 'TempTableList' && !/^Param(Description|Type)?\.\d+$/.test(name));
+  const settings = query.attributes.filter(([name, value]) => value.trim().length > 0 && name !== 'Query' && !/^Param(Description|Type)?\.\d+$/.test(name));
   const defaults = query.attributes.filter(([name, value]) => value.length > 0 && /^Param\.\d+$/.test(name));
 
   if (settings.length > 0) {
-    lines.push('//     settings: ' + settings.map(([name, value]) => name + ' = ' + value.replace(/\r\n?|\n/g, ' ')).join(', '));
+    // TempTableList is the Workbench's cached table list of the last table browse: the field is named, its content
+    // (often thousands of table names) stands as [n-bytes].
+    lines.push('//     settings: ' + settings.map(([name, value]) => name + ' = ' + (name === 'TempTableList'
+      ? '[' + new TextEncoder().encode(value).length + '-bytes]' : value.replace(/\r\n?|\n/g, ' '))).join(', '));
   }
 
   if (defaults.length > 0) {
