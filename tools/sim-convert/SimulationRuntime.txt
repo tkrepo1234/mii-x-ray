@@ -494,14 +494,33 @@ public sealed class MiiSim
     /// False: such a link gives 0 (DateTime.MinValue), as the default-mode runtime does.</summary>
     public static bool StrictLinkConversions { get; set; } = true;
 
-    /// <summary>A link into an integer (see StrictLinkConversions); a fraction is cut.</summary>
-    public static int LinkToInt(object value) => Mii.ToInt(LinkNumber(value, true));
+    /// <summary>A link into an integer (see StrictLinkConversions): a fraction is cut (2.5 is 2, -2.5 is -2); an empty
+    /// text, NA, --- and a value outside the integer range fail with "Conversion Exception" (measured on MII).</summary>
+    public static int LinkToInt(object value) => (int)WholeNumber(LinkNumber(value, true), int.MinValue, int.MaxValue);
 
-    public static long LinkToLong(object value) => (long)LinkNumber(value, true);
+    public static long LinkToLong(object value) => (long)WholeNumber(LinkNumber(value, true), long.MinValue, long.MaxValue);
 
+    /// <summary>A link into a double: an empty text and NA are not-a-number, which reads NA (measured on MII for the
+    /// empty text).</summary>
     public static double LinkToDouble(object value) => LinkNumber(value, false);
 
-    public static decimal LinkToDecimal(object value) => Mii.ToDecimal(LinkNumber(value, false));
+    public static decimal LinkToDecimal(object value)
+    {
+        double number = LinkNumber(value, false);
+        return double.IsNaN(number) ? 0m : Mii.ToDecimal(number);
+    }
+
+    private static double WholeNumber(double number, double minimum, double maximum)
+    {
+        double whole = Math.Truncate(number);
+
+        if (StrictLinkConversions && (double.IsNaN(whole) || whole < minimum || whole > maximum))
+        {
+            throw new FormatException("Conversion Exception: " + Mii.NumberText(number) + " is no integer (outside the integer range)");
+        }
+
+        return double.IsNaN(whole) ? 0 : Math.Max(minimum, Math.Min(maximum, whole));
+    }
 
     public static DateTime LinkToDateTime(object value)
     {
@@ -529,10 +548,15 @@ public sealed class MiiSim
 
         string text = Mii.ToStr(value).Trim();
 
-        // NA is the null of a number (query result, calculation with a null): taken as 0 (assumed)
-        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double number) || !StrictLinkConversions || text == "NA")
+        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out double number) || !StrictLinkConversions)
         {
             return number;
+        }
+
+        // an empty text and NA (the null of a number) into a double are not-a-number; into an integer they fail
+        if (!integer && (text.Length == 0 || text == "NA"))
+        {
+            return double.NaN;
         }
 
         throw new FormatException("Conversion Exception: \"" + text + "\" is no " + (integer ? "integer" : "number"));
@@ -594,9 +618,14 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
 
     // ------------------------------------------------------------------ properties
 
+    /// <summary>The MII names of the transaction's inputs (a Transaction Call writes their values back).</summary>
+    public HashSet<string> InputNames { get; } = [];
+
     /// <summary>An input: the linked value, else (ResetState false) the value of the previous call, else the default.</summary>
     public T Input<T>(string name, T passed, string defaultText)
     {
+        InputNames.Add(name);
+
         if (Linked == null || Linked.Contains(name))
         {
             return passed;
@@ -614,6 +643,8 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
     /// that passes nothing gets the default as well).</summary>
     public T InputOr<T>(string name, T passed, T defaultValue)
     {
+        InputNames.Add(name);
+
         if (Linked == null)
         {
             return passed is null || passed is DateTime date && date == default ? defaultValue : passed;
@@ -706,6 +737,20 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         return value;
     }
 
+    /// <summary>Call.Input behind a Transaction Call of this file: the value the callee left in its input (MII writes it
+    /// back into the call action); the value passed when the callee ran elsewhere.</summary>
+    public T CallInput<T>(string actionName, string input, T passed)
+    {
+        Read(actionName, passed);
+        return Children.TryGetValue(actionName, out MiiSimFrame callee) && callee.Values.TryGetValue("Transaction." + input, out object kept) && kept is T value ? value : passed;
+    }
+
+    /// <summary>An output of a called transaction as the callee left it (behind a failed call: the values its run had set).</summary>
+    public T Kept<T>(string actionName, string output)
+    {
+        return Children.TryGetValue(actionName, out MiiSimFrame callee) && callee.Values.TryGetValue("Transaction." + output, out object kept) && kept is T value ? value : default;
+    }
+
     /// <summary>Success of an action ("Invalid variable" when it has not run).</summary>
     public bool Success(string actionName) => Read(actionName, !Errors.ContainsKey(actionName));
 
@@ -741,8 +786,10 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
     /// <summary>An action: a failure raises an exception (ThrowOnActionError 1) or sets Success false.</summary>
     public void Action(string actionName, string actionType, System.Action run) => RunAction(actionName, actionType, false, run);
 
-    /// <summary>A Transaction Call (or Xacute query) of a transaction of this file.</summary>
-    public void Transaction(string actionName, bool resetState, bool async, bool xacute, System.Action call)
+    /// <summary>A Transaction Call (or Xacute query) of a transaction of this file. whenFailed (optional) takes the
+    /// callee's outputs as its run left them when the callee ended with Terminate with error (measured on MII: behind
+    /// the Catch the outputs read as the callee left them).</summary>
+    public void Transaction(string actionName, bool resetState, bool async, bool xacute, System.Action call, System.Action whenFailed = null)
     {
         RunAction(actionName, xacute ? "XacuteQuery" : "TransactionCall", async, () =>
         {
@@ -757,6 +804,7 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
             catch (TransactionTerminatedException failed) when (failed.TransactionPath != Path)
             {
                 // the callee ended with status Failed (Terminate with error): the call action fails with its message
+                whenFailed?.Invoke();
                 throw new MiiException(failed.Message, actionName, xacute ? "XacuteQuery" : "TransactionCall");
             }
             finally
@@ -803,6 +851,29 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
 
         outputs ??= Simulation.Plugins.CallExternal(callee, inputs);
         PluginResult result = new PluginResult();
+
+        // a Transaction Call writes the callee's input values back: <Call>.<Input> reads what the callee left in its
+        // input (measured on MII); a callee outside the file gives the value passed
+        foreach (KeyValuePair<string, object> pair in linked)
+        {
+            if (Array.IndexOf(CallSettings, pair.Key) < 0)
+            {
+                result.Values[pair.Key] = pair.Value;
+            }
+        }
+
+        if (Children.TryGetValue(actionName, out MiiSimFrame calleeFrame) && string.Equals(calleeFrame.Path, callee, StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (KeyValuePair<string, object> kept in calleeFrame.Values.Where((item) => item.Key.StartsWith("Transaction.", StringComparison.Ordinal)))
+            {
+                string input = kept.Key.Substring("Transaction.".Length);
+
+                if (calleeFrame.InputNames.Contains(input))
+                {
+                    result.Values[input] = kept.Value;
+                }
+            }
+        }
 
         foreach (KeyValuePair<string, string> pair in outputs ?? new Dictionary<string, string>())
         {
@@ -870,6 +941,10 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
         }
         catch (Exception exception)
         {
+            // also when a Catch takes the exception: behind it Success is false and LastErrorMessage the message
+            // (measured on MII for a failed Transaction Call)
+            Errors[actionName] = exception.Message;
+
             if (ThrowOnActionError)
             {
                 if (exception is MiiException named && !string.IsNullOrEmpty(named.ActionName))
@@ -886,7 +961,6 @@ public sealed class MiiSimFrame(MiiSim simulation, string path)
                 throw new MiiException(exception.Message, actionName, actionType);
             }
 
-            Errors[actionName] = exception.Message;
             Simulation.Diagnostics.Add(Path + ": the action " + actionName + " failed, the run goes on (ThrowOnActionError 0): " + exception.Message);
         }
         finally
@@ -1131,7 +1205,9 @@ public sealed class MiiSimQueries(MiiSim simulation)
             case "boolean":
                 return text.Trim().Length == 0 ? null : Mii.ToBool(parameter.Value);
             default:
-                return text;
+                // a String value (and one without a type) loses what Java's trim removes at both ends: blanks, tab, line
+                // feed, carriage return and every other control character (measured on MII)
+                return Mii.StringTrim(text);
         }
     }
 

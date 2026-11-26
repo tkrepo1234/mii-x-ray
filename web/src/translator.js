@@ -225,6 +225,40 @@ export class ExpressionTranslator {
     return this.translateNode(node);
   }
 
+  /** The expression of an XML link (Assign XML, Append XML, Append After XML, Replace XML). Alone, Doc{xpath} is the
+   * selected node as before; inside a larger expression MII hands an accessor over as the node (measured on MII: as
+   * text it is the element's markup with the XML declaration), so such accessors become Mii.XPathNode. */
+  translateXmlLinkSource(expression) {
+    let node = null;
+
+    try {
+      node = parseExpression(expression);
+    } catch (error) {
+      if (!(error instanceof ExpressionError)) {
+        throw error;
+      }
+    }
+
+    if (node === null || node.node === 'Reference') {
+      return this.translate(expression);
+    }
+
+    this._nodeAccessors = true;
+    this._nodeAccessorUsed = false;
+
+    try {
+      const result = this.translate(expression);
+
+      if (this._nodeAccessorUsed) {
+        this._symbols.note('inside the expression of an XML link MII reads Doc{xpath} as the node: an element is its markup with the XML declaration, not its value (Mii.XPathNode): ' + oneLine(expression));
+      }
+
+      return result;
+    } finally {
+      this._nodeAccessors = false;
+    }
+  }
+
   translateNode(node) {
     switch (node.node) {
       case 'Empty': return literal('""', CsType.String, '');
@@ -332,6 +366,12 @@ export class ExpressionTranslator {
     }
 
     const pathLiteral = CsLiteral.string(trimmed);
+    const kind = baseCode.type.kind;
+
+    if (this._nodeAccessors && (kind === TypeKind.Xml || kind === TypeKind.Rowset || kind === TypeKind.Row || (kind !== TypeKind.Map && kind !== TypeKind.List && !WORD.test(trimmed)))) {
+      this._nodeAccessorUsed = true;
+      return TypedCode.primary('Mii.XPathNode(' + baseCode.code + ', ' + pathLiteral + ')', CsType.String);
+    }
 
     switch (baseCode.type.kind) {
       case TypeKind.Map:
@@ -563,7 +603,8 @@ export class ExpressionTranslator {
         break;
       case 'stringtrim':
         if (args.length === 1) {
-          return TypedCode.primary(this._stringArgument(args[0]) + '.Trim()', CsType.String);
+          // Java's trim (measured on MII): every character up to U+0020 at both ends, the no-break space stays
+          return TypedCode.primary('Mii.StringTrim(' + this.translateNode(args[0]).code + ')', CsType.String);
         }
 
         break;

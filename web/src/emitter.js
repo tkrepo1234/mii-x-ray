@@ -124,6 +124,7 @@ export class TransactionEmitter {
     this._flow = [];
     this._unguarded = 0; // actions that can fail and that no Catch of this transaction follows (lexically)
     this._hoisted = []; // declarations that live for the whole run (the Break of a loop inside a loop)
+    this._keptLoopMembers = new Map(); // Loop.Member read behind its loop: the variable that keeps the last item
     this._expressionTexts = [];
     this._currentAction = '';
     this._collectExpressionTexts();
@@ -367,6 +368,10 @@ export class TransactionEmitter {
     }
 
     if (symbol.kind === ActionKind.Loop) {
+      if (this._keptLoopMembers.has(scope + '.' + member)) {
+        return this._keptLoopMembers.get(scope + '.' + member);
+      }
+
       this.note(reference.path + ' is used outside its loop');
       return this._translator.unresolved(reference.path);
     }
@@ -378,6 +383,10 @@ export class TransactionEmitter {
         : TypedCode.primary('Mii.LastErrorMessage(' + CsLiteral.string(scope) + ')', CsType.String);
     }
 
+    if (symbol.kind === ActionKind.TransactionCall && !symbol.callee.findOutput(member) && symbol.callee.findInput(member)) {
+      return this._calleeInput(symbol, scope, member);
+    }
+
     const result = resolveActionMember(symbol, member) || configuredValue(symbol, member);
 
     if (!result) {
@@ -386,6 +395,24 @@ export class TransactionEmitter {
     }
 
     return result;
+  }
+
+  /** Call.Input behind a call (measured on MII): a Transaction Call writes the callee's input values back into the
+   * action, so it reads what the callee left in its input (Mii.CallInput: the simulation mode has it, the default mode
+   * gives the value the call passed, or the callee's default); a Dynamic Transaction Call does not write back, it reads
+   * the value passed, empty when the input is not linked. */
+  _calleeInput(symbol, scope, member) {
+    const input = symbol.callee.findInput(member);
+    const linked = linkedExpression(this._transaction, scope, member);
+    const passed = linked !== null ? convertTo(this._translator.translate(linked), input.type) : null;
+
+    if (symbol.definition.actionType === 'DynamicTransactionCall') {
+      return passed ?? TypedCode.primary(ContractBuilder.emptyValue(input.type), input.type);
+    }
+
+    this.note(scope + '.' + member + ' behind the call: MII writes the value the callee left in its input back into the call action; the default mode reads the value the call passed (Mii.CallInput)');
+    const value = passed ?? TypedCode.primary(input.initializer && input.initializer !== 'default' ? input.initializer : ContractBuilder.emptyValue(input.type), input.type);
+    return TypedCode.primary('Mii.CallInput(' + CsLiteral.string(scope) + ', ' + CsLiteral.string(member) + ', ' + value.code + ')', input.type);
   }
 
   _findLoop(actionName) {
@@ -805,6 +832,8 @@ export class TransactionEmitter {
       body.push(loop.index.code + '++;');
     }
 
+    body.push(...this._keepBehindLoop(step, loop, camel));
+
     body.push(...this._emitOutgoing(use));
 
     if (step.children.length > 0) {
@@ -815,6 +844,48 @@ export class TransactionEmitter {
     this._flow.pop();
     lines.push(header, '{', ...indent(body), '}');
     return this._emitSiblings(step.children.slice(1), lines, mark);
+  }
+
+  /** Loop.Item, Loop.Output and Loop.CurrentItem read behind the loop: MII keeps the last item (measured: CurrentItem
+   * of an Iterator is its last element, a Repeater's Item its last row and CurrentItem its number; empty when the loop
+   * made no pass). A variable of the whole run keeps it; the lines that set it on every pass. */
+  _keepBehindLoop(step, loop, camel) {
+    const lines = [];
+
+    for (const member of ['Item', 'Output', 'CurrentItem']) {
+      const value = loop.actionType === 'IteratorAction' && member !== 'CurrentItem' ? null : resolveLoopMember(loop, member);
+
+      if (value === null || !this._referencedOutside(step, loop.actionName, member)) {
+        continue;
+      }
+
+      const name = this._names.claim(camel + 'Last' + member);
+      this._hoisted.push(value.type.name + ' ' + name + ' = ' + ContractBuilder.emptyValue(value.type) + '; // ' + loop.actionName + '.' + member
+        + ' behind the loop: MII keeps the last item');
+      this._keptLoopMembers.set(loop.actionName + '.' + member, TypedCode.primary(name, value.type));
+      lines.push(name + ' = ' + value.code + ';');
+    }
+
+    return lines;
+  }
+
+  /** True when a link outside the loop step (its body and the steps it runs after the loop included) reads Loop.Member. */
+  _referencedOutside(step, loopName, member) {
+    const inside = new Set();
+    const collect = (node) => {
+      if (node.action) {
+        inside.add(node.action);
+      }
+
+      node.children.forEach(collect);
+    };
+
+    collect(step.children.length > 0 ? step.children[0] : { action: null, children: [] });
+    inside.add(step.action);
+    // #Loop.Item# in a literal is put in at run time (the simulation mode keeps the last item for it)
+    const pattern = new RegExp('(?<![A-Za-z0-9_.#])' + loopName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.' + member + '(?![A-Za-z0-9_])');
+    return this._transaction.allActionUses().some((use) => !inside.has(use)
+      && use.incoming.concat(use.outgoing).some((link) => link.from != null && pattern.test(link.from)));
   }
 
   _forHeader(use, loop, camel) {
@@ -834,7 +905,13 @@ export class TransactionEmitter {
     const sourceText = this._linkedOrStatic(use, 'Source');
 
     if (use.definition.actionType === 'IteratorAction') {
-      let list = convertTo(this._translator.translate(sourceText), CsType.List);
+      const source = this._translator.translate(sourceText);
+      // measured on MII: an Iterator over a map or over a text that is no list runs no pass (Mii.IteratorItems)
+      let list = source.type.kind === TypeKind.List ? source : TypedCode.primary('Mii.IteratorItems(' + source.code + ')', CsType.List);
+
+      if (source.type.kind === TypeKind.Map) {
+        this.note('an Iterator over a map runs no pass in MII (it does not go through the keys): ' + oneLine(sourceText));
+      }
 
       if (this._isReferenced(use.name, 'ItemCount')) {
         const items = this._names.claim(camel + 'Items');
@@ -912,7 +989,7 @@ export class TransactionEmitter {
   }
 
   _linkValue(link, target) {
-    const value = this._translator.translate(link.from);
+    const value = XML_LINK_NAMES[link.kind] ? this._translator.translateXmlLinkSource(link.from) : this._translator.translate(link.from);
 
     if (link.kind === 'AssignXml' && value.xmlCode !== null && target.kind !== TypeKind.String) {
       return TypedCode.primary(value.xmlCode, CsType.Xml);
@@ -996,6 +1073,11 @@ export class TransactionEmitter {
     }
 
     if (selector === null && (kind === 'Assign' || kind === 'AssignXml') && !textSource) {
+      if (kind === 'AssignXml' && target.type.kind === TypeKind.Xml && value.type.kind === TypeKind.Xml && /^[A-Za-z_][\w.]*$/.test(value.code)) {
+        // measured on MII: Assign XML of a whole document is a copy (a change of the target does not reach the source)
+        return [target.code + ' = Mii.CopyXml(' + value.code + ');'];
+      }
+
       return [target.code + ' = ' + convertTo(value, target.type).code + ';'];
     }
 

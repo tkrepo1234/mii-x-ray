@@ -113,6 +113,35 @@ function callAndCatch(callee) {
   });
 }
 
+/** An Assignment that may fail with a Catch right behind it in the same step: the Catch writes its message into the
+ * output <name>E. Returns the actions and the step. */
+function isolated(name, outgoing) {
+  return {
+    actions: [['Do' + name, 'Assignment', {}], ['Catch' + name, 'CatchAction', {}]],
+    step: step('ActionSequence', 'Seq' + name, { name: 'Do' + name, outgoing }, [step('Catch', 'SeqCatch' + name, { name: 'Catch' + name, outgoing: [['Transaction.' + name + 'E', 'Catch' + name + '.Message']] })]),
+  };
+}
+
+/** A transaction of outputs (all strings), locals, one Assignment of plain links and isolated failing links. */
+function facts({ locals = [], work = [], failing = [] }) {
+  const blocks = failing.map(([name, links]) => isolated(name, links));
+  const names = new Set();
+
+  for (const [to] of [...work, ...failing.flatMap(([, links]) => links)]) {
+    if (to.startsWith('Transaction.')) {
+      names.add(to.substring('Transaction.'.length));
+    }
+  }
+
+  failing.forEach(([name]) => names.add(name + 'E'));
+  return trx({
+    outputs: [...names].map((name) => [name, 'string', '']),
+    locals,
+    actions: [['Work', 'Assignment', {}], ...blocks.flatMap((block) => block.actions)],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Work', outgoing: work }), ...blocks.map((block) => block.step)],
+  });
+}
+
 function actionError(throwOnActionError) {
   return trx({
     throwOnActionError,
@@ -331,6 +360,113 @@ const objects = {
       step('ActionSequence', 'Sequence_2', { name: 'CallText', incoming: [['CallText.Request', 'Local.Req', 'AssignXml']], outgoing: [['Transaction.Echo2', 'CallText.Echo']] }),
     ],
   }),
+  // 2.9.0: measured on MII 15.5 SP1 Patch 23, probe runs 5 to 8 of 2026-11-26
+  'SIM/trxFactText.trx': facts({
+    locals: [['L', 'list', '[[string:a],[string:b],[string:c]]'], ['T', 'string', 'abcd'], ['Five', 'integer', '5'], ['Empty', 'string', ''],
+      ['A', 'string', '10'], ['B', 'string', '10.0'], ['Flag', 'boolean', 'true'], ['M', 'map', '{K=[string:v]}'], ['Bracket', 'string', '[x]']],
+    work: [
+      ['Transaction.L2', 'Local.L{2}'], ['Transaction.SP1', 'stringpart("abcde", 2, 3)'], ['Transaction.SP2', '"[" & stringpart("abcde", 2, 0) & "]"'],
+      ['Transaction.SP3', '"[" & stringpart("abcde", 6, 0) & "]"'], ['Transaction.SL', 'stringleft("abcde", 9) & "/" & stringright("abcde", 9)'],
+      ['Transaction.M1', 'match("5\\n", "^\\\\d+$")'], ['Transaction.M2', 'match("5\\n", "^\\\\d+\\\\z")'],
+      ['Transaction.M3', 'match("a\\r", "^a$") & "/" & match("a\\r\\n", "^a$") & "/" & match("a\\n\\r", "^a$") & "/" & match("a\\r", "^a\\\\Z")'],
+      ['Transaction.M4', 'match("a" & base64decode("woU="), "^a$") & "/" & match("a" & base64decode("4oCo"), "^a$") & "/" & match("a" & base64decode("4oCp"), "^a\\\\z")'],
+      ['Transaction.M5', 'match("xabcx", "b")'], ['Transaction.E1', '(Local.A == Local.B) & "/" & (Local.A != Local.B)'],
+      ['Transaction.BT', 'Local.Flag & "" & (1 == 2)'], ['Transaction.G1', 'getvaluefromMap(Local.M, "K")'],
+      ['Transaction.TR', 'stringlength(stringtrim(base64decode("BHgE"))) & "/" & stringlength(stringtrim(base64decode("wqB4wqA=")))'],
+      ['Transaction.SV', 'last(stringtolist("[string:a],[string:b]", ","))'],
+      ['Transaction.MP', 'map(Local.M, "B", "1") & "/" & size(Local.M)'], ['Transaction.PT', 'size(put(Local.M, "C", "2")) & "/" & size(Local.M)'],
+    ],
+    failing: [
+      ['L3', [['Transaction.L3', 'Local.L{3}']]], ['SP4', [['Transaction.SP4', 'stringpart(Local.T, 2, Local.Five)']]],
+      ['SP5', [['Transaction.SP5', 'stringpart(Local.T, 0, 2)']]], ['SP6', [['Transaction.SP6', 'stringpart(Local.T, 2, -1)']]],
+      ['SP7', [['Transaction.SP7', 'stringpart(Local.Empty, 1, 1)']]], ['LB', [['Transaction.LB', 'last(stringtolist(Local.Bracket, ","))']]],
+    ],
+  }),
+  'SIM/trxFactConv.trx': facts({
+    locals: [['N', 'integer', '-1'], ['D', 'double', '7'], ['Empty', 'string', '']],
+    work: [['Local.N', '"2.5"'], ['Transaction.N2', 'Local.N & ""'], ['Local.N', '"-2.5"'], ['Transaction.N3', 'Local.N & ""'],
+      ['Local.N', '" 7 "'], ['Transaction.N4', 'Local.N & ""'], ['Local.D', 'Local.Empty'], ['Transaction.D1', 'Local.D & ""']],
+    failing: [
+      ['I1', [['Local.N', 'Local.Empty']]], ['I2', [['Local.N', '"2147483648"']]], ['I3', [['Local.N', '2147483648']]],
+      ['I4', [['Local.N', '"NA"']]], ['I5', [['Local.N', '"---"']]],
+    ],
+  }),
+  'SIM/trxFactXml.trx': facts({
+    locals: [['A', 'xml', '<a>original</a>'], ['B', 'xml', '<b/>'], ['NS', 'xml', ''],
+      ['Src', 'xml', '<r><itemRef><reference type="ITEM"><item>I1</item></reference></itemRef><id>INV-1</id></r>'],
+      ['Req', 'xml', '<q><itemRef><reference><item/></reference></itemRef><id><!--c--></id></q>'], ['Mixed', 'xml', '<R><A>1<B>2</B></A></R>'],
+      ['Msg', 'xml', '<req><op/><list>FIRST</list></req>'], ['Row', 'xml', '<Row><Site>D</Site></Row>'], ['Out', 'xml', '<Req><Site/></Req>'],
+      ['Att', 'xml', '<r x="old"><t>keep</t></r>'], ['Plain', 'string', 'plain text']],
+    work: [
+      ['Local.B', 'Local.A', 'AssignXml'], ['Local.B{/a}', '"changed in B"'], ['Transaction.X1', 'Local.A{/a} & "/" & Local.B{/a}'],
+      ['Transaction.X2', '"[" & Local.NS{//ns3:site} & "]"'],
+      ['Local.Req{/q/itemRef}', 'Local.Src{/r/itemRef}'], ['Local.Req{/q/id}', 'Local.Src{/r/id}'], ['Transaction.X3', 'Local.Req'],
+      ['Transaction.X4', 'Local.Mixed{/R/A[1]} & ""'],
+      ['Local.Msg{/req/list[last()]}', '"<list>SECOND</list>"', 'AppendAfterXml'], ['Local.Msg{/req/list[last()]}', '"<list>THIRD</list>"', 'AppendAfterXml'],
+      ['Transaction.X5', 'Local.Msg'],
+      ['Local.Out{/Req/Site}', '"<Site>" & xmlencode(Local.Row{/Row/Site}) & "</Site>"', 'AssignXml'], ['Transaction.X6', 'Local.Out{/Req/Site}'],
+      ['Local.Att{/r/@x}', 'Local.Plain', 'AssignXml'], ['Local.Att{/r/t}', 'Local.Plain', 'AssignXml'], ['Transaction.X7', 'Local.Att'],
+    ],
+    failing: [
+      ['AA', [['Local.Msg{/req/missing}', '"<x/>"', 'AppendAfterXml']]], ['PA', [['Local.Req{/q/status}', '"x"']]],
+      ['XM', [['Local.Att{/r/missing}', 'Local.Plain', 'AssignXml']]],
+    ],
+  }),
+  'SIM/trxFactLoops.trx': trx({
+    outputs: ['C1', 'C2', 'C3', 'C4', 'C5', 'C6'].map((name) => [name, 'string', '']),
+    locals: [['L', 'list', '[[string:a],[string:b],[string:c]]'], ['M', 'map', '{K=[string:v]}'], ['T', 'string', 'abcd'], ['Count', 'integer', '0'],
+      ['Rows', 'xml', '<Rowsets><Rowset><Row><Sfc>SFC-1</Sfc></Row><Row><Sfc>SFC-2</Sfc></Row><Row><Sfc>SFC-3</Sfc></Row></Rowset></Rowsets>'],
+      ['Two', 'xml', '<Rowsets><Rowset><Row><Sfc>1</Sfc></Row><Row><Sfc>2</Sfc></Row></Rowset></Rowsets>'], ['Passes', 'integer', '0']],
+    actions: [['It', 'IteratorAction', {}], ['Seen', 'Assignment', {}], ['ItMap', 'IteratorAction', {}], ['CountMap', 'Assignment', {}],
+      ['ItBuilt', 'IteratorAction', {}], ['CountBuilt', 'Assignment', {}], ['ItText', 'IteratorAction', {}], ['CountText', 'Assignment', {}],
+      ['Rep', 'RepeaterAction', {}], ['SeenRow', 'Assignment', {}], ['Rep2', 'RepeaterAction', {}], ['Wh', 'WhileRepeaterAction', { MaxIterations: '3' }],
+      ['Pass', 'Assignment', {}], ['After', 'Assignment', {}]],
+    steps: [
+      step('Iterator', 'Sequence_1', { name: 'It', incoming: [['It.Source', 'Local.L']] }, [step('ActionSequence', 'Sequence_2', { name: 'Seen', outgoing: [['Local.T', 'Local.T']] })]),
+      step('Iterator', 'Sequence_3', { name: 'ItMap', incoming: [['ItMap.Source', 'Local.M']] }, [step('ActionSequence', 'Sequence_4', { name: 'CountMap', outgoing: [['Local.Count', 'Local.Count + 1']] })]),
+      step('Iterator', 'Sequence_5', { name: 'ItBuilt', incoming: [['ItBuilt.Source', 'map("K", "v")']] }, [step('ActionSequence', 'Sequence_6', { name: 'CountBuilt', outgoing: [['Local.Count', 'Local.Count + 10']] })]),
+      step('Iterator', 'Sequence_7', { name: 'ItText', incoming: [['ItText.Source', 'Local.T']] }, [step('ActionSequence', 'Sequence_8', { name: 'CountText', outgoing: [['Local.Count', 'Local.Count + 100']] })]),
+      step('Repeater', 'Sequence_9', { name: 'Rep', incoming: [['Rep.Source', 'Local.Rows{/Rowsets/Rowset/Row}']] }, [step('ActionSequence', 'Sequence_10', { name: 'SeenRow', outgoing: [['Local.T', 'Local.T']] })]),
+      step('Repeater', 'Sequence_11', { name: 'Rep2', incoming: [['Rep2.Source', 'Local.Two{/Rowsets/Rowset/Row}']] }, [
+        step('WhileRepeater', 'Sequence_12', { name: 'Wh' }, [step('ActionSequence', 'Sequence_13', { name: 'Pass', outgoing: [['Local.Passes', 'Local.Passes + 1']] })])]),
+      step('ActionSequence', 'Sequence_14', {
+        name: 'After',
+        outgoing: [['Transaction.C1', 'It.CurrentItem'], ['Transaction.C2', 'Local.Count & ""'], ['Transaction.C5', 'Rep.Item{/Row/Sfc} & "/" & Rep.CurrentItem'],
+          ['Transaction.C6', 'Local.Passes & ""']],
+      }),
+    ],
+  }),
+  'SIM/trxEchoCallee.trx': trx({
+    inputs: [['Echo', 'string', 'default']],
+    outputs: [['Got', 'string', '']],
+    actions: [['Write', 'Assignment', {}]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Write', outgoing: [['Transaction.Got', 'Transaction.Echo'], ['Transaction.Echo', '"written by the callee"']] })],
+  }),
+  'SIM/trxFactCalls.trx': trx({
+    outputs: ['R1', 'R2', 'R3', 'R4', 'G1', 'Ok', 'Msg', 'Marker', 'Text'].map((name) => [name, 'string', '']),
+    locals: [['Name', 'string', 'SIM/trxEchoCallee']],
+    actions: [['CallT', 'TransactionCall', { TransactionName: 'SIM/trxEchoCallee', ResetState: 'true', Echo: 'stored' }],
+      ['CallD', 'DynamicTransactionCall', { TransactionName: 'SIM/trxEchoCallee', Echo: 'stored' }],
+      ['CallR', 'TransactionCall', { TransactionName: 'SIM/trxEchoCallee', ResetState: 'true', Echo: 'stored' }],
+      ['CallU', 'TransactionCall', { TransactionName: 'SIM/trxEchoCallee', ResetState: 'true', Echo: 'stored' }], ['Read', 'Assignment', {}],
+      ['CallF', 'TransactionCall', { TransactionName: 'SIM/trxFailer', ResetState: 'true' }], ['CatchF', 'CatchAction', {}], ['Behind', 'Assignment', {}]],
+    steps: [
+      step('ActionSequence', 'Sequence_1', { name: 'CallT', incoming: [['CallT.Echo', '"passed"']] }),
+      step('ActionSequence', 'Sequence_2', { name: 'CallD', incoming: [['CallD.TransactionName', '"SIM/trxEchoCallee"'], ['CallD.Echo', '"passed"']] }),
+      step('ActionSequence', 'Sequence_2b', { name: 'CallR', incoming: [['CallR.TransactionName', 'Local.Name'], ['CallR.Echo', '"passed"']] }),
+      step('ActionSequence', 'Sequence_2c', { name: 'CallU' }),
+      step('ActionSequence', 'Sequence_3', {
+        name: 'Read',
+        outgoing: [['Transaction.R1', 'CallT.Echo'], ['Transaction.R2', 'CallD.Echo'], ['Transaction.R3', 'CallR.Echo'], ['Transaction.R4', 'CallU.Echo'], ['Transaction.G1', 'CallT.Got']],
+      }),
+      step('ActionSequence', 'Sequence_4', { name: 'CallF' }, [step('Catch', 'Sequence_5', { name: 'CatchF', outgoing: [['Transaction.Text', 'CatchF.Message']] })]),
+      step('ActionSequence', 'Sequence_6', { name: 'Behind', outgoing: [['Transaction.Ok', 'CallF.Success'], ['Transaction.Msg', 'CallF.LastErrorMessage'], ['Transaction.Marker', 'CallF.Marker']] }),
+    ],
+  }),
+  'SIM/trxTypedTrim.trx': trx({
+    actions: [['Typed', 'IlluminatorSQLQueryObject', { QueryTemplate: 'SIM/sqlTyped' }]],
+    steps: [step('ActionSequence', 'Sequence_1', { name: 'Typed', incoming: [['Typed.Param.1', '"5"'], ['Typed.Param.2', '"  x y\\t" & base64decode("BA==")']] })],
+  }),
   'SIM/sqlMulti.tqsq': sql('do begin select A, END from X; select B from Y; end', { UseTypedParams: 'F' }),
   'SIM/trxStar.trx': trx({
     outputs: [['Txt', 'string', ''], ['Dyn1', 'string', ''], ['Dyn2', 'string', ''], ['Dyn3', 'string', ''], ['Dyn4', 'string', '']],
@@ -394,6 +530,12 @@ public static class Harness
         Run("expr", "SIM/trxExpr", []);
         Run("xmltext", "SIM/trxXmlText", []);
         Run("reqtext", "SIM/trxReqText", []);
+        Run("text", "SIM/trxFactText", []);
+        Run("conv", "SIM/trxFactConv", []);
+        Run("fxml", "SIM/trxFactXml", []);
+        Run("loops", "SIM/trxFactLoops", []);
+        Run("calls", "SIM/trxFactCalls", []);
+        Run("trim", "SIM/trxTypedTrim", []);
     }
 
     private static void Run(string label, string path, Dictionary<string, string> inputs)
@@ -618,7 +760,7 @@ has('multi RC=1', 'rows typed by a reference document keep the columns the recor
 has('xml Sum=12', 'a repeater item keeps the namespace declarations in scope (p:)');
 has('xml Appended=2', 'Append XML of Doc{xpath} appends the selected nodes');
 matches(/^xml PLUGIN Distinct Unique .*ValueSource=<Nodes><i>1<\/i><i>2<\/i><\/Nodes>/, 'Distinct gets the value of its ValueSource reference, not the text');
-has('xml Num=0', 'NA (the null of a number) linked into a double gives 0 (assumed)');
+has('xml Num=NA', 'NA (the null of a number) linked into a double is not-a-number, as the empty text (2.9.0; before 0)');
 matches(/^xml PLUGIN Joiner Join .*ParentSource=<r><i>1<\/i>/,'Joiner gets the value of its ParentSource reference');
 has('xml DY=x-Z-y', '#Local.Name# in a regular expression is the value of the local');
 matches(/^xsl DIAG .*without a stylesheet/, 'an XSL transformation without a stylesheet fails with a clear message');
@@ -687,5 +829,62 @@ has('xmltext R1=<Root><Sfcs><New /></Sfcs></Root>', 'Replace XML of well-formed 
 has('xmltext Done=yes', 'F, G, H: no exception, the links after them run');
 has('reqtext Echo1=|default', 'Assign XML of plain text into an XML input of a call: the input keeps the callee default');
 has('reqtext Echo2=S9|text', 'Assign XML of well-formed text into an XML input of a call: the input is the parsed document');
+// 2.9.0: measured on MII 15.5 SP1 Patch 23, probe runs 5 to 8 of 2026-11-26 (bls-project-005 work/retest-probe)
+has('text L2=c', 'a list index counts from 0 (L4)');
+has('text L3E=Unable to retrieve value from the list. [Index: 3, Size: 3]', 'a list index behind the end fails (L3, L4)');
+has('text SP1=bcd', 'stringpart inside the text (20-F2.01)');
+has('text SP2=[]', 'stringpart with length 0 is empty (20-F2.06)');
+has('text SP3=[]', 'stringpart with length 0 just behind the end is empty (20-F2.07)');
+has('text SP4E=String index out of range: 6', 'stringpart does not clip: the part reaches behind the end (G007)');
+has('text SP5E=String index out of range: -1', 'stringpart with start 0 fails (20-F2.05)');
+has('text SP6E=String index out of range: -1', 'stringpart with a negative length fails (20-F2.08)');
+has('text SP7E=String index out of range: 1', 'stringpart of an empty text fails (20-F2.09)');
+has('text SL=abcde/abcde', 'stringleft and stringright clip (20-F2.11)');
+has('text M1=1', '$ accepts a final line feed (20-F3.9)');
+has('text M2=0', '\\z refuses a final line feed (27-D9.6)');
+has('text M3=1/1/0/1', '$ accepts a final CR and CR LF, not LF CR; \\Z as $ (G018 to G020)');
+has('text M4=1/1/0', '$ accepts U+0085 and U+2028 at the end, \\z refuses U+2029 (G021, G022)');
+has('text M5=1', 'match finds the pattern in a part of the text (20-F3.8)');
+has('text E1=0/1', '== and != compare two texts exactly (10 and 10.0, 15-A4.02)');
+has('text BT=10', 'a boolean & "" is 1 or 0 (15-A3)');
+has('text G1=v', 'getvaluefromMap of a map local works (G001)');
+has('text TR=1/3', 'stringtrim removes EOT and keeps the no-break space (20-F1.5, 20-F1.6)');
+has('text SV=b', 'stringtolist reads a part [string:b] as the text b (SAP\'s VariantData)');
+has('text LBE=String index out of range: -1', 'last(stringtolist("[x]", ",")) fails (27-D10.5)');
+has('text MP={B=[string:1], K=[string:v]}/1', 'map(map, key, value) is a new map with the pair, the source stays (16-B2d, 16-B2h)');
+has('text PT=2/1', 'put(map, key, value) is a new map, the source stays (16-B2e, 16-B2f)');
+has('conv N2=2', 'a text 2.5 into an integer local is cut to 2 (17-C2.i02)');
+has('conv N3=-2', 'a text -2.5 into an integer local is cut to -2 (17-C2.i04)');
+has('conv N4=7', 'a text 7 with blanks into an integer local is 7 (17-C2.i05)');
+has('conv D1=NA', 'an empty text into a double local reads NA (H05)');
+matches(/^conv I1E=Conversion Exception/, 'an empty text into an integer local fails (17-C2.i01)');
+matches(/^conv I2E=Conversion Exception/, 'the text 2147483648 into an integer local fails (17-C2.i10)');
+matches(/^conv I3E=Conversion Exception/, 'the number 2147483648 into an integer local fails (17-C2.i09)');
+matches(/^conv I4E=Conversion Exception/, 'NA into an integer local fails (17-C2.i12)');
+matches(/^conv I5E=Conversion Exception/, '--- into an integer local fails (17-C2.i13)');
+has('fxml X1=original/changed in B', 'Assign XML of a whole document is a copy (27-D4a)');
+has('fxml X2=[]', 'a prefixed XPath on a never assigned xml local reads empty (27-D1a)');
+has('fxml X3=<q><itemRef /><id>INV-1</id></q>', 'plain Assign of an element with child elements empties the target, a leaf gives its text (16-B4a, 16-B4b)');
+has('fxml X4=1', 'an XPath on an element with children reads its own direct text (F238)');
+has('fxml X5=<req><op /><list>FIRST</list><list>SECOND</list><list>THIRD</list></req>', 'Append After XML behind [last()] builds the input order (27-P1)');
+has('fxml X6=<?xml version="1.0" encoding="UTF-8"?><Site>D</Site>', 'inside the expression of an XML link Doc{xpath} is the node, its markup with the declaration (run 8, section 22)');
+has('fxml X7=<r x="plain text"><t>keep</t></r>', 'Assign XML of plain text sets an attribute and leaves an element (X9, 2.8.1 case F)');
+matches(/^fxml XME=while trying to invoke the method org\.w3c\.dom\.Node\.setNodeValue/, 'Assign XML of plain text onto a missing node fails with MII\'s message (X8)');
+matches(/^fxml AAE=No nodes found in xpath/, 'Append After XML onto a missing target fails (27-P2)');
+matches(/^fxml PAE=No nodes found in xpath/, 'plain Assign onto a missing target fails (16-B4f to i)');
+has('loops C1=c', 'CurrentItem of an Iterator behind its loop is the last item (16-B1a)');
+has('loops C2=0', 'an Iterator over a map local, over map("K", "v") and over a text runs no pass (H01, K07, K08)');
+has('loops C5=SFC-3/3', 'a Repeater behind its loop: Item is the last row, CurrentItem its number (16-B1d)');
+has('loops C6=6', 'the counter of a While loop inside a Repeater starts again for every row (18-D4)');
+has('calls R1=written by the callee', 'Call.Input behind a Transaction Call is what the callee left in its input (24-C2)');
+has('calls R2=passed', 'Call.Input behind a Dynamic Transaction Call is the value passed (17-C3b)');
+has('calls R3=written by the callee', 'a Transaction Call whose callee is chosen at runtime writes the input back as well');
+has('calls R4=written by the callee', 'an input the call does not link comes back as the callee left it');
+has('calls G1=passed', 'the callee got the value passed');
+has('calls Text=stopped', 'the Catch after a failed Transaction Call holds the callee\'s termination text (18-D6a)');
+has('calls Ok=0', 'behind the Catch Success of the failed call is 0 (18-D6b)');
+has('calls Msg=stopped', 'behind the Catch LastErrorMessage of the failed call is the same text (18-D6c)');
+has('calls Marker=set', 'behind the Catch the outputs read as the callee left them (18-D6d)');
+has('trim SQL select A, N from T where A = ? and B = ? VALUES Int64:5,String:x y', 'a typed String value loses blanks and control characters at both ends (P10, T1 to T3, C1)');
 console.log(failures === 0 ? 'OK (' + simulationFile + ')' : failures + ' failure(s), see ' + join(workFolder, 'output.txt'));
 process.exit(failures === 0 ? 0 : 1);

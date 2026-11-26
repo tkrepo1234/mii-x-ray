@@ -1,5 +1,99 @@
 # Changelog
 
+## 2.9.0 - 2026-11-26
+
+Tim, 2026-11-26: X-Ray checked against the MII behaviour measured on MII 15.5 SP1 Patch 23 the same day (probe runs 5
+to 8, `bls-project-005/work/retest-probe/RESULTS-2026-11-26.md`). Where X-Ray did something else, it follows now.
+
+Values and functions (runtime `Mii`, both modes):
+
+- A list index behind the end fails: `Mii.ListGet` raises `Unable to retrieve value from the list. [Index: 3, Size: 3]`
+  (before: `""`). The index counts from 0 (unchanged).
+- `stringpart` does not clip: a start below 1, a part that reaches behind the end, a negative length and an empty text
+  fail as Java's substring does (`String index out of range: 6`); length 0 gives `""`, also just behind the end (before:
+  clipped). `stringleft` and `stringright` clip (unchanged).
+- `stringtrim` is Java's trim: every character up to U+0020 at both ends (EOT included), the no-break space stays.
+  The code is `Mii.StringTrim(x)` (before `x.Trim()`, which keeps EOT and removes U+00A0).
+- `$` and `\Z` in a pattern accept one line terminator at the very end as Java does: `\n`, `\r\n`, `\r`, U+0085,
+  U+2028, U+2029 (before: `\n` only, the .NET rule); `\z` is the strict end (unchanged). Not inside `(?m)`.
+- `stringtolist` reads each part as SAP's VariantData does: `[string:a]` is `a`, `[<null>]` is `""`, a part in brackets
+  without a type fails (`last(stringtolist("[x]", ","))` raises `String index out of range: -1`, measured).
+- Doc{xpath} of an element is its own direct text, also when it has child elements (`<A>1<B>2</B></A>` reads `1`;
+  before: the text of every descendant). So a plain Assign of an element with child elements empties the target
+  (measured): `Mii.SetXPathValue` writes the empty element `<a/>`.
+- An XML link with a text source that is not well-formed XML (2.8.1): onto an attribute or a text node it sets the
+  value (measured, X9), onto a node that does not exist it fails with MII's `... setNodeValue(java.lang.String) of a
+  null object loaded from local variable 'targetNode'` (X8); onto an element and without an XPath it does nothing, as
+  before. `Mii.XmlFromText` returns a `MiiUnparsedText` (a document without content that keeps the text) instead of
+  null.
+- A typed String query parameter (and one without a type) loses what Java's trim removes at both ends
+  (`Query.AddTypedParameter`; measured: `  x  ` arrives as `x`, a final EOT is lost).
+- New: `Mii.IteratorItems`, `Mii.CopyXml`, `Mii.XPathNode`, `Mii.StringTrim`, `Mii.CallInput`, `MiiUnparsedText`. No
+  signature changed, so files of earlier versions get the new rules when they are converted to the simulation mode.
+
+Generated code (web generator):
+
+- An Iterator over a map or over a text that is no list runs no pass (measured: a map local, `map("K", "v")`, a text):
+  `foreach (var x in Mii.IteratorItems(source))` with a note for a map (before: `Mii.ToList`, the keys).
+- `Loop.CurrentItem`, `Loop.Item` and `Loop.Output` read behind the loop: MII keeps the last item (measured: the last
+  element of an Iterator, the last row of a Repeater and its number). A variable of the whole run keeps it
+  (`string itLastCurrentItem = "";`, set on every pass); before `Mii.Unresolved` and the note "is used outside its
+  loop".
+- Assign XML of a whole xml property from another one is a copy (measured): `b = Mii.CopyXml(a);` (before `b = a;`,
+  one shared document).
+- Inside the expression of an XML link an accessor is the node (measured: `"<Site>" & xmlencode(Doc{/Row/Site}) &
+  "</Site>"` writes the escaped markup `<?xml ...?><Site>D</Site>`): `Mii.XPathNode(doc, "/Row/Site")` with a note. An
+  accessor alone keeps its meaning (the selected element).
+- `Call.Input` behind a call: a Transaction Call writes the value the callee left in its input back into the action
+  (measured), so it reads `Mii.CallInput("Call", "Input", <value passed>)` with a note: the simulation mode has the
+  callee's value, the default mode the value passed (before: the stored value of the action, the snapshot of the last
+  test run). A Dynamic Transaction Call does not write back: the value passed, empty when the input is not linked.
+- Reading rules of the header: two lines for the rules above; "a loop over a map" is gone from the map line.
+
+Simulation mode (`tools/sim-convert`):
+
+- A link into an integer: an empty text, `NA`, `---` and a value outside the integer range fail with `Conversion
+  Exception` (measured; before NA was 0 and a large value was cut to 2147483647); a fraction is cut. A link into a
+  double: an empty text and NA are not-a-number, which reads `NA` (measured for the empty text; before the empty text
+  failed and NA was 0).
+- A typed String slot is trimmed (Java's trim) before the query service gets it.
+- After an action that failed, also when a Catch takes the exception: `Success` is false and `LastErrorMessage` the
+  message (measured for a failed Transaction Call; before true and empty).
+- A failed Transaction Call (the callee ended with Terminate with error): behind the Catch the outputs read as the
+  callee left them (measured; `frame.Transaction(..., () => call = frame.Kept<...>(...))`, before the start value).
+- `frame.CallInput`: what the callee left in its input; `frame.CallTransaction` (a callee chosen at runtime) returns the
+  callee's input values beside its outputs, or the values passed when the callee is not in the file.
+
+Checked and right already: `match` ignores case and finds a part; `==` and `!=` compare two texts exactly (texts,
+locals, literals); a boolean `& ""` is `0`/`1`; `getvaluefromMap` of a map local; the While counter starts again on
+every entry; the Catch after a failed Transaction Call holds the callee's termination text (`ACTION_FAILURE`,
+`TransactionCall`); a prefixed XPath on a never assigned xml local reads empty; Append After XML behind `[last()]`
+builds the input order and fails onto a missing target; plain Assign onto a missing target fails; 2.8.1's Replace XML,
+Append After XML, Assign XML of text with blanks around and well-formed text onto a missing node (X4 to X7).
+
+Not changed (README, Limits): a failing link does not take back what its list wrote before (MII does, also with
+ThrowOnLinkError 1); `==` of a value read through an XPath compares by the type of its row record (MII: as text);
+float properties are doubles (MII: single precision, an empty text fails); arithmetic on text that is no number (`"NA"
++ 1` fails in MII, X-Ray reads 0); what MII evaluates while it loads a link (`getvaluefromMap(map(...), k) & ""`,
+`number("") & ""` fail there); the messages of a missing node name no variable.
+
+Also: `map(map, key, value)` is a new map with the pair put over the entries of the map (before: the map was taken
+as a key), `put(map, key, value)` returns a new map and leaves the source as it is (measured; before it changed the
+source).
+
+Tests: `web/test/simrun.mjs` has 57 more checks (180 in all) in six transactions (`SIM/trxFactText`,
+`trxFactConv`, `trxFactXml`, `trxFactLoops`, `trxFactCalls`, `trxTypedTrim`); `xml Num` expects `NA` now (before 0).
+Corpus `BLS/projects`: 621 of 621 files (387 transactions, 234 folders) compile in the default and in the simulation
+mode, as before. Against 2.8.1 the generated files differ in the reading rules of the header (two lines more, the map
+line reworded) and in 45 statements of the transaction files (182 with the folder files) that became
+`Mii.CopyXml(...)`, 5 (14) Iterators over a source that is no list (`Mii.IteratorItems`), 1 (6) `Mii.CallInput` with
+its note (it read the empty stored value of the action, `instanceId: ""`); no `stringtrim`, no loop item behind its
+loop and no accessor inside an XML link expression in that corpus. 80 files written by 2.8.1 convert and compile with
+the new converter; the minified page generates the same 621 files; `defaults.mjs` and `staticfiles.mjs` OK; `build.cmd
+test` 32 of 32; `tools\corpus-check.ps1` (console) 354 of 354 as before (the console skips 15 to 17 transactions of
+the corpus with PathTooLongException, depending on the length of the work folder). `web/dist/mii-x-ray.html`: 254 KB
+-> 268 KB. The page was not opened in a browser for this version.
+
 ## 2.8.1 - 2026-11-26
 
 Tim, 2026-11-26: the rule "Assign XML of a text has no effect" was wrong. Measured on MII 15.5 SP1 Patch 23 on

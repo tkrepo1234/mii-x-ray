@@ -93,7 +93,9 @@ What the simulation emulates (CHANGELOG 2.6.0 lists what is assumed):
 - An exception that no Catch of a transaction takes ends it with status Terminated: the caller's call succeeds, gets
   the outputs as they are and the message in `LastErrorMessage`, the caller's Catch does not run; an entry run returns
   its outputs. Terminate with error (or a Throw with TerminateException) ends with status Failed: the call action
-  fails in the caller (`Catch.Source` = the call action, `ExceptionType` = `ACTION_FAILURE`), an entry run fails.
+  fails in the caller (`Catch.Source` = the call action, `ExceptionType` = `ACTION_FAILURE`), an entry run fails;
+  behind the Catch the call has `Success` false, the message in `LastErrorMessage` and the outputs as the callee left
+  them.
 - `ThrowOnLinkError` 1: a failing link raises the exception; 0: the link leaves its target unchanged, the run goes on
   (MII also ends the rest of that link list and takes back what the list wrote before; not emulated).
   A failing link into a call input leaves the input unlinked (callee default). `ThrowOnActionError` likewise.
@@ -106,7 +108,8 @@ What the simulation emulates (CHANGELOG 2.6.0 lists what is assumed):
   query parameter takes the template's `Param.N`, an unset slot without one is empty text.
 - Values cross the boundaries as MII text and MII types: a boolean is `1` or `0`, a number input given `abc` arrives
   as 0, a link of text that is no number into a number fails ("Conversion Exception", switch:
-  `MiiSim.StrictLinkConversions`), query nulls are `---` / `NA` / `TimeUnavailable`, text columns arrive trimmed on
+  `MiiSim.StrictLinkConversions`; into an integer also an empty text, `NA`, `---` and a value outside its range, into
+  a double an empty text and `NA` are `NA`), a typed String query parameter is trimmed, query nulls are `---` / `NA` / `TimeUnavailable`, text columns arrive trimmed on
   both sides, RowCount cuts the rows.
 - Catch and Throw as in the default runtime; `Catch.ExceptionType` is `USER_EXCEPTION`, `ACTION_FAILURE` or
   `OUTPUT_LINK`.
@@ -183,8 +186,8 @@ binary operator is left-associative (`2 ^ 3 ^ 2` is 64).
 Since 2.2.0 also (verified behaviour from the Definitive Guide and Tim's projects): `&&`, `||` and the inputs of a
 Conditional evaluate every part (C# `&` / `|`); `if()` returns a number, also for text branches (`Mii.If`, with a
 note); `list(list, x)` adds the elements of a list argument; `first()`/`last()` of an empty list fail;
-`encode`/`decode` are form encoding; `currenttimezoneoffset` is in milliseconds; an Iterator over a map gives its
-keys and has no `Item`; a query's `RowCount` becomes `Query.RowCount`; a
+`encode`/`decode` are form encoding; `currenttimezoneoffset` is in milliseconds; an Iterator has no `Item` (over a
+map it runs no pass, see 2.9.0); a query's `RowCount` becomes `Query.RowCount`; a
 `TransactionName` set by an expression is a call chosen at runtime; only the first child of a Catch is its handler.
 Calls inside loops with ResetState false, asynchronous calls and transactions with ThrowOnLinkError off are marked.
 (2.2.0 to 2.8.0 also said "Assign XML of a text has no effect"; that was wrong, see 2.8.1 below.)
@@ -228,6 +231,24 @@ Since 2.8.1 (measured on MII 15.5 SP1 Patch 23 on 2026-11-26):
   literal that is well-formed XML.
 - Plain Assign of such a text to an XPath writes the markup as the text of the node (no elements).
 
+Since 2.9.0 (measured on MII 15.5 SP1 Patch 23 on 2026-11-26, probe runs 5 to 8):
+
+- Values: a list index behind the end fails; `stringpart` does not clip (a part behind the end, start 0, a negative
+  length fail); `stringtrim` is Java's trim (`Mii.StringTrim`: EOT goes, U+00A0 stays); `$` and `\Z` accept one final
+  `\n`, `\r\n`, `\r`, U+0085, U+2028 or U+2029 as in Java; `stringtolist` reads `[string:a]` as `a` and fails on `[x]`;
+  a typed String query parameter is trimmed; `map(map, key, value)` and `put(map, key, value)` give a new map and leave
+  the source as it is.
+- XML: Doc{xpath} of an element is its own direct text (so plain Assign of an element with child elements empties the
+  target); Assign XML of a whole document copies it (`Mii.CopyXml`); inside the expression of an XML link an accessor is
+  the node, its markup with the XML declaration (`Mii.XPathNode`); a text that is not well-formed XML onto an attribute
+  or a text node sets its value, onto a missing node the link fails.
+- Flow: an Iterator over a map or a text runs no pass (`Mii.IteratorItems`); `CurrentItem`, `Item` and `Output` of a
+  loop read behind it are its last item; `Call.Input` behind a Transaction Call is what the callee left in its input
+  (`Mii.CallInput`; the default mode has the value passed), behind a Dynamic Transaction Call the value passed.
+- Simulation: an empty text, `NA`, `---` or a value outside the integer range into an integer fails, an empty text or
+  `NA` into a double is `NA`; behind a Catch a failed action has `Success` false and its message in
+  `LastErrorMessage`; a failed Transaction Call leaves the callee's outputs as its run set them.
+
 ## Limits
 
 - **A faulty transaction gives faulty C#, as is.** Links to inputs or actions that no longer exist, references to
@@ -242,13 +263,19 @@ Since 2.8.1 (measured on MII 15.5 SP1 Patch 23 on 2026-11-26):
   remaining passes run with every action skipped, and a Catch inside the body takes the exception on a later pass);
   the C# leaves the loop. The outgoing links of a Catch run in the handler only (MII: on every pass).
 - The C# types follow the MII types of the properties; a value read through an XPath is text in MII whatever the row
-  record says. X-Ray applies MII's text rules to such values in `+` and `&&`; `==` compares them by the record's type.
-- `ThrowOnLinkError` off: MII ends the list of links at the first failing link and takes back what the list wrote
-  before; the C# throws, the simulation skips the one link.
+  record says. X-Ray applies MII's text rules to such values in `+` and `&&`; `==` compares them by the record's type
+  (MII compares the texts exactly: `10` and `10.0` differ). A `float` property is a double (MII: single precision, an
+  empty text into it fails). Arithmetic on text that is no number (`"NA" + 1`) fails in MII; the C# reads 0.
+- A failing link: MII ends the list of links at the first failing link and takes back what the list wrote before
+  (measured with ThrowOnLinkError on: the first of three targets is set back, the third link does not run); the C#
+  throws with the earlier targets written, the simulation with ThrowOnLinkError off skips the one link.
+- What MII evaluates while it loads a link is not reproduced: a part with constant arguments that fails there
+  (`number("") & ""`, `getvaluefromMap(map("K", "v"), "K") & ""`) makes the whole link fail in MII.
 - An XML document that X-Ray starts empty is built by plain element paths; in MII such a document has content or the
   link fails. `Action.Success` is true and `Action.LastErrorMessage` empty in the default file (the simulation knows
   both).
-- Not adopted from the guide: bounds errors of `stringpart`/`stringleft`/`stringright` (the C# clamps), typed sorting
+- Not adopted from the guide: bounds errors of `stringleft`/`stringright` (MII clips them as the C# does; `stringpart`
+  fails since 2.9.0), typed sorting
   of `sort()`, the line breaks of `base64encode`, list and map elements of other types than text, the `Expiration` of
   action properties, Tracer skipping by log level (marked only), Event Logger type checks.
 - Only rowset XML is typed; other XML documents (PAPI requests, web service payloads) stay `XmlDocument`.

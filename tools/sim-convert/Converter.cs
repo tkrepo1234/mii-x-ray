@@ -48,7 +48,7 @@ public sealed class Template
 /// <summary>Turns a default-mode X-Ray into the simulation mode (see SimulationRuntime.txt for what it emulates).</summary>
 public sealed class Converter(List<MetadataReference> references)
 {
-    public const string ToolVersion = "2.8.1";
+    public const string ToolVersion = "2.9.0";
 
     private const string ServicesRegion = "#region Services (implement these to run the code)";
 
@@ -1021,10 +1021,11 @@ public sealed class Converter(List<MetadataReference> references)
                     file.Replace(invocation.Expression.Span, frame + ".LoadResource");
                 }
 
-                // Action.Success and Action.LastErrorMessage: the frame knows them
-                if (called == "Mii.ActionSuccess" || called == "Mii.LastErrorMessage")
+                // Action.Success and Action.LastErrorMessage: the frame knows them; so it knows the input values a
+                // Transaction Call writes back
+                if (called == "Mii.ActionSuccess" || called == "Mii.LastErrorMessage" || called == "Mii.CallInput")
                 {
-                    file.Replace(invocation.Expression.Span, frame + (called == "Mii.ActionSuccess" ? ".Success" : ".LastError"));
+                    file.Replace(invocation.Expression.Span, frame + (called == "Mii.ActionSuccess" ? ".Success" : called == "Mii.CallInput" ? ".CallInput" : ".LastError"));
                 }
             }
         }
@@ -1255,6 +1256,16 @@ public sealed class Converter(List<MetadataReference> references)
                     file.Insert(argument.Expression.SpanStart, frame + ".Arg<" + parameter.Type + ">(" + Comments.Literal(MiiName(parameter)) + ", () => ", 102);
                     file.Insert(argument.Expression.Span.End, ")", 8);
                     file.Strict(argument.Expression);
+                }
+
+                // a callee that ends with Terminate with error: its outputs as its run left them (measured on MII)
+                if (!string.IsNullOrEmpty(target) && callee.ReturnType != "void")
+                {
+                    List<(string Property, string Type, string MiiName)> record = file.RecordOf(callee.ReturnType);
+                    string kept = record != null
+                        ? "new " + callee.ReturnType + "(" + string.Join(", ", record.Select((item) => frame + ".Kept<" + item.Type + ">(" + Comments.Literal(actionName) + ", " + Comments.Literal(item.MiiName) + ")")) + ")"
+                        : frame + ".Kept<" + callee.ReturnType + ">(" + Comments.Literal(actionName) + ", " + Comments.Literal(file.OutputsOf(callee)[0].MiiName) + ")";
+                    file.Insert(end, ", () => " + target + " = " + kept, 8);
                 }
 
                 return;

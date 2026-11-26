@@ -30,11 +30,14 @@ public sealed class Query(string text)
     /// <summary>A text parameter: its [Param.N] is replaced by the value as text.</summary>
     public void AddParameter(string name, object value) => Parameters.Add(new(name, value));
 
-    /// <summary>A typed parameter: checked against the type and bound as a statement parameter.</summary>
+    /// <summary>A typed parameter: checked against the type and bound as a statement parameter. MII trims a String
+    /// value (and one without a type) as Java's trim does: blanks, tab, line feed, carriage return and every other
+    /// control character at both ends are lost, inner ones stay (measured on MII 15.5 SP1 Patch 23).</summary>
     public void AddTypedParameter(string name, string type, object value)
     {
         ParameterTypes[name] = type;
-        Parameters.Add(new(name, value));
+        bool text = string.IsNullOrEmpty(type) || string.Equals(type, "String", StringComparison.OrdinalIgnoreCase);
+        Parameters.Add(new(name, text && value is string ? Mii.StringTrim(value) : value));
     }
 }
 
@@ -92,6 +95,14 @@ public sealed class TransactionTerminatedException(string transactionPath, strin
     : MiiException(message, transactionPath, "TerminateTransaction")
 {
     public string TransactionPath { get; } = transactionPath;
+}
+
+/// <summary>The text source of an XML link that is not well-formed XML (Mii.XmlFromText): a document without content
+/// that keeps the text. Onto an element the link does nothing, onto an attribute or a text node it writes the text as
+/// the value, onto a node that does not exist it fails (measured on MII).</summary>
+public sealed class MiiUnparsedText(string text) : XmlDocument
+{
+    public string Text { get; } = text;
 }
 
 /// <summary>A value that keeps the MII document it was read from (all rowsets, all columns, MII's text).</summary>
@@ -609,7 +620,7 @@ public static class Mii
 
         if (map != null)
         {
-            // an Iterator over a map goes through its keys, in the map's hash order
+            // a map as a list: its keys, in the map's hash order (an Iterator over a map runs no pass: IteratorItems)
             result.AddRange(HashOrder(map.Keys));
             return result;
         }
@@ -843,16 +854,12 @@ public static class Mii
 
     /// <summary>The text source of an XML link (Assign XML, Append XML ...) as MII reads it (measured on MII): a text
     /// that is well-formed XML is parsed and used like a document; any other text (plain text, a raw &amp; or &lt; in a
-    /// value, an empty text) gives null, and the link does nothing: the target keeps its value, nothing reports it.</summary>
+    /// value, an empty text) is a MiiUnparsedText: onto an element (and without an XPath) the link does nothing, the
+    /// target keeps its value and nothing reports it; onto an attribute or a text node it sets the value; onto a node
+    /// that does not exist it fails.</summary>
     public static XmlDocument XmlFromText(object text)
     {
         string trimmed = ToStr(text).Trim();
-
-        if (trimmed.Length == 0)
-        {
-            return null;
-        }
-
         XmlDocument document = new XmlDocument();
 
         try
@@ -861,7 +868,7 @@ public static class Mii
         }
         catch (XmlException)
         {
-            return null;
+            return new MiiUnparsedText(ToStr(text));
         }
 
         return document;
@@ -871,6 +878,31 @@ public static class Mii
     private static object XmlLinkSource(object source)
     {
         return source is string ? XmlFromText(source) : source;
+    }
+
+    /// <summary>An XML link whose source is text that is not well-formed XML (measured on MII 15.5 SP1 Patch 23, probe
+    /// lines X8, X9): the text becomes the value of the selected node, which does nothing on an element and sets an
+    /// attribute or a text node; a node that does not exist fails. Without an XPath ("/*") the link does nothing.</summary>
+    private static XmlDocument UnparsedTextLink(XmlDocument document, string xpath, MiiUnparsedText source)
+    {
+        if (xpath == "/*" || document.DocumentElement == null)
+        {
+            return document;
+        }
+
+        XmlNode node = document.SelectSingleNode(xpath, Namespaces(document));
+
+        if (node == null)
+        {
+            throw new InvalidOperationException("while trying to invoke the method org.w3c.dom.Node.setNodeValue(java.lang.String) of a null object loaded from local variable 'targetNode' (xpath: \"" + xpath + "\")");
+        }
+
+        if (!(node is XmlElement))
+        {
+            node.Value = source.Text;
+        }
+
+        return document;
     }
 
     /// <summary>Doc{xpath}: the text of the first matching node, or the value of an XPath expression such as count(...).</summary>
@@ -888,10 +920,67 @@ public static class Mii
 
         if (nodes != null)
         {
-            return nodes.MoveNext() ? nodes.Current.Value : string.Empty;
+            return nodes.MoveNext() ? NodeValue(nodes.Current) : string.Empty;
         }
 
         return XPathText(result);
+    }
+
+    /// <summary>The value of a node an XPath selected: an element is its own direct text, also when it has child
+    /// elements (measured on MII: Doc{/R/A} of &lt;A&gt;1&lt;B&gt;2&lt;/B&gt;&lt;/A&gt; is 1, an element with
+    /// child elements only is empty); an attribute or a text node its value.</summary>
+    private static string NodeValue(System.Xml.XPath.XPathNavigator node)
+    {
+        System.Xml.IHasXmlNode wrapped = node as System.Xml.IHasXmlNode;
+        XmlElement element = wrapped == null ? null : wrapped.GetNode() as XmlElement;
+
+        if (element == null)
+        {
+            return node.Value;
+        }
+
+        StringBuilder text = new StringBuilder();
+
+        foreach (XmlNode child in element.ChildNodes)
+        {
+            if (child is XmlCharacterData && !(child is XmlComment))
+            {
+                text.Append(child.Value);
+            }
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>Doc{xpath} inside the expression of an XML link (Assign XML, Append XML, ...) when it is part of a larger
+    /// expression: MII hands the selected element over as a node, so as text it is the element's markup with the XML
+    /// declaration (measured on MII: "&lt;Site&gt;" &amp; xmlencode(Doc{/Row/Site}) &amp; "&lt;/Site&gt;" writes the escaped
+    /// markup, not the value). An attribute, a text node or a number reads as in Mii.XPath.</summary>
+    public static string XPathNode(object source, string xpath)
+    {
+        XmlDocument document = ToXml(source);
+
+        if (document.DocumentElement == null)
+        {
+            return string.Empty;
+        }
+
+        List<XmlNode> nodes = XPathNodes(EvaluateXPath(document, xpath));
+
+        if (nodes.Count > 0 && nodes[0] is XmlElement)
+        {
+            return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" + NodeAsDocument(nodes[0]).DocumentElement.OuterXml;
+        }
+
+        return XPath(document, xpath);
+    }
+
+    /// <summary>Assign XML of a whole xml property: MII copies the document (measured on MII: a change of the target
+    /// afterwards does not reach the source).</summary>
+    public static XmlDocument CopyXml(object source)
+    {
+        XmlDocument document = ToXml(source);
+        return document == source ? (XmlDocument)document.CloneNode(true) : document;
     }
 
     /// <summary>Doc{xpath} used as XML: the first matching node as a document of its own.</summary>
@@ -999,7 +1088,14 @@ public static class Mii
 
         if (node != null)
         {
-            node.InnerText = ToStr(value);
+            string text = ToStr(value);
+            node.InnerText = text;
+
+            // an element with child elements that gets an empty value is empty afterwards (measured on MII: <a/>)
+            if (text.Length == 0 && node is XmlElement)
+            {
+                ((XmlElement)node).IsEmpty = true;
+            }
         }
 
         return document;
@@ -1016,6 +1112,11 @@ public static class Mii
         if (source == null)
         {
             return document;
+        }
+
+        if (source is MiiUnparsedText unparsed)
+        {
+            return UnparsedTextLink(document, xpath, unparsed);
         }
 
         XmlDocument sourceDocument = ToXml(source);
@@ -1049,6 +1150,11 @@ public static class Mii
             return document;
         }
 
+        if (source is MiiUnparsedText unparsed)
+        {
+            return UnparsedTextLink(document, xpath, unparsed);
+        }
+
         XmlNode node = FindOrCreate(document, xpath);
 
         foreach (XmlElement element in SourceElements(source))
@@ -1071,6 +1177,11 @@ public static class Mii
         if (source == null)
         {
             return document;
+        }
+
+        if (source is MiiUnparsedText unparsed)
+        {
+            return UnparsedTextLink(document, xpath, unparsed);
         }
 
         XmlNode node = FindOrCreate(document, xpath);
@@ -1124,6 +1235,11 @@ public static class Mii
         if (source == null)
         {
             return document;
+        }
+
+        if (source is MiiUnparsedText unparsed)
+        {
+            return UnparsedTextLink(document, xpath, unparsed);
         }
 
         XmlDocument sourceDocument = ToXml(source);
@@ -1558,11 +1674,20 @@ public static class Mii
         return result;
     }
 
+    /// <summary>map(key, value, ...): a new map. map(map, key, value) is a new map with the entries of the map and the
+    /// pair put over them; the source map stays as it is (measured on MII).</summary>
     public static Dictionary<string, string> Map(params object[] keysAndValues)
     {
         Dictionary<string, string> result = new Dictionary<string, string>();
+        int start = 0;
 
-        for (int index = 0; index + 1 < keysAndValues.Length; index += 2)
+        if (keysAndValues.Length % 2 == 1 && keysAndValues[0] is IDictionary<string, string>)
+        {
+            result = new Dictionary<string, string>(ToMap(keysAndValues[0]));
+            start = 1;
+        }
+
+        for (int index = start; index + 1 < keysAndValues.Length; index += 2)
         {
             result[ToStr(keysAndValues[index])] = ToStr(keysAndValues[index + 1]);
         }
@@ -1585,10 +1710,40 @@ public static class Mii
         return ToMap(map).TryGetValue(ToStr(key).Trim(), out value) ? value : "null";
     }
 
+    /// <summary>List{index}: the element at a 0-based index. An index behind the end fails (measured on MII:
+    /// Unable to retrieve value from "Local.X{3}". [Index: 3, Size: 3]).</summary>
     public static string ListGet(object list, int index)
     {
         List<string> items = ToList(list);
-        return index >= 0 && index < items.Count ? items[index] : string.Empty;
+
+        if (index < 0 || index >= items.Count)
+        {
+            throw new InvalidOperationException("Unable to retrieve value from the list. [Index: " + index + ", Size: " + items.Count + "]");
+        }
+
+        return items[index];
+    }
+
+    /// <summary>The elements an Iterator runs over: a list; a text in MII's list notation is read as that list. A map,
+    /// a text that is no list and nothing at all give no pass (measured on MII: an Iterator over a map local, over
+    /// map("K", "v") and over a text runs no pass and does not fail).</summary>
+    public static List<string> IteratorItems(object source)
+    {
+        List<string> list = source as List<string>;
+
+        if (list != null)
+        {
+            return list;
+        }
+
+        string text = source as string;
+
+        if (source == null || source is IDictionary<string, string> || (text != null && !(text.Trim().StartsWith("[") && text.Trim().EndsWith("]"))))
+        {
+            return new List<string>();
+        }
+
+        return ToList(source);
     }
 
     public static int Size(object value)
@@ -1728,9 +1883,11 @@ public static class Mii
         return HashOrder(items.Keys).Select((key) => items[key]).ToList();
     }
 
+    /// <summary>put(map, key, value): a new map with the pair; the source map stays as it is (measured on MII, unlike
+    /// append() on a list).</summary>
     public static Dictionary<string, string> Put(object map, object key, object value)
     {
-        Dictionary<string, string> items = ToMap(map);
+        Dictionary<string, string> items = new Dictionary<string, string>(ToMap(map));
         items[ToStr(key)] = ToStr(value);
         return items;
     }
@@ -1810,7 +1967,45 @@ public static class Mii
             parts.RemoveAt(parts.Count - 1);
         }
 
-        return parts.Select((part) => part.Trim()).ToList();
+        return parts.Select(ListToken).ToList();
+    }
+
+    private static readonly string[] TokenTypes =
+    {
+        "string", "password", "binary", "boolean", "byte", "short", "integer", "long", "double", "float", "timestamp", "xml", "list", "map", "<unknown>"
+    };
+
+    /// <summary>A part of stringtolist as MII reads it (SAP's VariantData): trimmed; a part in brackets is a typed value,
+    /// [string:a] is the text a, [&lt;null&gt;] the empty text, and a part in brackets without a type fails (measured on
+    /// MII: last(stringtolist("[x]", ",")) raises "String index out of range: -1").</summary>
+    private static string ListToken(string part)
+    {
+        string text = StringTrim(part);
+
+        if (text.Length < 2 || text[0] != '[' || text[text.Length - 1] != ']')
+        {
+            return text;
+        }
+
+        string inner = text.Substring(1, text.Length - 2);
+        int colon = inner.IndexOf(':');
+
+        if (inner == "<null>")
+        {
+            return string.Empty;
+        }
+
+        if (colon < 0)
+        {
+            throw new ArgumentException("String index out of range: -1");
+        }
+
+        if (Array.IndexOf(TokenTypes, StringTrim(inner.Substring(0, colon)).ToLowerInvariant()) < 0)
+        {
+            throw new FormatException("Conversion Exception");
+        }
+
+        return inner.Substring(colon + 1);
     }
 
     public static string ListToString(object list, params object[] delimiter)
@@ -1846,18 +2041,43 @@ public static class Mii
         return value.Substring(value.Length - count);
     }
 
-    /// <summary>stringpart(text, start, length) with a 1-based start: stringpart("Football", 1, 1) = "F".</summary>
+    /// <summary>stringpart(text, start, length) with a 1-based start: stringpart("Football", 1, 1) = "F". It does not
+    /// clip (measured on MII): a start below 1, a part that reaches behind the end, a negative length and an empty text
+    /// fail as Java's substring does ("String index out of range: 6"); length 0 gives "", also just behind the end.</summary>
     public static string StringPart(object text, object start, object length)
     {
         string value = ToStr(text);
-        int begin = Math.Max(0, ToInt(start) - 1);
+        int begin = ToInt(start) - 1;
+        int end = begin + ToInt(length);
+        int wrong = begin < 0 ? begin : end > value.Length ? end : end < begin ? end - begin : 0;
 
-        if (begin >= value.Length)
+        if (begin < 0 || end > value.Length || end < begin)
         {
-            return string.Empty;
+            throw new ArgumentException("String index out of range: " + wrong);
         }
 
-        return value.Substring(begin, Math.Max(0, Math.Min(value.Length - begin, ToInt(length))));
+        return value.Substring(begin, end - begin);
+    }
+
+    /// <summary>stringtrim(text) as Java's trim: every character up to U+0020 at both ends (blank, tab, line feed,
+    /// carriage return, EOT ...) is removed, the no-break space U+00A0 stays (measured on MII).</summary>
+    public static string StringTrim(object text)
+    {
+        string value = ToStr(text);
+        int start = 0;
+        int end = value.Length;
+
+        while (start < end && value[start] <= ' ')
+        {
+            start++;
+        }
+
+        while (end > start && value[end - 1] <= ' ')
+        {
+            end--;
+        }
+
+        return value.Substring(start, end - start);
     }
 
     /// <summary>stringindexof counts from 1 and gives 0 when the part is missing (measured on MII:
@@ -1996,10 +2216,21 @@ public static class Mii
         Stack<int> groups = new Stack<int>();
         int atom = -1;
         int index = 0;
+        bool multiline = Regex.IsMatch(pattern, @"\(\?[a-zA-Z]*m");
 
         while (index < pattern.Length)
         {
             char c = pattern[index];
+
+            if (!multiline && (c == '$' || (c == '\\' && index + 1 < pattern.Length && pattern[index + 1] == 'Z')))
+            {
+                // Java: $ and \Z also hold before one line terminator at the very end (\n, \r\n, \r, U+0085, U+2028,
+                // U+2029), .NET only before \n; \z is the strict end in both (measured on MII)
+                result.Append(JavaEnd);
+                index += c == '$' ? 1 : 2;
+                atom = -1;
+                continue;
+            }
 
             if (c == '\\' && index + 1 < pattern.Length)
             {
@@ -2070,6 +2301,8 @@ public static class Mii
 
         return result.ToString();
     }
+
+    private const string JavaEnd = @"(?=(?:\r\n|[\n\r\u0085  ])?\z)";
 
     private static int QuantifierEnd(string pattern, int index)
     {
@@ -2749,6 +2982,13 @@ public static class Mii
     }
 
     /// <summary>True when the exception is the transaction's own Terminate Transaction (not to be caught there).</summary>
+    /// <summary>Call.Input behind a Transaction Call: MII writes the value the callee left in its input back into the
+    /// call action. The default mode has the value the call passed (the simulation mode reads the callee's).</summary>
+    public static T CallInput<T>(string actionName, string input, T passed)
+    {
+        return passed;
+    }
+
     public static bool IsTerminationOf(Exception exception, string transactionPath)
     {
         TransactionTerminatedException termination = exception as TransactionTerminatedException;

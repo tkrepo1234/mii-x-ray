@@ -8,7 +8,7 @@ import { TypeKind, Naming, UniqueNames, CsLiteral, DEFAULT_LIMIT, limitedDefault
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.8.1';
+export const TOOL_VERSION = '2.9.0';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -291,8 +291,10 @@ function readingRules() {
     '//   - Text and numbers: a boolean as text is 1 or 0; a number as text has no exponent and at most 12 decimals (12.0',
     '//     is 12, not-a-number and a division by zero are NA); == converts the right side to the type of the left side',
     '//     (Mii.AreEqual); < and > compare numbers only (Mii.ToNumber: "" makes the comparison false, other text fails).',
-    '//   - A map lists its keys in hash order (Mii.Keys, Mii.Values, a loop over a map), never in the order they were put;',
-    '//     Map{Key} of a missing key is "", getvaluefromMap of a missing key the text "null".',
+    '//   - A map lists its keys in hash order (Mii.Keys, Mii.Values), never in the order they were put; Map{Key} of a',
+    '//     missing key is "", getvaluefromMap of a missing key the text "null"; an Iterator over a map runs no pass.',
+    '//   - Doc{xpath} of an element is its own direct text (not the text of its child elements); List{n} counts from 0 and',
+    '//     fails behind the end, so does stringpart (it does not clip); Assign XML of a whole document copies it.',
     '//   - An XML link writes to a node that exists: an XPath that selects nothing fails ("No nodes found"). Assign XML at',
     '//     an XPath replaces the selected element by the source element (the source\'s name wins).',
     '//   - An XML link (Assign XML, Append XML ...) parses a text source when it runs (Mii.XmlFromText): well-formed XML',
