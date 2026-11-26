@@ -28,6 +28,7 @@ const PARAM_SLOT = /^Param\.(\d+)$/;
 const SECRET = /password|passwort|secret|^pin$/i;
 const SINGLE_ROW_COLUMN_PATH = /^\/?Row\/([A-Za-z_][A-Za-z0-9_]*)$/;
 const WORD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const XML_LINK_NAMES = { AssignXml: 'Assign XML', AppendXml: 'Append XML', AppendAfterXml: 'Append After XML', ReplaceXml: 'Replace XML' };
 const PLAIN_INPUT_TYPES = [TypeKind.String, TypeKind.Bool, TypeKind.Int, TypeKind.Long, TypeKind.Double, TypeKind.Decimal];
 
 /** Settings of a transaction call that only steer the MII runtime. */
@@ -984,16 +985,17 @@ export class TransactionEmitter {
       return [this._removeXml(target, selector)];
     }
 
-    const value = this._linkValue(link, target.type);
-    const xmlTarget = target.type.kind === TypeKind.Xml || target.type.kind === TypeKind.Rowset || target.type.kind === TypeKind.Row;
+    let value = this._linkValue(link, target.type);
+    const textSource = isTextXmlSource(link, target.type, value);
 
-    if (kind === 'AssignXml' && xmlTarget && value.type.kind === TypeKind.String && value.xmlCode === null) {
-      // text reaches an XML target only through Assign (Assign Value); Assign XML of text delivers nothing
-      this.note('Assign XML of a text into ' + link.to + ' has no effect in MII (text needs Assign Value): ' + oneLine(link.from));
-      return ['// X-Ray: no effect in MII (Assign XML of a text; the target keeps its value): ' + oneLine(link.to) + ' = ' + oneLine(link.from)];
+    if (textSource) {
+      // measured on MII: an XML link parses a text source; well-formed XML is used like a document, any other text is
+      // ignored (the target keeps its value)
+      this._noteTextSource(link, value);
+      value = TypedCode.primary('Mii.XmlFromText(' + value.code + ')', CsType.Xml);
     }
 
-    if (selector === null && (kind === 'Assign' || kind === 'AssignXml')) {
+    if (selector === null && (kind === 'Assign' || kind === 'AssignXml') && !textSource) {
       return [target.code + ' = ' + convertTo(value, target.type).code + ';'];
     }
 
@@ -1022,6 +1024,18 @@ export class TransactionEmitter {
     }
 
     return [xmlEdit(target, method, pathCode + ', ' + value.code)];
+  }
+
+  /** The note of an XML link with a text source: none for a literal that is well-formed XML (it always works). */
+  _noteTextSource(link, value) {
+    const name = XML_LINK_NAMES[link.kind];
+    const fixed = value.isLiteral && !/[#\\]/.test(value.literalText);
+
+    if (!fixed) {
+      this.note(name + ' of a text into ' + link.to + ': MII parses the text at run time, a text that is not well-formed XML is ignored silently: ' + oneLine(link.from));
+    } else if (MiiXml.tryParse(value.literalText) === null) {
+      this.note(name + ' of a text into ' + link.to + ' has no effect in MII (the text is not well-formed XML): ' + oneLine(link.from));
+    }
   }
 
   _removeXml(target, selector) {
@@ -1426,8 +1440,11 @@ export class TransactionEmitter {
         order.push(input.name);
       }
 
-      if (target.selector === null) {
-        const value = convertTo(this._linkValue(link, input.type), input.type);
+      const linked = target.selector === null ? this._linkValue(link, input.type) : null;
+
+      // an XML link with a text source goes the way of the element links below: MII parses the text when the link runs
+      if (linked !== null && !isTextXmlSource(link, input.type, linked)) {
+        const value = convertTo(linked, input.type);
 
         if (documents.has(input.name)) {
           lines.push(documents.get(input.name) + ' = ' + convertTo(value, CsType.Xml).code + ';');
@@ -1770,6 +1787,12 @@ function directSelectorWrite(target, selector, value) {
   }
 
   return null;
+}
+
+/** An XML link whose source is a text and whose target is XML: MII parses the text when the link runs. */
+function isTextXmlSource(link, targetType, value) {
+  const xmlTarget = targetType.kind === TypeKind.Xml || targetType.kind === TypeKind.Rowset || targetType.kind === TypeKind.Row;
+  return Object.prototype.hasOwnProperty.call(XML_LINK_NAMES, link.kind) && xmlTarget && value.type.kind === TypeKind.String && value.xmlCode === null;
 }
 
 /** An XML edit: in place for an XmlDocument, through a conversion for anything else. */

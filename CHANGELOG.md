@@ -1,5 +1,63 @@
 # Changelog
 
+## 2.8.1 - 2026-11-26
+
+Tim, 2026-11-26: the rule "Assign XML of a text has no effect" was wrong. Measured on MII 15.5 SP1 Patch 23 on
+2026-11-26 (`ZZ_RETEST3/trxAssignXmlTextToXPath`, cases A to H): an XML link parses a text source.
+
+- Well-formed XML text is used like a document. Assign XML at an XPath replaces the selected element by the parsed
+  root element (the source's name wins), Assign XML without an XPath makes the whole xml property the parsed document,
+  Append XML appends the parsed root element as last child.
+- Text that is not well-formed XML (plain text, a raw `&` or `<` in a value, an empty text) is ignored: the target
+  keeps its value, no exception, nothing reports it.
+- Plain Assign of such a text to an XPath writes the markup as the text of the node (unchanged in X-Ray).
+
+Generated code:
+
+- An XML link (Assign XML, Append XML, Append After XML, Replace XML) with a text source into an XML target is code
+  again: `Mii.AssignXml(doc, "/a/b", Mii.XmlFromText(text));`. Before (2.2.0 to 2.8.0) an Assign XML of a text was the
+  comment `// X-Ray: no effect in MII (Assign XML of a text; the target keeps its value)`; the other XML links passed
+  the text as it was.
+- Assign XML of a text without an XPath is `Mii.AssignXml(doc, "/*", Mii.XmlFromText(text));`, not an assignment: the
+  target keeps its value when the text is not well-formed. Such a local is declared at the top with its MII default.
+- An XML link with a text source into a whole XML input of a call goes the way of the element links: the input starts
+  from the callee's default and the link runs on it (before: `Mii.ToXml(text)` as the argument).
+- The reading rules of the header have a line for it.
+
+Notes:
+
+- `... Assign XML of a text into Local.X{/a/b} has no effect in MII (text needs Assign Value): ...` is gone. Such a
+  link is listed as `Assign XML of a text into Local.X{/a/b}: MII parses the text at run time, a text that is not
+  well-formed XML is ignored silently: ...` (also for Append XML, Append After XML, Replace XML).
+- A literal source that is well-formed XML gets no note; a literal that is not well-formed gets `... has no effect in
+  MII (the text is not well-formed XML): ...`.
+
+Runtime (`Mii`):
+
+- New: `Mii.XmlFromText(text)`: the parsed document, or null when the text is not well-formed XML (also when it is
+  empty).
+- `Mii.AssignXml`, `Mii.AppendXml`, `Mii.AppendAfterXml`, `Mii.ReplaceXml` read a text source through it and do
+  nothing for null. So the files of earlier versions, which pass the text itself, follow the measured rule in the
+  simulation mode too; before a text that started with `<` and was not well-formed raised an XmlException. No
+  signature changed.
+
+Simulation mode (`tools/sim-convert`): no change of its own, it carries the new runtime. A 2.8.0 file keeps its
+comment for an Assign XML of a text (the converter does not bring the link back): X-Ray such a transaction again.
+
+Not changed: the C# console (it stays at the 2.1 output), XML links into properties of other actions, plain Assign of
+a text to a whole xml property (it parses the text, as before).
+
+Tests: `web/test/simrun.mjs` has 19 more checks (123 in all): the measured cases A to H (`SIM/trxXmlText`), Append XML
+of a text with a raw `&`, Replace XML of a text, a text into an XML input of a call. Corpus `BLS/projects` (without
+`BB_BUILDINGBLOCK`, which is no longer there): 621 of 621 files (387 transactions, 234 folders) compile in the default
+and in the simulation mode; `BB_BUILDINGBLOCK` of bls-project-005: 219 of 219 (156 transactions, 63 folders) in both
+modes. Against 2.8.0 the generated files differ only in the two header lines and at XML links with a text source:
+`BLS/projects` 11 links (3 in transaction files, 8 in folder files; all Assign XML without an XPath, comment -> code,
+note reworded), `BB_BUILDINGBLOCK` 4 links (Append XML of a well-formed literal, now through `Mii.XmlFromText`, no
+note). 80 files written by 2.8.0 convert and compile with the new runtime; the minified page generates the same 621
+files; `staticfiles.mjs` and `defaults.mjs` OK; `build.cmd test` 32 of 32; `tools\corpus-check.ps1` (console) 387 of
+387. `web/dist/mii-x-ray.html`: 251 KB -> 254 KB. The page was not opened in a browser for this version.
+
 ## 2.8.0 - 2026-11-25
 
 Tim, 2026-11-25: X-Ray follows the newest findings of the SAP Manufacturing Suite Definitive Guide. The guide of

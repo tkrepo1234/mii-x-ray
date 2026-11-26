@@ -8,7 +8,7 @@ import { TypeKind, Naming, UniqueNames, CsLiteral, DEFAULT_LIMIT, limitedDefault
 import { ObjectPath } from './sources.js';
 import { webFilePath } from './staticfiles.js';
 
-export const TOOL_VERSION = '2.8.0';
+export const TOOL_VERSION = '2.8.1';
 
 const xmlText = (text) => (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -295,6 +295,8 @@ function readingRules() {
     '//     Map{Key} of a missing key is "", getvaluefromMap of a missing key the text "null".',
     '//   - An XML link writes to a node that exists: an XPath that selects nothing fails ("No nodes found"). Assign XML at',
     '//     an XPath replaces the selected element by the source element (the source\'s name wins).',
+    '//   - An XML link (Assign XML, Append XML ...) parses a text source when it runs (Mii.XmlFromText): well-formed XML',
+    '//     text is used like a document, any other text is ignored silently (the target keeps its value; measured on MII).',
     '//   - Improvements must keep the interfaces and the behaviour (sorting, empty checks, returned values) unless a',
     '//     change is asked for; list every behaviour change separately.',
     '//   - The notes below are problems of the MII objects themselves (stale links, undeclared properties); the code',

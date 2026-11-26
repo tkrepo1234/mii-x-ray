@@ -294,6 +294,43 @@ const objects = {
       ],
     })],
   }),
+  // 2.8.1: XML links with a text source, measured on MII 15.5 SP1 Patch 23 (ZZ_RETEST3 of 2026-11-26, cases A to H)
+  'SIM/trxXmlText.trx': trx({
+    outputs: ['A1', 'A2', 'B1', 'B2', 'C1', 'D1', 'D2', 'E1', 'E2', 'F1', 'F2', 'G1', 'G2', 'H1', 'H2', 'R1', 'Done'].map((name) => [name, 'string', '?']),
+    locals: [['Sfcs', 'string', '<Sfcs><Sfc>SFC1</Sfc><Sfc>SFC2</Sfc></Sfcs>'], ['Plain', 'string', 'plain text'], ['Amp', 'string', '<Sfcs><Sfc>A&B</Sfc></Sfcs>'],
+      ['Empty', 'string', ''], ['DocA', 'xml', '<Root><Sfcs/></Root>'], ['DocB', 'xml', '<Root><Sfcs/></Root>'], ['DocC', 'xml', '<Old/>'],
+      ['DocD', 'xml', '<Root><Sfcs><Sfc>SFC1</Sfc></Sfcs></Root>'], ['DocE', 'xml', '<Root><Sfcs/></Root>'], ['DocF', 'xml', '<Root><Sfcs>keep</Sfcs></Root>'],
+      ['DocF2', 'xml', '<Old/>'], ['DocG', 'xml', '<Root><Sfcs>keep</Sfcs></Root>'], ['DocG2', 'xml', '<Root><Sfcs>keep</Sfcs></Root>'],
+      ['DocH', 'xml', '<Root><Sfcs>keep</Sfcs></Root>'], ['DocH2', 'xml', '<Old/>'], ['DocR', 'xml', '<Root><Sfcs>old</Sfcs></Root>']],
+    actions: [['Work', 'Assignment', {}]],
+    steps: [step('ActionSequence', 'Sequence_1', {
+      name: 'Work',
+      outgoing: [
+        ['Local.DocA{/Root/Sfcs}', 'Local.Sfcs', 'AssignXml'], ['Transaction.A1', 'Local.DocA{count(/Root/Sfcs/Sfc)}'], ['Transaction.A2', 'Local.DocA'],
+        ['Local.DocB{/Root/Sfcs}', 'Local.Sfcs'], ['Transaction.B1', 'Local.DocB{count(/Root/Sfcs/*)}'], ['Transaction.B2', 'Local.DocB{/Root/Sfcs}'],
+        ['Local.DocC', 'Local.Sfcs', 'AssignXml'], ['Transaction.C1', 'Local.DocC'],
+        ['Local.DocD{/Root/Sfcs}', '"<Flag>true</Flag>"', 'AppendXml'], ['Transaction.D1', 'Local.DocD{name(/Root/Sfcs/*[last()])}'], ['Transaction.D2', 'Local.DocD'],
+        ['Local.DocE{/Root/Sfcs}', '"<Other><X>1</X></Other>"', 'AssignXml'], ['Transaction.E1', 'Local.DocE{name(/Root/*)}'], ['Transaction.E2', 'Local.DocE'],
+        ['Local.DocF{/Root/Sfcs}', 'Local.Plain', 'AssignXml'], ['Transaction.F1', 'Local.DocF'],
+        ['Local.DocF2', 'Local.Plain', 'AssignXml'], ['Transaction.F2', 'Local.DocF2'],
+        ['Local.DocG{/Root/Sfcs}', 'Local.Amp', 'AssignXml'], ['Transaction.G1', 'Local.DocG'],
+        ['Local.DocG2{/Root/Sfcs}', 'Local.Amp', 'AppendXml'], ['Transaction.G2', 'Local.DocG2'],
+        ['Local.DocH{/Root/Sfcs}', 'Local.Empty', 'AssignXml'], ['Transaction.H1', 'Local.DocH'],
+        ['Local.DocH2', 'Local.Empty', 'AssignXml'], ['Transaction.H2', 'Local.DocH2'],
+        ['Local.DocR{/Root/Sfcs}', '"<New/>"', 'ReplaceXml'], ['Transaction.R1', 'Local.DocR'],
+        ['Transaction.Done', '"yes"'],
+      ],
+    })],
+  }),
+  'SIM/trxReqText.trx': trx({
+    outputs: [['Echo1', 'string', ''], ['Echo2', 'string', '']],
+    locals: [['Plain', 'string', 'plain text'], ['Req', 'string', '<Req><Sfc>S9</Sfc><Keep>text</Keep></Req>']],
+    actions: [['CallPlain', 'TransactionCall', { TransactionName: 'SIM/trxReqCallee', ResetState: 'true' }], ['CallText', 'TransactionCall', { TransactionName: 'SIM/trxReqCallee', ResetState: 'true' }]],
+    steps: [
+      step('ActionSequence', 'Sequence_1', { name: 'CallPlain', incoming: [['CallPlain.Request', 'Local.Plain', 'AssignXml']], outgoing: [['Transaction.Echo1', 'CallPlain.Echo']] }),
+      step('ActionSequence', 'Sequence_2', { name: 'CallText', incoming: [['CallText.Request', 'Local.Req', 'AssignXml']], outgoing: [['Transaction.Echo2', 'CallText.Echo']] }),
+    ],
+  }),
   'SIM/sqlMulti.tqsq': sql('do begin select A, END from X; select B from Y; end', { UseTypedParams: 'F' }),
   'SIM/trxStar.trx': trx({
     outputs: [['Txt', 'string', ''], ['Dyn1', 'string', ''], ['Dyn2', 'string', ''], ['Dyn3', 'string', ''], ['Dyn4', 'string', '']],
@@ -355,6 +392,8 @@ public static class Harness
         Run("throwcaught", "SIM/trxThrowCaught", []);
         Run("req", "SIM/trxReqCaller", []);
         Run("expr", "SIM/trxExpr", []);
+        Run("xmltext", "SIM/trxXmlText", []);
+        Run("reqtext", "SIM/trxReqText", []);
     }
 
     private static void Run(string label, string path, Dictionary<string, string> inputs)
@@ -628,5 +667,25 @@ has('expr L1=[[string:a], [string:b]]', 'a list as text is [[string:a], [string:
 has('expr D3=0.3', 'a double as text has at most 12 decimals (0.1 + 0.2 is 0.3)');
 has('expr D4=100000000000000000000', 'a double as text has no exponent');
 has('expr Q1=0', '&& and || share one level, left to right: (A || B) && C');
+// 2.8.1: XML links with a text source, measured on MII 15.5 SP1 Patch 23 (ZZ_RETEST3 of 2026-11-26)
+has('xmltext A1=2', 'A: Assign XML of well-formed text to an XPath gives elements (count 2)');
+has('xmltext A2=<Root><Sfcs><Sfc>SFC1</Sfc><Sfc>SFC2</Sfc></Sfcs></Root>', 'A: the target element is replaced by the parsed root element');
+has('xmltext B1=0', 'B: Assign of the same text to an XPath gives no elements');
+has('xmltext B2=<Sfcs><Sfc>SFC1</Sfc><Sfc>SFC2</Sfc></Sfcs>', 'B: the markup arrives as the text of the node');
+has('xmltext C1=<Sfcs><Sfc>SFC1</Sfc><Sfc>SFC2</Sfc></Sfcs>', 'C: Assign XML of well-formed text without an XPath makes the local the parsed document');
+has('xmltext D1=Flag', 'D: Append XML of well-formed text appends the parsed root element as last child');
+has('xmltext D2=<Root><Sfcs><Sfc>SFC1</Sfc><Flag>true</Flag></Sfcs></Root>', 'D: the children before stay');
+has('xmltext E1=Other', 'E: Assign XML of a text with another root name replaces the target element, the source\'s name wins');
+has('xmltext E2=<Root><Other><X>1</X></Other></Root>', 'E: the parsed element stands in the place of the target element');
+has('xmltext F1=<Root><Sfcs>keep</Sfcs></Root>', 'F: Assign XML of plain text has no effect');
+has('xmltext F2=<Old />', 'F: Assign XML of plain text without an XPath leaves the local as it is');
+has('xmltext G1=<Root><Sfcs>keep</Sfcs></Root>', 'G: Assign XML of a text with a raw & has no effect');
+has('xmltext G2=<Root><Sfcs>keep</Sfcs></Root>', 'G: Append XML of a text with a raw & has no effect');
+has('xmltext H1=<Root><Sfcs>keep</Sfcs></Root>', 'H: Assign XML of an empty text has no effect');
+has('xmltext H2=<Old />', 'H: Assign XML of an empty text without an XPath leaves the local as it is');
+has('xmltext R1=<Root><Sfcs><New /></Sfcs></Root>', 'Replace XML of well-formed text puts the parsed root element into the selected node');
+has('xmltext Done=yes', 'F, G, H: no exception, the links after them run');
+has('reqtext Echo1=|default', 'Assign XML of plain text into an XML input of a call: the input keeps the callee default');
+has('reqtext Echo2=S9|text', 'Assign XML of well-formed text into an XML input of a call: the input is the parsed document');
 console.log(failures === 0 ? 'OK (' + simulationFile + ')' : failures + ' failure(s), see ' + join(workFolder, 'output.txt'));
 process.exit(failures === 0 ? 0 : 1);

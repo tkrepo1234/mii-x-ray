@@ -841,6 +841,38 @@ public static class Mii
         return document;
     }
 
+    /// <summary>The text source of an XML link (Assign XML, Append XML ...) as MII reads it (measured on MII): a text
+    /// that is well-formed XML is parsed and used like a document; any other text (plain text, a raw &amp; or &lt; in a
+    /// value, an empty text) gives null, and the link does nothing: the target keeps its value, nothing reports it.</summary>
+    public static XmlDocument XmlFromText(object text)
+    {
+        string trimmed = ToStr(text).Trim();
+
+        if (trimmed.Length == 0)
+        {
+            return null;
+        }
+
+        XmlDocument document = new XmlDocument();
+
+        try
+        {
+            document.LoadXml(trimmed);
+        }
+        catch (XmlException)
+        {
+            return null;
+        }
+
+        return document;
+    }
+
+    /// <summary>The source of an XML link: a text is parsed as MII does (XmlFromText). Null: the link does nothing.</summary>
+    private static object XmlLinkSource(object source)
+    {
+        return source is string ? XmlFromText(source) : source;
+    }
+
     /// <summary>Doc{xpath}: the text of the first matching node, or the value of an XPath expression such as count(...).</summary>
     public static string XPath(object source, string xpath)
     {
@@ -975,9 +1007,17 @@ public static class Mii
 
     /// <summary>Assign XML link: without XPath the source document replaces the whole document; at an XPath the selected
     /// element is replaced by a copy of the source element, so the source's element name wins (measured on MII:
-    /// Request{/Envelope/Body} from Template{/Template} gives Envelope/Template). A source that is no XML has no effect.</summary>
+    /// Request{/Envelope/Body} from Template{/Template} gives Envelope/Template). A source that is no XML has no effect; a text is parsed first
+    /// (XmlFromText), a text that is not well-formed XML has no effect either.</summary>
     public static XmlDocument AssignXml(XmlDocument document, string xpath, object source)
     {
+        source = XmlLinkSource(source);
+
+        if (source == null)
+        {
+            return document;
+        }
+
         XmlDocument sourceDocument = ToXml(source);
 
         if (sourceDocument.DocumentElement == null)
@@ -998,9 +1038,17 @@ public static class Mii
         return document;
     }
 
-    /// <summary>Append XML link: the source root element becomes the last child of the selected node.</summary>
+    /// <summary>Append XML link: the source root element becomes the last child of the selected node. A text is parsed
+    /// first (XmlFromText); a text that is not well-formed XML has no effect.</summary>
     public static XmlDocument AppendXml(XmlDocument document, string xpath, object source)
     {
+        source = XmlLinkSource(source);
+
+        if (source == null)
+        {
+            return document;
+        }
+
         XmlNode node = FindOrCreate(document, xpath);
 
         foreach (XmlElement element in SourceElements(source))
@@ -1014,9 +1062,17 @@ public static class Mii
         return document;
     }
 
-    /// <summary>Append After XML link: the source root element is inserted after the selected node.</summary>
+    /// <summary>Append After XML link: the source root element is inserted after the selected node. A text source as
+    /// in Append XML.</summary>
     public static XmlDocument AppendAfterXml(XmlDocument document, string xpath, object source)
     {
+        source = XmlLinkSource(source);
+
+        if (source == null)
+        {
+            return document;
+        }
+
         XmlNode node = FindOrCreate(document, xpath);
 
         foreach (XmlElement element in SourceElements(source))
@@ -1059,9 +1115,17 @@ public static class Mii
         return elements;
     }
 
-    /// <summary>Replace XML link: the children of the selected node are replaced by the source root element.</summary>
+    /// <summary>Replace XML link: the children of the selected node are replaced by the source root element. A text
+    /// source as in Append XML.</summary>
     public static XmlDocument ReplaceXml(XmlDocument document, string xpath, object source)
     {
+        source = XmlLinkSource(source);
+
+        if (source == null)
+        {
+            return document;
+        }
+
         XmlDocument sourceDocument = ToXml(source);
         XmlNode node = FindOrCreate(document, xpath);
 

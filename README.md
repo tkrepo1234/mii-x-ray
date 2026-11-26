@@ -184,9 +184,10 @@ Since 2.2.0 also (verified behaviour from the Definitive Guide and Tim's project
 Conditional evaluate every part (C# `&` / `|`); `if()` returns a number, also for text branches (`Mii.If`, with a
 note); `list(list, x)` adds the elements of a list argument; `first()`/`last()` of an empty list fail;
 `encode`/`decode` are form encoding; `currenttimezoneoffset` is in milliseconds; an Iterator over a map gives its
-keys and has no `Item`; Assign XML of a text has no effect; a query's `RowCount` becomes `Query.RowCount`; a
+keys and has no `Item`; a query's `RowCount` becomes `Query.RowCount`; a
 `TransactionName` set by an expression is a call chosen at runtime; only the first child of a Catch is its handler.
 Calls inside loops with ResetState false, asynchronous calls and transactions with ThrowOnLinkError off are marked.
+(2.2.0 to 2.8.0 also said "Assign XML of a text has no effect"; that was wrong, see 2.8.1 below.)
 
 Since 2.8.0 (the guide of 2026-11-23, re-measured on MII 15.5 SP1):
 
@@ -216,6 +217,16 @@ Since 2.8.0 (the guide of 2026-11-23, re-measured on MII 15.5 SP1):
   only element links fill starts from the callee's default.
 - Xacute query: an input the query does not map keeps its default; a mapped text input whose parameter the action
   does not set arrives as the parameter's value (also empty).
+
+Since 2.8.1 (measured on MII 15.5 SP1 Patch 23 on 2026-11-26):
+
+- An XML link (Assign XML, Append XML, Append After XML, Replace XML) parses a text source when it runs
+  (`Mii.XmlFromText`). Well-formed XML text is used like a document: Assign XML at an XPath replaces the selected
+  element by the parsed root element, Assign XML without an XPath makes the whole property the parsed document, Append
+  XML appends the parsed root element as last child. Any other text (plain text, a raw `&` or `<` in a value, an empty
+  text) is ignored silently: the target keeps its value, no exception. A note marks such a link unless its source is a
+  literal that is well-formed XML.
+- Plain Assign of such a text to an XPath writes the markup as the text of the node (no elements).
 
 ## Limits
 
